@@ -263,6 +263,9 @@ static class HostlessRoomUiChecks
             await accepted;
             await Wait(() => me.Identity!.Host && riley.Snapshot?.Media?.Title == "My film" && !riley.Identity.Host, "Watch together gives the stream to whoever starts a video, for everyone");
             Console.WriteLine($"The other member saw the new video {switching.ElapsedMilliseconds} ms after the click");
+            // Nothing else changes in the room for a moment: the app must already hold the state it published itself.
+            await Task.Delay(700);
+            check(Field("target") is PlaybackState && Field("loadedMedia") as string == me.Snapshot?.Media?.Id, "taking the stream over leaves the app following the playback state it just published");
             RileyReady();
             await Wait(() => (string)Field("currentPage")! == "Room" && (Field("playingItem") as MediaItem)?.Id == mine.Id && Field("bridge") is null && (bool)Field("ready")!, "the new streamer plays its own file directly");
             await Wait(() => { RileyReady(); return me.Snapshot?.Playback?.Playing == true && player.IsPlaying; }, "the room plays the new video once everyone has it");

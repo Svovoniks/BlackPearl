@@ -86,8 +86,7 @@ string[] IceServers(string peer)
     var secret = Config("TURN_SECRET");
     if (!string.IsNullOrWhiteSpace(turn) && !string.IsNullOrWhiteSpace(secret))
     {
-        // Rooms stay open for a day at a time, so credentials outlast the longest connection.
-        var username = $"{DateTimeOffset.UtcNow.AddHours(26).ToUnixTimeSeconds()}:{peer}";
+        var username = $"{DateTimeOffset.UtcNow.AddHours(8).ToUnixTimeSeconds()}:{peer}";
         var credential = Convert.ToBase64String(HMACSHA1.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(username)));
         foreach (var address in turn.Split(';', StringSplitOptions.RemoveEmptyEntries)) urls.Add(CloudflareTurn.WithCredentials(address, username, credential));
     }
@@ -112,7 +111,9 @@ app.Map("/room", async context =>
     if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
     using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
-    lifetime.CancelAfter(TimeSpan.FromHours(24));
+    // Relay credentials are handed out when a member enters and last at least twice this long, so a connection ends
+    // before they can; the app enters again by itself.
+    lifetime.CancelAfter(TimeSpan.FromHours(6));
     Room? room = null; Member? member = null;
     try
     {

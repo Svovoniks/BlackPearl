@@ -551,6 +551,8 @@ public sealed partial class RoomClient : IAsyncDisposable
         foreach (var id in negotiated.Keys) coordinator.SetConnected(id, true, now);
         ResetHostLink(); directConnected.TrySetResult();
         publishedSnapshot = null;
+        // Told before any state this member publishes, so whoever listens starts from a clean slate and then follows it.
+        Message?.Invoke(new("role", Number: 1));
         (TaskCompletionSource Completion, HostedFileSelection? Selection, bool Play, long PositionMs)[] waiting;
         lock (pendingStreams) { waiting = pendingStreams.ToArray(); pendingStreams.Clear(); }
         // A video that was waiting for the role is the first state the room receives from this member.
@@ -562,7 +564,6 @@ public sealed partial class RoomClient : IAsyncDisposable
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException) { pending.Completion.TrySetException(ex); }
         PublishHostState();
-        Message?.Invoke(new("role", Number: 1));
     }
     // Someone else took the streaming role: this member's video ends, and it follows theirs.
     private void Demote()
@@ -669,7 +670,8 @@ public sealed partial class RoomClient : IAsyncDisposable
         // Every member answers, so a silent connection can be told from a quiet one.
         if (message.Type == "clock-ping") { SendPeer(sender, new("clock-pong", Number: message.Number, Data: clock.Now.ToString())); return; }
         if (message.Type == "clock-pong") { if (sender == hostPeer && Identity?.Host == false && long.TryParse(message.Data, out var now)) clock.Receive(message.Number, now); return; }
-        if (message.Type == "bye") { DepartPeer(sender, "They closed the connection"); return; }
+        // Said on the way out, so nobody starts rebuilding a connection to someone who left; the room service confirms it.
+        if (message.Type == "bye") { DepartPeer(sender, "They left the room", left: true); return; }
         if (message.Type.StartsWith("library-", StringComparison.Ordinal))
         {
             LibraryMessage?.Invoke(sender, message with { Sender = sender }); return;

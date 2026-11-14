@@ -128,6 +128,10 @@ static class HostlessRoomFixture
         check(!aMessages.Concat(cMessages).Any(m => m.Type == "snapshot" && Wire.Read<RoomSnapshot>(m.Data!) is { Media: null } state && state.People.Any(p => p.IsHost && p.Id == b.Identity.Peer)),
             "the new streamer's first state already carries its video, so nobody sees an empty room in between");
         check(aMessages.Any(m => m is { Type: "role", Number: 0 }) && bMessages.Any(m => m is { Type: "role", Number: 1 }), "both sides of the handover are told their role changed");
+        var heard = bMessages.ToArray();
+        var roleAt = Array.FindIndex(heard, m => m is { Type: "role", Number: 1 });
+        var stateAt = Array.FindIndex(heard, m => m.Type == "snapshot" && Wire.Read<RoomSnapshot>(m.Data!).Media?.Title == "Second film");
+        check(roleAt >= 0 && stateAt > roleAt, "the new streamer hears that it holds the role before the state it publishes, so resetting for the role cannot discard that state");
         var fromB = await c.GetSourceAsync(c.Snapshot!.Media!, CancellationToken.None);
         check((await fromB.ReadAsync(2000, 700, CancellationToken.None)).SequenceEqual(secondBytes[2000..2700]), "a viewer reads the new video from the new streamer");
         var fromBAtA = await a.GetSourceAsync(a.Snapshot!.Media!, CancellationToken.None);
