@@ -50,6 +50,13 @@ public partial class MainWindow
     private void RefreshSharedLibrary()
     {
         if (GuestLibraryStatus is null) return;
+        // The streamer stopped sharing their library: go back to this app's own rather than sit in an empty one.
+        if (browsingStreamerLibrary && room is { IsConnected: true, Identity.Host: false } shared && shared.DirectControlsReady.IsCompletedSuccessfully && shared.Snapshot?.LibraryBrowsing != true)
+        {
+            var name = HostLibraryName;
+            LeaveStreamerLibrary(); SetStatus(name + " is no longer shared with the room.");
+            return;
+        }
         var guest = GuestLibrary;
         if (guest && !OwnsLibrary && !guestBrowsePending) ClearHostArtworkRequests();
         ApplyLibraryMode();

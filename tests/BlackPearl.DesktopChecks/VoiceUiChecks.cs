@@ -334,25 +334,23 @@ static class VoiceUiChecks
             await Task.Delay(500);
             check(Session() is null && voiceButton.Visibility != Visibility.Visible && card.Visibility != Visibility.Visible, $"leaving the room while in voice closes voice and its controls (session {Session() is null}, button {voiceButton.Visibility}, card {card.Visibility}, room {Field("room") is null})");
 
-            // A guest left alone after the host goes: clicking Voice says why instead of doing nothing, and voice
-            // starts by itself once the host is back.
+            // Someone left alone after the others go still has voice: it never depended on anyone staying.
             store.Setting("voiceAutoJoin", "false"); SetField("voicePreferences", Call("LoadVoicePreferences"));
-            await GuestAloneChecks(window, url, check, Wait, Field, (name, args) => Call(name, args), voiceButton, cardJoin, status, Session);
+            await LeftAloneChecks(window, url, check, Wait, Field, (name, args) => Call(name, args), voiceButton, cardJoin, status, Session);
 
-            // What guests see before the host lets them in, while the host is away, or when the host's app has no voice chat.
+            // What the Voice button says while it can't open voice yet.
             var waiting = new RoomClient();
             string Reason() => (string)typeof(MainWindow).GetMethod("VoiceUnavailableReason", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [waiting])!;
+            check(Reason() == "Connect to a room to use voice chat.", "outside a room, voice asks for one");
             typeof(RoomClient).GetProperty(nameof(RoomClient.ServerAddress))!.SetValue(waiting, url);
             typeof(RoomClient).GetProperty(nameof(RoomClient.Identity))!.SetValue(waiting, new Welcome("ROOM", "me", false, [], false));
-            typeof(RoomClient).GetProperty(nameof(RoomClient.Snapshot))!.SetValue(waiting, new RoomSnapshot([new("me", "Me", false, false)], null, null, false));
-            check(Reason() == "Voice chat opens once the host lets you in.", "a guest waiting for admission is told voice opens once the host lets them in");
-            typeof(RoomClient).GetField("admitted", flags)!.SetValue(waiting, true);
-            check(Reason() == "Voice chat starts when the host joins the room.", $"an admitted guest without a host is told voice starts when the host joins ({Reason()})");
-            typeof(RoomClient).GetField("hostPeer", flags)!.SetValue(waiting, "host");
-            check(Reason() == "Connecting to the host…", $"a guest whose host is present but not yet connected is told it is connecting ({Reason()})");
+            typeof(RoomClient).GetProperty(nameof(RoomClient.Snapshot))!.SetValue(waiting, new RoomSnapshot([new("me", "Me", false, true)], null, null, false));
+            check(Reason() == "Connecting to the room…", $"someone who just entered is told the room is still connecting ({Reason()})");
+            typeof(RoomClient).GetField("peerRecovering", flags)!.SetValue(waiting, 1);
+            check(Reason() == "Reconnecting to the room…", $"someone whose connection dropped is told it is reconnecting ({Reason()})");
+            typeof(RoomClient).GetField("peerRecovering", flags)!.SetValue(waiting, 0);
             var direct = (TaskCompletionSource)typeof(RoomClient).GetField("directConnected", flags)!.GetValue(waiting)!; direct.TrySetResult();
-            check(Reason() == "The host needs to update BlackPearl to use voice chat.",
-                "a guest whose host has an older app is told the host needs to update");
+            check(Reason() == "Voice chat isn't available in this room right now.", "a room whose state carries no voice list says voice is unavailable");
             await waiting.DisposeAsync();
         }
         finally
@@ -364,66 +362,42 @@ static class VoiceUiChecks
         }
     }
 
-    static async Task GuestAloneChecks(MainWindow window, string url, Action<bool, string> check, Func<Func<bool>, string, int, Task> wait,
+    static async Task LeftAloneChecks(MainWindow window, string url, Action<bool, string> check, Func<Func<bool>, string, int, Task> wait,
         Func<string, object?> field, Func<string, object?[], object?> call, Button voiceButton, Button cardJoin, TextBlock status,
         Func<object?> session)
     {
         Task Wait(Func<bool> condition, string label) => wait(condition, label, 25);
-        // Toasts are popups outside the window's tree; this reads the text of any that are open.
-        static IEnumerable<string> Toasts() => PresentationSource.CurrentSources.OfType<System.Windows.Interop.HwndSource>()
-            .Where(s => s.RootVisual is not null && s.RootVisual is not Window).SelectMany(s => Texts(s.RootVisual!));
-        static IEnumerable<string> Texts(System.Windows.Media.Visual root)
-        {
-            if (root is TextBlock text) yield return text.Text;
-            for (var i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(root); i++)
-                if (System.Windows.Media.VisualTreeHelper.GetChild(root, i) is System.Windows.Media.Visual child) foreach (var found in Texts(child)) yield return found;
-        }
-        var host = new RoomClient();
-        RoomClient? returned = null;
+        var first = new RoomClient();
+        RoomClient? later = null;
         try
         {
-            await host.ConnectAsync(url, "Away host", persistent: true);
-            var code = host.Identity!.Room; var key = host.Identity.HostKey;
-            var guest = (RoomClient)call("NewRoom", [])!;
-            await guest.ConnectAsync(url, "Lonely guest", code);
-            await Wait(() => host.Snapshot!.People.Any(p => p.Id == guest.Identity!.Peer), "the host sees the guest arrive");
-            host.Send(new("admit", Target: guest.Identity!.Peer));
-            await guest.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30));
-            host.SetVoice(true, true);
-            await Wait(() => guest.VoiceState(host.Identity.Peer)?.Joined == true, "the guest sees the host in voice");
-            check(session() is null, "with auto-join off, a guest is not put in voice on arrival");
-            await host.DisposeAsync();
-            await Wait(() => !guest.HostPresent && !guest.VoiceAvailable, "the guest notices the host has left");
-            await Task.Delay(300);
-            check(guest.Snapshot?.Voice is null, "once the host leaves, nobody is still listed in voice");
+            await first.ConnectAsync(url, "First in", persistent: true);
+            var code = first.Identity!.Room;
+            var member = (RoomClient)call("NewRoom", [])!;
+            await member.ConnectAsync(url, "Second in", code);
+            await member.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30));
+            first.SetVoice(true, true);
+            await Wait(() => member.VoiceState(first.Identity.Peer)?.Joined == true, "someone who entered sees who is in voice");
+            check(session() is null, "with auto-join off, entering a room does not open voice");
+            await first.DisposeAsync();
+            await Wait(() => member.Identity!.Host && member.Snapshot?.People.Length == 1 && member.VoiceAvailable, "left alone, the remaining member keeps the room and its voice chat");
+            check(member.Snapshot!.Voice!.All(v => v.Peer == member.Identity!.Peer), "whoever left is no longer listed in voice");
+            check(voiceButton.Visibility == Visibility.Visible && voiceButton.IsEnabled && voiceButton.Opacity == 1,
+                $"alone in the room, the Voice button stays available ({voiceButton.Visibility}, enabled {voiceButton.IsEnabled}, opacity {voiceButton.Opacity})");
+            call("ToggleVoice", [voiceButton, new RoutedEventArgs()]);
+            await Wait(() => session() is not null && member.VoiceState(member.Identity!.Peer)?.Joined == true, "alone in the room, joining voice works without waiting for anyone");
+            await Wait(() => cardJoin.Content as string == "Leave" && field("voiceWaitingRoom") is null, "the voice card shows the in-voice state");
 
-            check(voiceButton.Visibility == Visibility.Visible && voiceButton.IsEnabled && voiceButton.Opacity < 1,
-                $"with no host the Voice button stays clickable but looks unavailable ({voiceButton.Visibility}, enabled {voiceButton.IsEnabled}, opacity {voiceButton.Opacity}, connected {guest.IsConnected}, available {guest.VoiceAvailable})");
-            check(voiceButton.ToolTip as string == "Voice chat starts when the host joins the room.", $"its tooltip says voice waits for the host ({voiceButton.ToolTip})");
-            call("ToggleVoice", [voiceButton, new RoutedEventArgs()]);
-            await Wait(() => Toasts().Any(t => t == "Voice chat starts when the host joins the room. You'll join automatically."),
-                "clicking Voice without a host shows why, wherever the click was");
-            check(session() is null, "no microphone opens while there is no host");
-            check(cardJoin.Content as string == "Cancel" && status.Text.EndsWith("You'll join automatically.", StringComparison.Ordinal) && (voiceButton.ToolTip as string)!.Contains("Click to cancel"),
-                $"the voice controls show that voice will start when the host arrives ({cardJoin.Content}; {status.Text})");
-            call("ToggleVoice", [voiceButton, new RoutedEventArgs()]);
-            await Wait(() => Toasts().Any(t => t == "You won't join voice when the host arrives."), "clicking again cancels joining when the host arrives");
-            check(cardJoin.Content as string == "Join" && field("voiceWaitingRoom") is null, "after cancelling, the card offers Join again");
-            call("ToggleVoice", [voiceButton, new RoutedEventArgs()]);
-
-            returned = new RoomClient();
-            await returned.ConnectAsync(url, "Away host", code, key);
-            await Wait(() => ((RoomClient?)field("room"))?.DirectControlsReady.IsCompletedSuccessfully == true,
-                $"the guest reconnects to the returning host (same client {ReferenceEquals(field("room"), guest)}, guest connected {guest.IsConnected}, host present {guest.HostPresent}, recovering {guest.IsPeerRecovering})");
-            await Wait(() => session() is not null && returned.VoiceState(guest.Identity!.Peer)?.Joined == true,
-                $"when the host returns, the waiting guest joins voice by itself (session {session() is not null}, available {guest.VoiceAvailable}, waiting {field("voiceWaitingRoom")}, joining {field("voiceJoining")}, room same {ReferenceEquals(field("room"), guest)})");
-            check(field("voiceWaitingRoom") is null && voiceButton.Opacity == 1, "joining clears the waiting state");
+            later = new RoomClient();
+            await later.ConnectAsync(url, "Third in", code);
+            await later.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30));
+            await Wait(() => later.VoiceState(member.Identity!.Peer)?.Joined == true, "someone who enters later sees the person already in voice");
         }
         finally
         {
             await (Task)call("Disconnect", [false, false])!;
-            await host.DisposeAsync();
-            if (returned is not null) await returned.DisposeAsync();
+            await first.DisposeAsync();
+            if (later is not null) await later.DisposeAsync();
         }
     }
 

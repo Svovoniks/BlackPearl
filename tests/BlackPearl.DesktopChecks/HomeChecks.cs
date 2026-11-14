@@ -149,6 +149,7 @@ static class HomeChecks
             typeof(RoomClient).GetProperty("Snapshot")!.SetValue(client, snapshot);
             ((TaskCompletionSource)typeof(RoomClient).GetField("directConnected", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(client)!).SetResult();
             typeof(MainWindow).GetField("room", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, client);
+            typeof(MainWindow).GetField("browsingStreamerLibrary", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, true);
             Call("ShowPage", "Library"); Call("ShowPage", "Home");
             Check(Continuing().Length == 0 && System.Windows.Automation.AutomationProperties.GetName(Control<ScrollViewer>("HomePage")) == "Home · Fixture Host’s library",
                 "guest Home clears local progress and identifies the host's library");
@@ -175,8 +176,9 @@ static class HomeChecks
             Call("ShowPage", "Home");
             typeof(RoomClient).GetProperty("Snapshot")!.SetValue(client, snapshot with { LibraryBrowsing = false, LibraryActivity = null });
             Call("RefreshSharedLibrary");
-            Check(Continuing().Length == 0 && Suggested() == 0 && !Control<Button>("HomeMysteryPlay").IsEnabled &&
-                Control<TextBlock>("HomeStatus").Text.Contains("disabled"), "revoking browsing immediately clears every guest Home action");
+            await Until(() => Continuing().Length == 2 && !Continuing().Any(view => view.IsRemote));
+            Check(!Field<bool>("browsingStreamerLibrary") && System.Windows.Automation.AutomationProperties.GetName(Control<ScrollViewer>("HomePage")) == "Home",
+                "when the streamer stops sharing their library, Home returns to your own at once");
             typeof(MainWindow).GetField("room", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, null);
             Call("RefreshSharedLibrary");
             await Until(() => Continuing().Length == 2);

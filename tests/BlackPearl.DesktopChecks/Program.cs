@@ -1556,52 +1556,55 @@ static class Program
         // With nothing watched yet, the hero still shows the selected room with a placeholder instead of hiding.
         string HeroText(string name) => ((System.Windows.Controls.TextBlock)window.FindName(name)).Text;
         FrameworkElement HeroPart(string name) => (FrameworkElement)window.FindName(name);
-        Check(HeroPart("RoomHero").Visibility == Visibility.Visible && HeroText("RoomHeroLiveText") == "Closed" && HeroText("RoomHeroTitle") == "Nothing watched here yet" &&
-            ((System.Windows.Controls.Button)window.FindName("RoomHeroResume")).Content as string == "Open room" &&
+        Check(HeroPart("RoomHero").Visibility == Visibility.Visible && HeroText("RoomHeroLiveText") == "Away" && HeroText("RoomHeroTitle") == "Nothing watched here yet" &&
+            ((System.Windows.Controls.Button)window.FindName("RoomHeroResume")).Content as string == "Join" &&
             ((System.Windows.Controls.Button)window.FindName("RoomHeroSecondary")).Content as string == "Copy invite" && HeroPart("RoomHeroSecondary").Visibility == Visibility.Visible &&
-            HeroPart("RoomHeroBadge").Visibility == Visibility.Visible && HeroText("RoomHeroBadgeText") == "M", "an unused host room shows a closed hero with Open room, Copy invite and its initial");
+            HeroPart("RoomHeroBadge").Visibility == Visibility.Visible && HeroText("RoomHeroBadgeText") == "M", "an unused room shows its hero with Join, Copy invite and its initial");
         list.SelectedItem = guest;
-        Check(HeroText("RoomHeroLiveText") == "Offline" && ((System.Windows.Controls.Button)window.FindName("RoomHeroResume")).Content as string == "Connect" &&
-            HeroPart("RoomHeroSecondary").Visibility == Visibility.Collapsed && HeroText("RoomHeroBadgeText") == "F", "an unused guest room shows an offline hero with Connect");
-        Check(HeroPart("SavedRoomHostControls").Visibility == Visibility.Collapsed && System.Windows.Controls.Grid.GetRow(HeroPart("SavedRoomActions")) == 0 &&
-            HeroText("SavedRoomGuestHeading") == "People" && HeroText("SavedRoomSessionTitle") == "Nothing watched here yet", "a guest room drops the permissions tile and lists people instead of guests");
+        Check(HeroText("RoomHeroLiveText") == "Away" && ((System.Windows.Controls.Button)window.FindName("RoomHeroResume")).Content as string == "Join" &&
+            HeroPart("RoomHeroSecondary").Visibility == Visibility.Visible && HeroText("RoomHeroBadgeText") == "F", "a room someone else created offers the same Join and Copy invite");
+        Check(HeroPart("SavedRoomHostControls").Visibility == Visibility.Visible && System.Windows.Controls.Grid.GetRow(HeroPart("SavedRoomActions")) == 2 &&
+            HeroText("SavedRoomGuestHeading") == "People" && HeroText("SavedRoomSessionTitle") == "Nothing watched here yet" &&
+            ((System.Windows.Controls.Button)window.FindName("ConnectSavedRoomButton")).Content as string == "Join" && HeroText("SavedRoomStatus") == "Not connected" &&
+            HeroText("SavedRoomInviteHint").EndsWith("Anyone with the invitation can join", StringComparison.Ordinal),
+            "every room has the same tiles: people, what others may do with your video, and an invitation anyone can use");
         list.SelectedItem = first;
         Check(HeroText("SavedRoomCode") == "AAAAAA AAAAAA AAAAAA AAAAAA" && HeroPart("SavedRoomHostControls").Visibility == Visibility.Visible &&
-            System.Windows.Controls.Grid.GetRow(HeroPart("SavedRoomActions")) == 2 && HeroText("SavedRoomGuestHeading") == "Guests", "a host room shows its grouped code and the permissions tile");
+            HeroText("SavedRoomGuestHeading") == "People", "a room shows its grouped code and the permissions tile");
         string Initials(string text, int count) => (string)typeof(MainWindow).GetMethod("Initials", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, [text, count])!;
         Check(Initials("Spy x Family · S1E4", 2) == "SF" && Initials("The Office", 2) == "O" && Initials("holiday_video_2019 mkv", 2) == "HV" && Initials("!!!", 2) == "?",
             "title cards use the leading words' initials");
         int Hue(string title) => (int)typeof(MainWindow).GetMethod("TitleHue", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, [title])!;
         Check(Hue("Dune") == 292 && Hue("Arrival") == 92, "a title keeps the same card colour across sessions");
         list.SelectedItem = first;
-        Check(controls.IsEnabled && controls.IsChecked == false, "saved host room exposes its playback-control setting");
-        controls.IsChecked = true;
+        Check(controls.IsEnabled && controls.IsChecked == true, "others may play, pause and seek what you play unless you turn that off");
+        controls.IsChecked = false;
         var browsing = (System.Windows.Controls.CheckBox)window.FindName("SavedRoomLibraryBrowsing");
-        Check(browsing.IsEnabled && browsing.IsChecked == false, "library permission is integrated into host room settings and defaults off");
+        Check(browsing.IsEnabled && browsing.IsChecked == false, "letting others browse your library is a room setting and defaults off");
         browsing.IsChecked = true;
-        Check(store.Setting("room:" + first.Server + ":" + first.Code + ":libraryBrowsing") == "true", "library permission persists per room while offline");
+        Check(store.Setting("room:" + first.Server + ":" + first.Code + ":libraryBrowsing") == "true", "library permission persists per room while away from it");
         typeof(MainWindow).GetMethod("SavedRoomControlsChanged", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [controls, new RoutedEventArgs()]);
-        Check(store.Setting("room:" + first.Server + ":" + first.Code + ":sharedControls") == "true", "offline room setting saves immediately");
+        Check(store.Setting("room:" + first.Server + ":" + first.Code + ":sharedControls") == "false", "a room setting changed while away saves immediately");
         list.SelectedItem = second;
         Check(browsing.IsChecked == false, "library permission is isolated between saved rooms");
-        Check(controls.IsChecked == false, "each room has an independent shared-controls setting");
+        Check(controls.IsChecked == true, "each room has an independent shared-controls setting");
         list.SelectedItem = first;
-        Check(controls.IsChecked == true, "returning to a saved room restores its control setting");
+        Check(controls.IsChecked == false, "returning to a saved room restores its control setting");
         list.SelectedItem = guest;
-        Check(!browsing.IsEnabled, "guest cannot change host library permission");
-        Check(!controls.IsEnabled, "guests cannot edit room settings");
+        Check(browsing.IsEnabled && controls.IsEnabled, "in a room someone else created, what others may do with your video is still yours to choose");
         var rename = (System.Windows.Controls.Button)window.FindName("RenameSavedRoomButton");
-        Check(!rename.IsEnabled, "guest room name is read only");
+        Check(!rename.IsEnabled && rename.Visibility != Visibility.Visible, "only a room's creator is offered Rename");
         typeof(MainWindow).GetMethod("RenameHostRoom", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [guest, "Guest override"]);
-        Check(rooms.Single(x => x.Id == guest.Id).Name == guest.Name, "guest cannot rename a room through its handler");
+        Check(rooms.Single(x => x.Id == guest.Id).Name == guest.Name, "someone who did not create a room cannot rename it through its handler");
         list.SelectedItem = first;
-        Check(rename.IsEnabled, "host can rename their saved room offline");
+        Check(rename.IsEnabled, "a room's creator can rename it while away");
         typeof(MainWindow).GetMethod("RenameHostRoom", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [first, "New movie night"]);
-        Check(rooms.Single(x => x.Id == first.Id).Name == "New movie night" && store.Setting("room:" + first.Server + ":" + first.Code + ":name") == "New movie night", "host rename persists for reconnection");
+        Check(rooms.Single(x => x.Id == first.Id).Name == "New movie night" && Wire.Read<SavedRoom[]>(store.Setting("rooms")!).Single(x => x.Id == first.Id).Name == "New movie night",
+            "a rename made while away is saved, to be sent when its creator next enters");
         var roomField = typeof(MainWindow).GetField("room", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var previousRoom = roomField.GetValue(window);
         var waitingClient = new RoomClient();
-        var waitingSnapshot = new RoomSnapshot([new("host", "Host", true, true), new("guest", "Guest", false, false)], null, null, false, [], Name: "Host's shared name");
+        var waitingSnapshot = new RoomSnapshot([new("host", "Host", true, true), new("guest", "Guest", false, true)], null, null, false, [], Name: "Host's shared name");
         typeof(RoomClient).GetProperty(nameof(RoomClient.ServerAddress))!.SetValue(waitingClient, guest.Server);
         typeof(RoomClient).GetProperty(nameof(RoomClient.Identity))!.SetValue(waitingClient, new Welcome(guest.Code, "guest", false, [], false));
         typeof(RoomClient).GetProperty(nameof(RoomClient.Snapshot))!.SetValue(waitingClient, waitingSnapshot);
@@ -1612,21 +1615,39 @@ static class Program
             typeof(MainWindow).GetMethod("SyncCurrentRoomName", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [waitingSnapshot]);
             Check(((System.Windows.Controls.TextBlock)window.FindName("SavedRoomHeading")).Text == waitingSnapshot.Name &&
                 rooms.Single(x => x.Id == guest.Id).Name == waitingSnapshot.Name && !rename.IsEnabled,
-                "waiting guest replaces its room-code label with the host name and cannot rename it");
+                "someone who entered replaces their room-code label with the room's name and cannot rename it");
             Check(Wire.Read<SavedRoom[]>(store.Setting("rooms")!).Single(x => x.Id == guest.Id).Name == waitingSnapshot.Name,
-                "waiting guest's canonical room name is saved for the next app launch");
+                "the room's name is saved for the next app launch");
+            Check(HeroText("SavedRoomStatus") == "You're in this room" && ((System.Windows.Controls.Button)window.FindName("ConnectSavedRoomButton")).Content as string == "Open player" &&
+                HeroPart("DisconnectSavedRoomButton").Visibility == Visibility.Visible && ((System.Windows.Controls.Button)window.FindName("DisconnectSavedRoomButton")).Content as string == "Leave",
+                "the room the app is in says so and offers Leave");
+            var peopleRows = ((System.Windows.Controls.ItemsControl)window.FindName("SavedRoomGuests")).Items.Cast<object>().Select(row => (
+                Name: (string)row.GetType().GetProperty("Name")!.GetValue(row)!, Status: (string)row.GetType().GetProperty("Status")!.GetValue(row)!,
+                Remove: (Visibility)row.GetType().GetProperty("RemoveVisibility")!.GetValue(row)!)).ToArray();
+            Check(peopleRows.Select(row => row.Name).SequenceEqual(["Host", "Guest (you)"]) && peopleRows.All(row => row.Status == "Here" && row.Remove != Visibility.Visible) && HeroText("SavedRoomGuestCount") == "2 here",
+                "the people tile lists everyone in the room, with nothing to approve and no Remove for someone who did not create it");
             void RefreshLibraryUi() => typeof(MainWindow).GetMethod("RefreshSharedLibrary", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, []);
+            bool Browsing() => (bool)typeof(MainWindow).GetField("browsingStreamerLibrary", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)!;
+            var offer = (FrameworkElement)window.FindName("StreamerLibraryOffer");
+            var browseButton = (System.Windows.Controls.Button)window.FindName("BrowseStreamerLibraryButton");
             RefreshLibraryUi();
-            Check(((FrameworkElement)window.FindName("GuestLibraryStatus")).Visibility == Visibility.Visible &&
+            Check(((FrameworkElement)window.FindName("GuestLibraryStatus")).Visibility != Visibility.Visible && offer.Visibility != Visibility.Visible &&
                 ((FrameworkElement)window.FindName("LocalLibraryContent")).Visibility == Visibility.Visible,
-                "guest library shares the regular library layout within the Library tab");
-            Check(!(bool)typeof(MainWindow).GetField("guestBrowsePending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)!, "waiting guest cannot start browsing before direct admission");
+                "in a room, the Library tab keeps showing your own library");
             ((TaskCompletionSource)typeof(RoomClient).GetField("directConnected", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(waitingClient)!).TrySetResult();
             var busy = waitingSnapshot with { LibraryBrowsing = true, LibraryActivity = new("other", "Alice", "Example", "pilot", Wire.Now) };
             typeof(RoomClient).GetProperty(nameof(RoomClient.Snapshot))!.SetValue(waitingClient, busy);
             RefreshLibraryUi();
+            Check(offer.Visibility == Visibility.Visible && browseButton.Content as string == "Browse Host’s library" && !Browsing() &&
+                ((System.Windows.Controls.TextBlock)window.FindName("StreamerLibraryOfferText")).Text == "Host lets the room browse their library",
+                "when whoever holds the streaming role shares their library, the Library tab offers to browse it");
+            typeof(MainWindow).GetMethod("ShowPage", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, ["Library"]);
+            typeof(MainWindow).GetMethod("BrowseStreamerLibrary", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [browseButton, new RoutedEventArgs()]);
+            Check(Browsing() && ((FrameworkElement)window.FindName("GuestLibraryStatus")).Visibility == Visibility.Visible && browseButton.Content as string == "Back to my library" &&
+                ((FrameworkElement)window.FindName("LocalLibraryContent")).Visibility == Visibility.Visible,
+                "browsing someone's library uses the regular library layout within the Library tab, with a way back");
             Check(!(bool)typeof(MainWindow).GetField("guestBrowsePending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)! &&
-                ((System.Windows.Controls.TextBlock)window.FindName("GuestLibraryStatus")).Text.Contains("Alice"), "busy library identifies the current guest and locks the browse action");
+                ((System.Windows.Controls.TextBlock)window.FindName("GuestLibraryStatus")).Text.Contains("Alice"), "busy library identifies who is browsing and locks the browse action");
             typeof(RoomClient).GetProperty(nameof(RoomClient.Snapshot))!.SetValue(waitingClient, busy with { LibraryActivity = null });
             RefreshLibraryUi();
             Check(!((System.Windows.Controls.TextBlock)window.FindName("GuestLibraryStatus")).Text.Contains("Alice"), "released browsing slot becomes available without reconnecting");
@@ -1658,7 +1679,8 @@ static class Program
             using (var imageFile = File.Create(Path.GetFullPath("artifacts/shared-library-ui.png"))) encoder.Save(imageFile);
             typeof(RoomClient).GetProperty(nameof(RoomClient.Snapshot))!.SetValue(waitingClient, busy with { LibraryBrowsing = false, LibraryActivity = null });
             RefreshLibraryUi();
-            Check(entries.Items.Count == 0 && !(bool)typeof(MainWindow).GetField("guestBrowsePending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)!, "revocation immediately clears visible catalog and pending requests");
+            Check(!Browsing() && ((FrameworkElement)window.FindName("GuestLibraryStatus")).Visibility != Visibility.Visible && offer.Visibility != Visibility.Visible &&
+                !(bool)typeof(MainWindow).GetField("guestBrowsePending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)!, "when browsing is turned off, the Library tab returns to your own library with no pending requests");
             typeof(MainWindow).GetMethod("ShowPage", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [previousPage!]);
         }
         finally
@@ -1668,7 +1690,7 @@ static class Program
             waitingClient.DisposeAsync().AsTask().GetAwaiter().GetResult();
             list.SelectedItem = rooms.Single(x => x.Id == first.Id);
         }
-        Check(!first.ToString().Contains(first.HostKey!), "saved-room accessibility labels exclude the private host key");
+        Check(!first.ToString().Contains(first.HostKey!), "saved-room accessibility labels exclude the creator's private key");
     }
 
     private static async Task CheckScrolling(Action<bool, string> check)

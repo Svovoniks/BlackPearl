@@ -26,6 +26,8 @@ static class GuestLibraryLayoutChecks
             typeof(RoomClient).GetProperty("Identity")!.SetValue(client, new Welcome("fixture", peer, isHost, [], false));
             typeof(RoomClient).GetProperty("Snapshot")!.SetValue(client, new RoomSnapshot(people, null, null, false));
             typeof(MainWindow).GetField("room", Flags)!.SetValue(window, client);
+            // Someone in a room sees their own queues until they choose to look through the streamer's library.
+            typeof(MainWindow).GetField("browsingStreamerLibrary", Flags)!.SetValue(window, !isHost);
             return client;
         }
         var hostClient = Join(host, "host", true); var guestClient = Join(guest, "guest", false);

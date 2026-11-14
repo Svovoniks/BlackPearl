@@ -51,6 +51,8 @@ static class HostLibraryBrowseChecks
         typeof(RoomClient).GetProperty("Snapshot")!.SetValue(client, snapshot);
         ((TaskCompletionSource)typeof(RoomClient).GetField("directConnected", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(client)!).SetResult();
         typeof(MainWindow).GetField("room", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, client);
+        // Someone in a room sees their own library until they choose to look through the streamer's.
+        typeof(MainWindow).GetField("browsingStreamerLibrary", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, true);
         try
         {
             var pixels = Enumerable.Repeat((byte)120, 720 * 1080 * 3).ToArray();
