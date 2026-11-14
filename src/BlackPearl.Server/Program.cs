@@ -12,7 +12,7 @@ using BlackPearl.Core;
 // The room service: who is in each room, who streams, and WebRTC signaling between members. A room has no host.
 // Anyone holding its invitation enters, every member connects to every other, and one member at a time holds the
 // streaming role, which keeps the room's playback state. Video, voice and controls never pass through here.
-// Apps up to 0.3.125 speak the earlier protocol, with a host who admits guests; ServeHosted still serves them.
+// Apps from before that speak protocol 1, with a host who admits guests; ServeHosted still serves them.
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRateLimiter(options =>
 {
@@ -109,7 +109,7 @@ app.MapPost("/presence", ([FromBody] string[] codes) =>
                 : room.People.Values.OrderBy(p => p.Arrived).Select(p => p.Name).ToArray());
     return Results.Ok(found);
 });
-// Rooms as apps up to 0.3.125 know them (protocol 1): one host, who admits each guest, and guests connect only to the
+// Rooms as apps on protocol 1 know them: one host, who admits each guest, and guests connect only to the
 // host. Those apps say create, join or resume. A room serves one kind of app at a time: while people on older apps are
 // in it, newer apps are turned away with the reason, and the other way round. Its invitation, creator, name and the
 // people who belong to it are the same either way, so a room carries over as its people update.
@@ -487,7 +487,7 @@ sealed class Member(string id, string name, WebSocket socket, CancellationTokenS
     // Order of arrival in the room.
     public long Arrived;
 }
-// Someone in a room as apps up to 0.3.125 know it: its host, or a guest the host admits.
+// Someone in a room as apps on protocol 1 know it: its host, or a guest the host admits.
 sealed class HostedMember(string id, string name, bool host, WebSocket socket, CancellationTokenSource lifetime, string? guestKey) : Connection(socket, lifetime)
 {
     public string? GuestKey => guestKey;
@@ -496,7 +496,7 @@ sealed class HostedMember(string id, string name, bool host, WebSocket socket, C
     public bool Approved = host;
     public bool Ready;
 }
-// What a room holds while people on apps up to 0.3.125 are in it: the playback state those apps keep on the service.
+// What a room holds while people on protocol 1 apps are in it: the playback state those apps keep on the service.
 sealed class HostedSession
 {
     public Dictionary<string, HostedMember> People { get; } = new();
@@ -522,7 +522,7 @@ sealed class Room(string code, bool persistent = false)
     public long Expires { get; } = persistent ? long.MaxValue : Wire.Now + 6 * 3600000;
     public long EmptySince = Wire.Now, Arrivals;
     public Dictionary<string, Member> People { get; } = new();
-    // Set while people on apps up to 0.3.125 are in the room; People is empty then.
+    // Set while people on protocol 1 apps are in the room; People is empty then.
     public HostedSession? Hosted;
     // Whether guests may control playback, for those apps. Newer ones leave that to whoever is playing the video.
     public bool SharedControls;

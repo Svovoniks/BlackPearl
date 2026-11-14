@@ -28,7 +28,7 @@ A server installed while the app was called Watchroom (`/opt/watchroom`, `watchr
 
 For an update, repeat step 1 and run `systemctl restart blackpearl`. Saved rooms, with their members and the people removed from them, are stored under `/var/lib/blackpearl` and survive a restart; everyone in a room is disconnected by it and their apps re-enter by themselves.
 
-The service and the apps must speak the same room protocol, which `/health` reports as `protocol`. Protocol 2 is rooms without a host; BlackPearl versions up to 0.3.125 speak protocol 1. Update the service and release the app together: an older app is told to update, and a newer app says that the room server needs updating. Rooms saved by a protocol 1 service keep their invitations, creators and guests, who become members.
+The service speaks two room protocols, listed by `/health` as `protocols`. Protocol 2 is rooms without a host. Protocol 1 is what apps from before that speak: a host who admits each guest. Update the service before releasing an app on a newer protocol: an app says so when the room server is too old for it, while older apps keep working with a newer service. A room serves one protocol at a time, set by whoever is in it: someone on the other kind of app is told to update, or that the others need to. Its invitation, creator, name and people are the same on both, so a room carries over as its people update.
 
 ## Internet acceptance test
 

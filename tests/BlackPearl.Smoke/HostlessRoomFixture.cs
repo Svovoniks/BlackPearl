@@ -27,7 +27,7 @@ static class HostlessRoomFixture
         await WithServer(sdk, serverDll, directory, "older-apps", url => OlderApps(url, check));
     }
 
-    // Apps up to 0.3.125 speak protocol 1: create, join and resume, a host who admits guests, and signaling only between
+    // Apps from before rooms lost their host speak protocol 1: create, join and resume, a host who admits guests, and signaling only between
     // host and guest. The service still serves them, in the same rooms, one kind of app at a time. Plain sockets stand in
     // for those apps.
     private static async Task OlderApps(string url, Action<bool, string> check)

@@ -32,7 +32,7 @@ public sealed class PersistentRooms
     private void Save(PersistentRoom room) => store.Setting(Prefix + room.Code, Wire.Serialize(room));
     public PersistentRoom[] All() { lock (gate) return rooms.ToArray(); }
     public int Count { get { lock (gate) return rooms.Count; } }
-    // sharedControls is the setting of apps up to 0.3.125, whose rooms keep it on the service.
+    // sharedControls is the setting of protocol 1 apps, whose rooms keep it on the service.
     public void Update(string code, AdmittedGuest[] members, AdmittedGuest[] banned, string? name, bool sharedControls = false)
     {
         lock (gate)
