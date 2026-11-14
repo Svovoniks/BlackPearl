@@ -46,6 +46,15 @@ if (args.FirstOrDefault() == "--room-resilience")
     Console.WriteLine($"{checks} room resilience checks passed."); return;
 }
 
+// The streaming checks against a room service that is already running: --hostless-rooms-at <address>.
+if (args.FirstOrDefault() == "--hostless-rooms-at")
+{
+    var checks = 0;
+    await HostlessRoomFixture.RunAt(args[1].TrimEnd('/'), Path.GetFullPath(Path.Combine("artifacts", "hostless-rooms-" + Guid.NewGuid().ToString("N"))), (condition, name) =>
+    { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); checks++; });
+    Console.WriteLine($"{checks} hostless room checks passed against a running room service."); return;
+}
+
 if (args.FirstOrDefault() == "--hostless-rooms")
 {
     var checks = 0;

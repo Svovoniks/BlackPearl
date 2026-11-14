@@ -133,6 +133,10 @@ static class HostlessRoomFixture
         finally { foreach (var socket in sockets) { socket.Abort(); socket.Dispose(); } }
     }
 
+    // The streaming part against a room service that is already running, such as a deployed one. It creates one
+    // unsaved room, which the service forgets once it stays empty.
+    public static Task RunAt(string url, string directory, Action<bool, string> check) { Directory.CreateDirectory(directory); return Streaming(url, directory, check); }
+
     internal static async Task WithServer(string sdk, string serverDll, string directory, string name, Func<string, Task> run)
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();

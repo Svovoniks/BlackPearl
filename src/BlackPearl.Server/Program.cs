@@ -462,19 +462,34 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
         if (broadcastTokens < 1) return false;
         broadcastTokens--; return true;
     }
-    private readonly Channel<(WireMessage Message, TaskCompletionSource? Sent)> outgoing = Channel.CreateBounded<(WireMessage, TaskCompletionSource?)>(128);
-    public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null))) lifetime.Cancel(); }
+    private readonly Channel<(WireMessage Message, TaskCompletionSource? Sent, bool Last)> outgoing = Channel.CreateBounded<(WireMessage, TaskCompletionSource?, bool)>(128);
+    public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null, false))) lifetime.Cancel(); }
     public async Task SendAndWaitAsync(WireMessage message)
     {
         var sent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!outgoing.Writer.TryWrite((message, sent))) throw new IOException("Room send queue full");
+        if (!outgoing.Writer.TryWrite((message, sent, false))) throw new IOException("Room send queue full");
         await sent.Task.WaitAsync(TimeSpan.FromSeconds(2), lifetime.Token);
     }
     // Tells the app why its connection ends, then ends it. The app does not come back on its own after this.
-    public void Close(string reason) => _ = SendAndWaitAsync(new("closed", Text: reason)).ContinueWith(_ => { try { lifetime.Cancel(); } catch (ObjectDisposedException) { } }, TaskScheduler.Default);
+    // The reason is the last thing sent, followed by a proper close: cutting the connection straight after sending can
+    // discard what the app has not read yet. The connection is cut only if the app does not close its side in time.
+    public void Close(string reason)
+    {
+        if (!outgoing.Writer.TryWrite((new("closed", Text: reason), null, true))) { lifetime.Cancel(); return; }
+        _ = Task.Delay(TimeSpan.FromSeconds(5)).ContinueWith(_ => { try { lifetime.Cancel(); } catch (ObjectDisposedException) { } }, TaskScheduler.Default);
+    }
     public async Task SendLoop()
     {
-        try { await foreach (var msg in outgoing.Reader.ReadAllAsync(lifetime.Token)) { await SocketMessages.SendAsync(socket, msg.Message, lifetime.Token); msg.Sent?.TrySetResult(); } }
+        try
+        {
+            await foreach (var msg in outgoing.Reader.ReadAllAsync(lifetime.Token))
+            {
+                await SocketMessages.SendAsync(socket, msg.Message, lifetime.Token); msg.Sent?.TrySetResult();
+                if (!msg.Last) continue;
+                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, lifetime.Token);
+                return;
+            }
+        }
         catch (Exception) { lifetime.Cancel(); }
     }
 }
