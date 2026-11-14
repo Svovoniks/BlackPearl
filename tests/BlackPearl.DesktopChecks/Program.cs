@@ -106,6 +106,20 @@ static class Program
             };
             voiceWindow.Show(); app.Run(); return;
         }
+        if (args.FirstOrDefault() is "--player-close" or "--player-close-pip" or "--player-close-fullscreen")
+        {
+            // Closes its window as the check, so each way of closing runs in a process of its own.
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var closeWindow = new MainWindow { Left = -20000, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual };
+            closeWindow.Loaded += async (_, _) =>
+            {
+                var count = 0;
+                try { await PlayerCloseChecks.Run(closeWindow, directory, args[0] switch { "--player-close-pip" => "picture in picture", "--player-close-fullscreen" => "fullscreen", _ => "the full player" }, (condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }); Console.WriteLine($"{count} player close checks passed."); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { if (closeWindow.IsLoaded) closeWindow.Close(); app.Shutdown(); }
+            };
+            closeWindow.Show(); app.Run(); return;
+        }
         if (args.FirstOrDefault() == "--guest-recovery")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;

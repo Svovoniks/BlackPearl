@@ -2002,7 +2002,9 @@ public partial class MainWindow : Window
         SavePlaybackPosition(); localResume = 0; endedSeek = null;
         RecordRoomSession(force: true);
         if (fullscreen && !preserveFullscreen) SetFullscreen(false);
-        if (pictureInPicture && !preserveFullscreen) SetPictureInPicture(false, openPlayer: false);
+        // When the app closes, the video stays in the small window, which only hides: moving it back would show
+        // LibVLC's window over the hidden main window again.
+        if (pictureInPicture && !preserveFullscreen) { if (closing) pictureInPictureWindow?.Hide(); else SetPictureInPicture(false, openPlayer: false); }
         PlayerEmpty.Visibility = Visibility.Visible;
         SetAudioPlayback(false);
         UpdateSystemMediaControls();
@@ -2447,6 +2449,10 @@ public partial class MainWindow : Window
         await Task.Yield(); // Let WPF finish the first Closing event before calling Close again.
         foreach (var watcher in watchers) watcher.Dispose();
         Hide();
+        // LibVLC draws the player's controls and its empty state in a see-through window of its own over the video.
+        // That window follows the main window's moves and closing but not its hiding, so it is hidden here too;
+        // otherwise the empty player shown while playback stops would flash on the desktop.
+        if (Window.GetWindow(PlayerOverlay) is { } overlay && overlay != this) overlay.Hide();
         try { await Disconnect(); }
         finally
         {
