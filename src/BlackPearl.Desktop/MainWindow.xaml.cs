@@ -2453,6 +2453,7 @@ public partial class MainWindow : Window
         // That window follows the main window's moves and closing but not its hiding, so it is hidden here too;
         // otherwise the empty player shown while playback stops would flash on the desktop.
         if (Window.GetWindow(PlayerOverlay) is { } overlay && overlay != this) overlay.Hide();
+        pictureInPictureWindow?.Hide(); // at once, not after leaving voice, which can take a moment
         try { await Disconnect(); }
         finally
         {

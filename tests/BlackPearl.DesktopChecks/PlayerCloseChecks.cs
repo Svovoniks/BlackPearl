@@ -38,9 +38,12 @@ static class PlayerCloseChecks
         }
         if (way == "fullscreen")
         {
+            // From a maximized window: leaving fullscreen while closing maximizes the hidden window again.
+            window.WindowState = WindowState.Maximized;
+            await Task.Delay(300);
             Call("SetFullscreen", true);
             await Task.Delay(500);
-            check(Field<bool>("fullscreen"), "the video plays fullscreen before the app closes");
+            check(Field<bool>("fullscreen") && Field<WindowState>("previousState") == WindowState.Maximized, "the video plays fullscreen, entered from a maximized window, before the app closes");
         }
         Call("ShowPlayerControls");
         var empty = (UIElement)window.FindName("PlayerEmpty");
