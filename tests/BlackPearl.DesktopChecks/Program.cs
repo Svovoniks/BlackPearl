@@ -106,6 +106,19 @@ static class Program
             };
             voiceWindow.Show(); app.Run(); return;
         }
+        if (args.FirstOrDefault() == "--hostless-rooms")
+        {
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var roomWindow = new MainWindow { Left = -20000, Top = 0, Width = 1280, Height = 820, WindowStartupLocation = WindowStartupLocation.Manual };
+            roomWindow.Loaded += async (_, _) =>
+            {
+                var count = 0;
+                try { await HostlessRoomUiChecks.Run(roomWindow, store, directory, (condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }); Console.WriteLine($"{count} hostless room UI checks passed."); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { roomWindow.Close(); app.Shutdown(); }
+            };
+            roomWindow.Show(); app.Run(); return;
+        }
         if (args.FirstOrDefault() == "--guest-recovery")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;

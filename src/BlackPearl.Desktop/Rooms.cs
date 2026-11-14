@@ -47,7 +47,7 @@ public partial class MainWindow
     private void InitializeRoomPresence() => roomPresenceTimer.Tick += (_, _) => RefreshRoomPresence(force: true);
     private async void RefreshRoomPresence(bool force = false)
     {
-        var visible = RoomsPage?.Visibility == Visibility.Visible && IsActive && savedRooms.Count > 0;
+        var visible = RoomsPage?.Visibility == Visibility.Visible && IsVisible && WindowState != WindowState.Minimized && savedRooms.Count > 0;
         if (roomPresenceTimer.IsEnabled != visible) { if (visible) roomPresenceTimer.Start(); else roomPresenceTimer.Stop(); }
         if (!visible || roomPresencePending || Environment.TickCount64 - roomPresenceAsked < (force ? 5000 : 15000)) return;
         roomPresencePending = true; roomPresenceAsked = Environment.TickCount64;
@@ -101,8 +101,8 @@ public partial class MainWindow
         var playing = connected ? room!.Snapshot?.Media : null;
         SavedRoomStatus.Text = saved is null ? "Create a room, or join one with an invitation."
             : connected ? playing is null ? "You're in this room" : (streaming ? "You're playing " : StreamerName + " is playing ") + playing.Title
-            : elsewhere is { Length: > 0 } ? RoomSessions.Names(elsewhere) + (elsewhere.Length == 1 ? " is" : " are") + " in here now"
-            : elsewhere is not null ? "Nobody is in here right now" : "Not connected";
+            : elsewhere is { Length: > 0 } ? RoomSessions.Names(elsewhere) + (elsewhere.Length == 1 ? " is" : " are") + " here now"
+            : elsewhere is not null ? "Nobody is here right now" : "Not connected";
         SavedRoomStatusDot.Fill = (System.Windows.Media.Brush)FindResource(connected || elsewhere is { Length: > 0 } ? "Success" : "Muted");
         SavedRoomCode.Text = saved is null ? "" : string.Join(" ", saved.Code.Chunk(6).Select(part => new string(part)));
         SavedRoomInviteHint.Text = saved is null ? "" : (Uri.TryCreate(saved.Server, UriKind.Absolute, out var server) ? server.Host : saved.Server) + " · Anyone with the invitation can join";
@@ -304,7 +304,7 @@ public partial class MainWindow
             {
                 var people = saved == live ? null : PeopleInRoom(saved);
                 pill.Tag = saved == live ? "live" : people is { Length: > 0 } ? "busy" : null;
-                pill.ToolTip = saved == live ? "You're in this room" : people is { Length: > 0 } ? RoomSessions.Names(people) + (people.Length == 1 ? " is" : " are") + " in here · Double-click to join" : "Double-click to join";
+                pill.ToolTip = saved == live ? "You're in this room" : people is { Length: > 0 } ? RoomSessions.Names(people) + (people.Length == 1 ? " is" : " are") + " here · Double-click to join" : "Double-click to join";
             }
     }
     // The selected room's last session: its picture when one is known, otherwise a card in the title's colour.
