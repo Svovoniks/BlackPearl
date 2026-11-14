@@ -354,8 +354,8 @@ public partial class MainWindow
         e.Handled = true;
         if (sender is FrameworkElement { DataContext: LibraryCardView view }) OpenHomeTitle(view);
     }
-    // Plays straight from Home: a series starts at its first episode. Guests go through
-    // the room's details page, which asks the host to start playback.
+    // Plays straight from Home: a series starts at its first episode. Someone looking through the streamer's library
+    // goes through the details page, which asks that person's app to start playback.
     private void PlayHomeCard(object sender, RoutedEventArgs e)
     {
         e.Handled = true;

@@ -6,7 +6,7 @@ namespace BlackPearl.Desktop;
 
 public partial class MainWindow
 {
-    // The last session of each saved room, kept per participant. While connected, snapshots from the host overwrite it.
+    // The last session of each saved room, kept per participant. While connected, the room's state overwrites it.
     // Cached by setting key: snapshots and the hero read it often.
     private readonly Dictionary<string, RoomSession?> savedRoomSessions = [];
     private long lastRoomSessionSave, lastRoomHeroRefresh;
@@ -42,7 +42,8 @@ public partial class MainWindow
         library.Setting(SavedRoomSetting(saved, "session"), Wire.Serialize(session));
     }
 
-    // The host shares its record so guests who connect while nothing is playing still see the room's last session.
+    // Whoever holds the streaming role shares its record, so people who enter while nothing is playing still see the
+    // room's last session.
     private void PublishRoomSession(RoomClient client, SavedRoom saved)
     {
         if (client.Identity?.Host != true || LoadRoomSession(saved) is not { } session) return;
@@ -50,13 +51,25 @@ public partial class MainWindow
         catch (IOException) { }
     }
 
-    // Reopens the host's last video paused where the room stopped, so returning to the player resumes the session.
-    private void RestoreRoomSession(RoomClient client, SavedRoom saved)
+    // The video this app played last in the room, when its file is still here. Someone else's last video has no id.
+    private MediaItem? ResumableRoomVideo(SavedRoom saved) =>
+        LoadRoomSession(saved) is { LibraryId: { } id } && items.FirstOrDefault(item => item.Id == id) is { } item && File.Exists(item.Path) ? item : null;
+    // Reopens that video paused where the room stopped, unless something is playing there now. Returns whether it did.
+    private async Task<bool> RestoreRoomSession(RoomClient client, SavedRoom saved)
     {
-        if (client.Identity?.Host != true || client.HostedMedia is not null || LoadRoomSession(saved) is not { LibraryId: { } id } session) return;
-        if (items.FirstOrDefault(item => item.Id == id) is not { } item || !File.Exists(item.Path)) return;
-        try { client.PublishHostedFile(RoomClient.PrepareHostedFile(item.Path, PlaybackTitle(item)), false, session.PositionMs); playingItem = item; }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException) { SetStatus("Could not reopen the last video: " + ex.Message); }
+        if (ResumableRoomVideo(saved) is not { } item || LoadRoomSession(saved) is not { } session) return false;
+        try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(8), lifetime.Token); }
+        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException) { return false; }
+        if (room != client || client.Snapshot?.Media is not null) return false;
+        var previous = playingItem;
+        try
+        {
+            playingItem = item;
+            await client.StartStreamAsync(RoomClient.PrepareHostedFile(item.Path, PlaybackTitle(item)), false, session.PositionMs, lifetime.Token);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        { if (playingItem == item) playingItem = previous; SetStatus("Could not reopen the last video: " + ex.Message); return false; }
     }
 
     private void RoomSessionTick()
@@ -64,7 +77,7 @@ public partial class MainWindow
         if (room?.IsConnected == true) RecordRoomSession();
         if (room is { IsConnected: true, Identity.Host: true } host && ConnectedSavedRoom is { } saved)
         {
-            // Guests may fetch only this title's artwork from the host.
+            // Other members may fetch only this title's artwork from the streamer.
             var session = LoadRoomSession(saved);
             var item = HeroArtworkItem(host.Snapshot?.Media is not null, session);
             host.SetSessionArtwork(host.Snapshot?.Media?.Title ?? session?.Title, item is null ? null : HeroArtworkPath(item));
@@ -94,15 +107,16 @@ public partial class MainWindow
         RoomHero.Visibility = Visibility.Visible;
         var current = live is not null && session?.Title == live.Title ? session : null;
         var title = live?.Title ?? session?.Title;
-        var hostIdentity = connected is not null ? room!.Identity!.Host : heroRoom.HostKey is not null;
-        RoomHeroLiveText.Text = connected is not null ? "Live" : hostIdentity ? "Closed" : "Offline";
-        RoomHeroLive.Background = (System.Windows.Media.Brush)FindResource(connected is not null ? "Success" : "Line");
-        RoomHeroLiveText.Foreground = (System.Windows.Media.Brush)FindResource(connected is not null ? "Canvas" : "Muted");
+        // Not in the room: the room service says who is, when it answers.
+        var elsewhere = connected is null ? PeopleInRoom(heroRoom) : null;
+        RoomHeroLiveText.Text = connected is not null ? "Live" : elsewhere is { Length: > 0 } ? elsewhere.Length + " here" : elsewhere is not null ? "Empty" : "Away";
+        RoomHeroLive.Background = (System.Windows.Media.Brush)FindResource(connected is not null ? "Success" : elsewhere is { Length: > 0 } ? "AccentSoft" : "Line");
+        RoomHeroLiveText.Foreground = (System.Windows.Media.Brush)FindResource(connected is not null ? "Canvas" : elsewhere is { Length: > 0 } ? "Accent" : "Muted");
         RoomHeroKicker.Text = connected is not null
             ? heroRoom.Name + (live is null ? session is null ? " · Nothing playing yet" : " · Last played here " + Ago(session.UpdatedAt) : snapshot!.Playback?.WantsPlayback == true ? " · Playing now" : " · Paused")
             : session is null ? heroRoom.Name : "Last watched in " + heroRoom.Name + " · " + Ago(session.UpdatedAt);
-        RoomHeroTitle.Text = title ?? (connected is null ? "Nothing watched here yet" : hostIdentity ? "Choose a video from your library" : "Waiting for the host to choose a video");
-        RoomHeroTitle.Foreground = (System.Windows.Media.Brush)FindResource(title is null && !(connected is not null && hostIdentity) ? "Muted" : "Ink");
+        RoomHeroTitle.Text = title ?? (connected is null ? "Nothing watched here yet" : "Pick something to watch together");
+        RoomHeroTitle.Foreground = (System.Windows.Media.Brush)FindResource(title is null && connected is null ? "Muted" : "Ink");
         var position = live is not null && snapshot!.Playback is { } playback && playback.MediaId == live.Id && playback.Stop?.Reason != "loading"
             ? SyncMath.TargetPosition(playback, room!.ServerNowMs) : (live is null || current is not null) ? session?.PositionMs ?? 0 : 0;
         var duration = live is not null && loadedMedia == live.Id && player is { Length: > 0 } ? player.Length : (live is null || current is not null) ? session?.DurationMs ?? 0 : 0;
@@ -121,32 +135,36 @@ public partial class MainWindow
         else if (session is not null)
         {
             var people = (session.People ?? []).Where(name => name != SavedDisplayName).ToArray();
-            RoomHeroPresence.Text = people.Length > 0 ? "Last time with " + RoomSessions.Names(people) : session.Host is { } host && host != SavedDisplayName ? "Hosted by " + host : "You watched alone";
-            RoomHeroPresenceDot.Fill = (System.Windows.Media.Brush)FindResource("Muted");
+            RoomHeroPresence.Text = elsewhere is { Length: > 0 } ? RoomSessions.Names(elsewhere) + (elsewhere.Length == 1 ? " is" : " are") + " in the room now"
+                : people.Length > 0 ? "Last time with " + RoomSessions.Names(people) : session.Host is { } host && host != SavedDisplayName ? "Played by " + host : "You watched alone";
+            RoomHeroPresenceDot.Fill = (System.Windows.Media.Brush)FindResource(elsewhere is { Length: > 0 } ? "Success" : "Muted");
         }
         else
         {
-            RoomHeroPresence.Text = hostIdentity ? "Open the room, then pick something from your library" : "You're a guest · ask the host to open the room";
-            RoomHeroPresenceDot.Fill = (System.Windows.Media.Brush)FindResource("Muted");
+            RoomHeroPresence.Text = elsewhere is { Length: > 0 } ? RoomSessions.Names(elsewhere) + (elsewhere.Length == 1 ? " is" : " are") + " in the room now" : "Join, then pick something from your library";
+            RoomHeroPresenceDot.Fill = (System.Windows.Media.Brush)FindResource(elsewhere is { Length: > 0 } ? "Success" : "Muted");
         }
-        // Offline: resume the last session or connect. Connected: return to the player, or for the host with nothing chosen, browse the library.
-        var browse = connected is not null && title is null && hostIdentity;
-        RoomHeroResume.Content = connected is not null ? browse ? "Browse library" : "Return to player" : session is not null ? "Resume" : hostIdentity ? "Open room" : "Connect";
+        // Away: join, opening the last session when there is one. In the room: return to what is playing, reopen the
+        // video this app played last, or with nothing to return to, browse the library.
+        var resumable = connected is not null && live is null && ResumableRoomVideo(heroRoom) is not null;
+        var browse = connected is not null && live is null && !resumable;
+        RoomHeroResume.Content = connected is not null ? browse ? "Browse library" : resumable ? "Resume" : "Return to player" : session is not null ? "Resume" : "Join";
         RoomHeroResume.ContentTemplate = browse ? null : (DataTemplate)FindResource("PlayContent");
-        RoomHeroResume.Visibility = connected is not null && title is null && !hostIdentity ? Visibility.Collapsed : Visibility.Visible;
+        RoomHeroResume.Visibility = Visibility.Visible;
         RoomHeroResume.IsEnabled = connected is not null || !roomBusy;
         RoomHeroResume.Tag = heroRoom.Id;
         System.Windows.Automation.AutomationProperties.SetName(RoomHeroResume, RoomHeroResume.Content + " in " + heroRoom.Name);
-        var secondary = connected is not null ? title is null ? "Open player" : null : session is null && hostIdentity ? "Copy invite" : null;
+        var secondary = connected is not null ? live is null ? "Open player" : null : session is null ? "Copy invite" : null;
         RoomHeroSecondary.Content = secondary;
         RoomHeroSecondary.Visibility = secondary is null ? Visibility.Collapsed : Visibility.Visible;
-        RoomHeroDisconnect.Content = hostIdentity ? "Close room" : "Disconnect";
-        System.Windows.Automation.AutomationProperties.SetName(RoomHeroDisconnect, (hostIdentity ? "Close room " : "Disconnect from ") + heroRoom.Name);
+        RoomHeroDisconnect.Content = "Leave";
+        System.Windows.Automation.AutomationProperties.SetName(RoomHeroDisconnect, "Leave " + heroRoom.Name);
         RoomHeroDisconnect.Visibility = connected is not null ? Visibility.Visible : Visibility.Collapsed;
         RoomHeroDisconnect.IsEnabled = !roomBusy;
         ShowRoomHeroPlaceholder(heroRoom, title);
-        // The host reads artwork from its library; guests show the copy they saved from the host.
-        if (!hostIdentity) { ShowGuestHeroArtwork(heroRoom, title, connected is not null); return; }
+        // A video from this app's library shows its own artwork; someone else's shows the copy saved from their app.
+        var ownVideo = live is not null ? room!.Identity!.Host : session?.LibraryId is not null;
+        if (!ownVideo) { ShowGuestHeroArtwork(heroRoom, title, connected is not null); return; }
         ShowRoomHeroShimmer(false);
         roomHeroImageKey = null;
         var item = title is null ? null : HeroArtworkItem(live is not null, session);
@@ -209,7 +227,8 @@ public partial class MainWindow
     }
     private static string? HeroArtworkPath(MediaItem item) => item.Series is null ? item.Poster : LibraryCatalog.EpisodeArtwork(item);
 
-    // Guests save the host's artwork per room, with the title it belongs to, and ask the host when it is missing or stale.
+    // Artwork of someone else's video is saved per room, with the title it belongs to, and asked of the streamer when
+    // it is missing or stale.
     private sealed record HeroImage(System.Windows.Media.Imaging.BitmapSource Poster);
     private string? roomHeroImageKey;
     private readonly HashSet<string> requestedHeroArtwork = [];
@@ -304,21 +323,25 @@ public partial class MainWindow
     private async void ResumeRoomHero(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
         if (savedRooms.FirstOrDefault(x => x.Id == RoomHeroResume.Tag as string) is not { } saved) return;
-        if (ConnectedSavedRoom?.Id == saved.Id)
+        if (ConnectedSavedRoom?.Id == saved.Id && room is { } current)
         {
-            // The host with nothing chosen browses the library instead.
-            ShowPage(room?.Identity?.Host == true && room.Snapshot?.Media is null && LoadRoomSession(saved) is null ? "Library" : "Room");
+            // With nothing playing: reopen the video this app played last, or with none, browse the library.
+            if (current.Snapshot?.Media is not null) ShowPage("Room");
+            else if (ResumableRoomVideo(saved) is not null) { if (await RestoreRoomSession(current, saved)) ShowPage("Room"); }
+            else ShowPage("Library");
             return;
         }
         SavedRoomsList.SelectedItem = saved;
-        // With nothing watched yet there is no session to return to; connecting keeps the Rooms page.
+        // With nothing watched yet there is no session to return to; joining keeps the Rooms page.
         var resume = LoadRoomSession(saved) is not null;
-        if (await ConnectToSavedRoom(saved) && resume) ShowPage("Room");
+        if (!await ConnectToSavedRoom(saved) || room is not { } joined) return;
+        if (resume) { await RestoreRoomSession(joined, saved); if (room == joined) ShowPage("Room"); }
+        else await OpenPlayerIfPlaying(joined);
     });
     private void RoomHeroSecondaryClick(object sender, RoutedEventArgs e)
     {
         if (savedRooms.FirstOrDefault(x => x.Id == RoomHeroResume.Tag as string) is not { } saved) return;
-        // Connected with nothing playing: open the player. Offline host: copy the invitation.
+        // In the room with nothing playing: open the player. Away: copy the invitation.
         if (ConnectedSavedRoom?.Id == saved.Id) { ShowPage("Room"); return; }
         try { Clipboard.SetText(saved.Server + "#" + saved.Code); SetStatus("Invitation copied."); }
         catch (System.Runtime.InteropServices.ExternalException) { SetStatus("Clipboard is busy."); }

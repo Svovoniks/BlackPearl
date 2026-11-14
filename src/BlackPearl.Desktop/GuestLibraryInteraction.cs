@@ -8,7 +8,7 @@ using BlackPearl.Core;
 namespace BlackPearl.Desktop;
 public partial class MainWindow
 {
-    private string HostLibraryName => (room?.Snapshot?.People.FirstOrDefault(person => person.IsHost)?.Name ?? "Host") + "’s library";
+    private string HostLibraryName => StreamerName + "’s library";
     private string? guestHoveredId;
     private readonly DispatcherTimer guestViewDelay = new() { Interval = TimeSpan.FromMilliseconds(120) };
     private bool guestViewDelayInitialized;
@@ -245,7 +245,7 @@ public partial class MainWindow
     {
         if (room?.Identity?.Host != true) return;
         if (activity?.Peer != followedPeer) { followedPeer = activity?.Peer; followGuest = false; mirroredView = null; mirroredPointer = null; }
-        HostLibraryActivityText.Text = activity is null ? room.Snapshot?.LibraryBrowsing == true ? "Guest browsing available" : "Guest browsing is off"
+        HostLibraryActivityText.Text = activity is null ? room.Snapshot?.LibraryBrowsing == true ? "People in the room can browse your library" : "People in the room can’t browse your library"
             : activity.Name + " · " + activity.Location + (activity.Query.Length == 0 ? "" : " · " + activity.Query);
         BrowseWithGuestButton.Content = followGuest ? "Stop following" : "Follow " + activity?.Name;
         BrowseWithGuestButton.Visibility = activity?.View is not null ? Visibility.Visible : Visibility.Collapsed;

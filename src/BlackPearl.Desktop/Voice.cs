@@ -176,11 +176,11 @@ public partial class MainWindow
         // The player covers the rooms page, so the reason appears where the button was clicked.
         if (!client.VoiceAvailable)
         {
-            // Waiting for the host: remember the click and join when they connect; a second click cancels.
+            // Still connecting: remember the click and join once the room's state arrives; a second click cancels.
             var waitable = client.Identity?.Host != true && !client.DirectControlsReady.IsCompletedSuccessfully && client.Identity?.Room is not null;
             var cancelling = waitable && voiceWaitingRoom == client.Identity!.Room;
             voiceWaitingRoom = waitable && !cancelling ? client.Identity!.Room : null;
-            VoiceToast(cancelling ? "You won't join voice when the host arrives." : VoiceUnavailableReason(client) + (waitable ? " You'll join automatically." : ""), 4);
+            VoiceToast(cancelling ? "You won't join voice once you're connected." : VoiceUnavailableReason(client) + (waitable ? " You'll join automatically." : ""), 4);
             RefreshVoice(); return;
         }
         voiceWaitingRoom = null;
@@ -318,12 +318,10 @@ public partial class MainWindow
 
     private static string VoiceUnavailableReason(RoomClient client) =>
         !client.IsConnected ? "Connect to a room to use voice chat."
+        // Who is in voice is part of the room's state, which arrives from whoever holds the streaming role.
         : client.Identity?.Host != true && !client.DirectControlsReady.IsCompletedSuccessfully ?
-            (!client.IsAdmitted ? "Voice chat opens once the host lets you in."
-            // Voice travels through the host, so it waits for them.
-            : !client.HostPresent ? "Voice chat starts when the host joins the room."
-            : client.IsPeerRecovering ? "Reconnecting to the host…" : "Connecting to the host…")
-        : "The host needs to update BlackPearl to use voice chat.";
+            (client.IsPeerRecovering ? "Reconnecting to the room…" : "Connecting to the room…")
+        : "Voice chat isn't available in this room right now.";
     private static string Names(IReadOnlyList<string> names) => names.Count switch
     {
         0 => "", 1 => names[0], 2 => names[0] + " and " + names[1],
@@ -344,7 +342,7 @@ public partial class MainWindow
 
         VoiceButton.Visibility = VoiceCard.Visibility = connected ? Visibility.Visible : Visibility.Collapsed;
         VoiceButtonText.Text = voiceJoining ? "Joining…" : inVoice ? "Leave voice" : "Voice";
-        var joiningStage = !voiceJoining ? "" : voice?.DevicesReady != true ? "Opening your microphone and speakers…" : "Waiting for the host to confirm…";
+        var joiningStage = !voiceJoining ? "" : voice?.DevicesReady != true ? "Opening your microphone and speakers…" : "Joining…";
         VoiceButtonIcon.Text = inVoice ? "" : "";
         var action = voiceJoining ? "Cancel joining voice chat" : inVoice ? "Leave voice chat" : "Join voice chat";
         // Still clickable while unavailable, so a click explains why instead of doing nothing.

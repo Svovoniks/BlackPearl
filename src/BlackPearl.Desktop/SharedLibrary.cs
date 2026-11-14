@@ -27,14 +27,16 @@ public partial class MainWindow
         public string Location = "All titles";
     }
     private readonly DispatcherTimer guestBrowseTimer = new() { Interval = TimeSpan.FromSeconds(5) };
-    private bool GuestLibrary => room?.Identity?.Host == false;
+    // Showing the streamer's library in place of this app's own: only while someone else holds the streaming role and
+    // the user asked to look through it.
+    private bool GuestLibrary => browsingStreamerLibrary && room?.Identity?.Host == false;
     private bool OwnsLibrary => room?.IsConnected == true && room.Snapshot?.LibraryActivity?.Peer == room.Identity?.Peer;
     private void InitializeSharedLibrary()
     {
         guestBrowseTimer.Tick += (_, _) =>
         {
             if (guestBrowsePending && DateTime.UtcNow - guestBrowseSent > TimeSpan.FromSeconds(15))
-            { guestBrowsePending = false; guestLibraryNotice = "The host did not respond. Select a category or search to try again."; }
+            { guestBrowsePending = false; guestLibraryNotice = StreamerName + "’s app did not respond. Select a category or search to try again."; }
             if (currentPage is "Home" or "Library" or "Details" && OwnsLibrary) TryLibraryCommand(new("catalog-renew"));
             RefreshSharedLibrary();
         };
@@ -51,12 +53,17 @@ public partial class MainWindow
         var guest = GuestLibrary;
         if (guest && !OwnsLibrary && !guestBrowsePending) ClearHostArtworkRequests();
         ApplyLibraryMode();
+        // The streamer stopped sharing, or the streaming role moved: back to this app's own library.
+        if (browsingStreamerLibrary && !guest) { browsingStreamerLibrary = false; RefreshSavedItems(); }
         GuestLibraryStatus.Visibility = guest ? Visibility.Visible : Visibility.Collapsed;
         HostLibraryActivity.Visibility = room?.Identity?.Host == true ? Visibility.Visible : Visibility.Collapsed;
+        StreamerLibraryOffer.Visibility = guest || CanBrowseStreamerLibrary ? Visibility.Visible : Visibility.Collapsed;
+        StreamerLibraryOfferText.Text = guest ? "You're looking through " + HostLibraryName : StreamerName + " lets the room browse their library";
+        BrowseStreamerLibraryButton.Content = guest ? "Back to my library" : "Browse " + HostLibraryName;
         var activity = room?.Snapshot?.LibraryActivity;
         HostLibraryActivityText.Text = activity is null ? room?.Snapshot?.LibraryBrowsing == true
-            ? "No guest is browsing. Admitted guests can start from their Library tab."
-            : "Guest browsing is off. Enable it in room settings."
+            ? "Nobody is browsing your library. People in the room can open it from their Library tab."
+            : "People in the room can’t browse your library. Turn it on in room settings."
             : $"{activity.Name} is browsing · {activity.Location}" + (activity.Query.Length == 0 ? "" : $" · Search: {activity.Query}");
         RefreshGuestMirror(activity);
         if (!guest)
@@ -87,12 +94,12 @@ public partial class MainWindow
             guestLibraryCards.Clear(); guestLibraryCache.Clear(); guestCurrentBrowse = null;
             guestBrowsePending = false; ++guestBrowseRequest;
         }
-        GuestLibraryStatus.Text = room?.IsConnected != true ? "Disconnected from the host. Rejoin the room to browse their library."
-            : !connected ? "Waiting for admission and a direct connection to the host…"
-            : room?.Snapshot?.LibraryBrowsing != true ? "The host has disabled library browsing. They can enable it in room settings."
+        GuestLibraryStatus.Text = room?.IsConnected != true ? "Disconnected from the room. Rejoin it to browse their library."
+            : !connected ? "Connecting to " + StreamerName + "…"
+            : room?.Snapshot?.LibraryBrowsing != true ? StreamerName + " has turned off library browsing. They can turn it on in room settings."
             : guestLibraryNotice is not null ? guestLibraryNotice
             : activity is not null && !OwnsLibrary ? $"{activity.Name} is browsing now. Their library will load when the slot is available."
-            : guestBrowsePending && guestLibraryCards.Count == 0 ? "Loading the host’s library…"
+            : guestBrowsePending && guestLibraryCards.Count == 0 ? "Loading " + HostLibraryName + "…"
             : HostLibraryName;
         if (currentPage == "Home") RenderGuestHome();
         if (allowed && (activity is null || OwnsLibrary) && currentPage is "Home" or "Library" &&
@@ -120,7 +127,7 @@ public partial class MainWindow
         var query = librarySearch ? SearchBox.Text.Trim() : "";
         guestBrowse = guestBrowse with { Query = query[..Math.Min(query.Length, 100)], Page = 0, Category = librarySearch ? SearchCategory() : guestBrowse.Category };
         ApplyLibraryMode();
-        SearchHint.Text = "Search host’s library";
+        SearchHint.Text = "Search " + HostLibraryName;
         ClearSearchButton.Visibility = SearchBox.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         UpdateHostBreadcrumbs(); UpdateLibraryCategorySelection(true);
         var key = guestBrowse with { Page = 0 };
@@ -170,7 +177,7 @@ public partial class MainWindow
         foreach (var card in cards) card.RemoteArtworkLoader = () => LoadHostArtwork(card.Card);
         cache.Cards.AddRange(cards); guestLibraryCards.AddBatch(cards);
         ScheduleGuestView();
-        guestLibraryNotice = page.Total == 0 ? guestBrowse.Home ? "The host has no available titles to watch." : "No matching titles. Try another search or category." : null;
+        guestLibraryNotice = page.Total == 0 ? guestBrowse.Home ? StreamerName + " has no available titles to watch." : "No matching titles. Try another search or category." : null;
         UpdateHostResultCount(); UpdateHostBreadcrumbs(); RefreshSharedLibrary();
         if (currentPage == "Home") LoadMoreHostTitles();
         else Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(LoadMoreHostTitles));

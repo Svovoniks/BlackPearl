@@ -60,7 +60,6 @@ public partial class MainWindow : Window
     }
     private readonly DispatcherTimer libraryUpdateTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly ObservableCollection<LibraryFolder> folders = [];
-    private readonly Dictionary<string, Guid> pendingAdmissions = [];
     private readonly List<FileSystemWatcher> watchers = [];
     private readonly List<MediaItem> queue = [];
     private int queuePosition = -1;
@@ -183,7 +182,7 @@ public partial class MainWindow : Window
         library.MediaSaved += QueueLibraryUpdate;
         libraryUpdateTimer.Tick += (_, _) => ApplyLibraryUpdates();
         libraryUpdateTimer.Start();
-        InitializeSharedLibrary(); InitializeQueueSharing(); InitializeSearchFilters();
+        InitializeSharedLibrary(); InitializeQueueSharing(); InitializeRoomStreaming(); InitializeRoomPresence(); InitializeSearchFilters();
         var savedCursor = library.Setting("queuePosition");
         LoadSavedRooms(); RefreshQueuePickers();
         if (int.TryParse(library.Setting("volume"), out var savedVolume)) Volume.Value = Math.Clamp(savedVolume, 0, 100);
@@ -1118,7 +1117,16 @@ public partial class MainWindow : Window
         foreach (var entry in items.Where(x => x.Id == selected.Id || LibraryIdentity.SameShow(x, selected))) library.Save(entry with { Poster = dest, SeriesPoster = entry.Series is null ? null : dest, Matched = true, PosterSource = "Local artwork", LockedFields = (entry.LockedFields ?? []).Append("Poster").Distinct().ToArray() });
         _ = Guard(RefreshLibrary);
     }
-    private async void PlayLocal(object sender, RoutedEventArgs e) => await Guard(async () => { if (GuestLibrary) { WatchGuestVideo(); return; } if (selected is not null) { queuePosition = -1; await PlayLocalItem(selected); PublishQueue(); } });
+    private async void PlayLocal(object sender, RoutedEventArgs e) => await Guard(async () =>
+    {
+        if (GuestLibrary) { WatchGuestVideo(); return; }
+        if (selected is null) return;
+        // Play is for this computer only, so it leaves the room and its voice chat. With other people there, say so
+        // first: Watch together is the button that plays for them.
+        if (room is { IsConnected: true } joined && joined.Snapshot?.People.Length > 1 &&
+            !Dialogs.Confirm(this, "Leave the room to play this?", $"Play shows the video only to you, which leaves {joined.Snapshot.Name ?? "the room"}. To watch it with the others, choose Watch together instead.", "Leave and play", "Stay in room")) return;
+        queuePosition = -1; await PlayLocalItem(selected); PublishQueue();
+    });
     private async Task PlayLocalItem(MediaItem item)
     {
         if (!await EnsurePlayer()) return;
@@ -1150,10 +1158,11 @@ public partial class MainWindow : Window
         var position = (view.IsEpisode || view.IsMovie) && long.TryParse(library.Setting("position:" + view.Card.Media.Id), out var saved) ? saved : 0;
         view.SetPlayback(position, LibraryWatchProgress.IsWatched(items, view.Card, WasWatched, _ => position));
     }
-    private void SavePlaybackPosition()
+    // handingOver: the streaming role just left this app, and its own video is still in the player.
+    private void SavePlaybackPosition(bool handingOver = false)
     {
         // Songs always start from the beginning, so they keep no resume position and stay out of Continue watching.
-        if (nativeStopCount == 0 && (room is null || room.Identity?.Host == true) && playingItem is { IsMusic: false } && player is not null && player.Time >= 0)
+        if (nativeStopCount == 0 && (room is null || handingOver || room.Identity?.Host == true) && playingItem is { IsMusic: false } && player is not null && player.Time >= 0)
         {
             var time = player.Time; var length = player.Length;
             var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + playingItem.Id, WasWatched(playingItem.Id) || length > 0 && time >= length - 2000 ? "0" : Math.Max(0, time).ToString()) };
@@ -1171,63 +1180,89 @@ public partial class MainWindow : Window
             }
         }
     }
+    // Watch together: plays the selected video for a room. In a room already, it plays there at once; otherwise the
+    // user picks one of their rooms or names a new one, and the app enters it first.
     private async void HostClick(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
         if (GuestLibrary) { WatchGuestVideo(); return; }
         if (selected is null || roomBusy) return;
         if (!File.Exists(selected.Path)) throw new FileNotFoundException("Movie file is unavailable.");
         var item = selected;
-        if (room?.IsConnected == true) RememberCurrentRoom();
-        var current = savedRooms.FirstOrDefault(saved => room?.IsConnected == true && room.Identity?.Host == true &&
-            saved.Server == room.ServerAddress && saved.Code == room.Identity.Room);
-        var choice = Dialogs.ChooseWatchRoom(this, savedRooms.Where(saved => saved.HostKey is not null), current, ValidateRoomName);
-        if (choice is null) return;
-        if (choice.Room is { } chosen && room?.IsConnected == true && room.Identity?.Host == true &&
-            chosen.Server == room.ServerAddress && chosen.Code == room.Identity.Room)
+        if (room?.IsConnected == true)
         {
-            StartHostedVideo(item);
-            ShowPage("Room"); return;
+            RememberCurrentRoom();
+            if (!ConfirmTakeOver()) return;
+            queuePosition = -1;
+            await StartHostedVideo(item);
+            PublishQueue(); ShowPage("Room"); return;
         }
+        var choice = Dialogs.ChooseWatchRoom(this, savedRooms, null, ValidateRoomName);
+        if (choice is null) return;
         var server = choice.Room?.Server ?? SavedServerAddress;
         RoomAddress.ValidateServer(server);
         pendingRoomName = choice.NewRoomName;
         roomBusy = true; DetailHost.IsEnabled = false; RefreshSavedRooms();
         try {
-        await Disconnect(); playingItem = item; var client = NewRoom();
-        client.SetHostedFile(item.Path, PlaybackTitle(item));
+        await Disconnect(); var client = NewRoom();
         SetStatus("Connecting to the room service…");
+        // Only the room's creator names it; anyone else enters with the name it has.
         try { await client.ConnectAsync(server, SavedDisplayName, choice.Room?.Code, choice.Room?.HostKey,
-            persistent: true, roomName: choice.NewRoomName ?? choice.Room?.Name); }
+            persistent: true, roomName: choice.NewRoomName ?? (choice.Room?.HostKey is null ? null : choice.Room.Name)); }
+        catch (RoomRejectedException) { await Disconnect(); throw; }
         catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or IOException or OperationCanceledException)
         {
             await Disconnect();
             throw new IOException($"Cannot reach the room service at {server}. Check the server address in Settings. Localhost requires a server running on this computer.", ex);
         }
         catch { await Disconnect(); throw; }
-        StartHostedVideo(item);
-        RememberCurrentRoom(); ShowPage("Room"); SetStatus("Private room connected. Waiting for guests.");
+        RememberCurrentRoom(); ShowPage("Room");
+        // Someone may already be playing something there; wait for the room's state before deciding to replace it.
+        try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(8), lifetime.Token); }
+        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException) { }
+        if (room != client || !ConfirmTakeOver()) return;
+        queuePosition = -1;
+        await StartHostedVideo(item);
+        PublishQueue(); SetStatus("Playing for the room. Copy the invitation to bring friends in.");
         } finally { pendingRoomName = null; roomBusy = false; DetailHost.IsEnabled = selected?.Available == true && File.Exists(selected.Path); RefreshSavedRooms(); UpdateSessionControls(); }
     });
+    // An invitation on the clipboard is offered as the answer, so joining is paste-free.
+    private string ClipboardInvitation()
+    {
+        try
+        {
+            var text = Clipboard.ContainsText() ? Clipboard.GetText().Trim() : "";
+            if (text.Length is 0 or > 400) return "";
+            RoomAddress.Parse(text, SavedServerAddress);
+            return text;
+        }
+        catch (Exception ex) when (ex is ArgumentException or ExternalException) { return ""; }
+    }
     private async void JoinClick(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
         if (roomBusy) return;
-        var invitation = Dialogs.Prompt(this, "Join a watch room", "Paste the invitation link or room code", validate: text =>
+        var invitation = Dialogs.Prompt(this, "Join a watch room", "Invitation link or room code", ClipboardInvitation(), validate: text =>
         { try { RoomAddress.Parse(text, SavedServerAddress); return null; } catch (ArgumentException ex) { return ex.Message; } },
-            action: "Join room", help: "Ask your friend for an invitation. You can join without any video files; the host approves your entry."); if (string.IsNullOrWhiteSpace(invitation)) return;
+            action: "Join room", help: "Paste the invitation a friend sent you. You're in the room as soon as you join; no video files needed."); if (string.IsNullOrWhiteSpace(invitation)) return;
         var address = RoomAddress.Parse(invitation, SavedServerAddress);
+        // An invitation to a room that is already saved enters it with the key kept for it.
+        var known = savedRooms.FirstOrDefault(saved => saved.Server == address.Server && saved.Code == address.Code);
+        if (known is not null && room?.IsConnected == true && room.ServerAddress == known.Server && room.Identity?.Room == known.Code) { SavedRoomsList.SelectedItem = known; ShowPage("Room"); return; }
         roomBusy = true;
         RefreshSavedRooms();
         try {
             await Disconnect(); playingItem = null; var client = NewRoom(); SetStatus("Joining room…");
-            try { await client.ConnectAsync(address.Server, SavedDisplayName, address.Code); }
+            try { await client.ConnectAsync(address.Server, SavedDisplayName, address.Code, known?.HostKey, roomName: known?.HostKey is null ? null : known.Name); }
             catch { await Disconnect(); throw; }
-            RoomHeading.Text = "Your watch room";
-            RememberCurrentRoom(); RoomSubtitle.Text = "Waiting for host approval"; ShowPage("Room");
+            RoomHeading.Text = client.Snapshot?.Name ?? known?.Name ?? "Watch room";
+            RememberCurrentRoom(); RoomSubtitle.Text = "Connecting to the room…"; ShowPage("Room");
+            if (known is not null) { PublishRoomSession(client, known); }
+            SetStatus("You're in the room.");
         } finally { roomBusy = false; RefreshSavedRooms(); UpdateSessionControls(); }
     });
     private RoomClient NewRoom()
     {
         var client = new RoomClient(library); room = client; ResetHeroArtworkRequests();
+        followedStreamer = null; browsingStreamerLibrary = false;
         guestBrowse = new(); guestLibraryNotice = null; guestBrowsePending = false; ++guestBrowseRequest;
         guestCurrentBrowse = null; guestHadLibraryLease = false; guestParentTitle = null;
         client.LibraryThumbnail = CachedLibraryThumbnail;
@@ -1251,17 +1286,23 @@ public partial class MainWindow : Window
             }
             Dispatcher.BeginInvoke(async () => { if (room == client) await Guard(() => OnRoomMessage(msg)); });
         };
-        // A guest's connection is ready for the host's queues; queue messages and edits travel on it.
+        // A connection to another member is ready for this app's queues; queue messages and edits travel on it.
         client.LibraryPeerReady += id => Dispatcher.BeginInvoke(() => { if (room == client && client.Identity?.Host == true) ShareQueues(id); });
         client.LibraryMessage += (id, message) => Dispatcher.BeginInvoke(() => { if (room == client) ReceiveQueueMessage(client, id, message); });
-        client.Status += text => Dispatcher.BeginInvoke(() =>
+        client.Status += text => Dispatcher.BeginInvoke(async () =>
         {
             if (room != client) return; ConnectionStatus.Text = text;
-            if (text.StartsWith("Host disconnected", StringComparison.Ordinal) || text.StartsWith("Host offline", StringComparison.Ordinal))
-            { playbackRecovery.Clear(); player?.SetPause(true); target = null; loadedMedia = null; ready = false; ++loadGeneration; RoomSubtitle.Text = "Host offline · Waiting for the host to return"; SetStatus(text); UpdateSessionControls(); RefreshVoice(); }
-            if (text.StartsWith("Disconnected", StringComparison.Ordinal) || text.StartsWith("Room discovery is offline", StringComparison.Ordinal))
+            // The room service ended this connection on purpose: removed by the room's creator, or entered from another window.
+            if (text.StartsWith("Closed", StringComparison.Ordinal))
+            {
+                var reason = client.ClosedReason ?? "The room closed this connection.";
+                await Guard(async () => { ShowPage("Rooms"); await Disconnect(); RefreshSavedRooms(); });
+                SetStatus(reason); InAppDialog.Toast(this, reason, TimeSpan.FromSeconds(8));
+                return;
+            }
+            if (text.StartsWith("Disconnected", StringComparison.Ordinal) || text.StartsWith("Room service is offline", StringComparison.Ordinal))
             { SetStatus(text); _ = ReconnectRoomAsync(client); }
-            if (text.StartsWith("Host connection restored", StringComparison.Ordinal) || text.StartsWith("Reconnecting to host", StringComparison.Ordinal)) RefreshVoice();
+            if (text.StartsWith("Connection to the stream restored", StringComparison.Ordinal) || text.StartsWith("Reconnecting to the stream", StringComparison.Ordinal)) RefreshVoice();
         });
         VoiceRoomChanged(client, reconnecting: roomReconnect is not null);
         return client;
@@ -1296,39 +1337,36 @@ public partial class MainWindow : Window
             case "catalog-pointer": ReceiveGuestPointer(message); break;
             case "session-artwork-chunk": ReceiveHeroArtwork(message); break;
             case "catalog-started":
-                if (!GuestLibrary) selected = playingItem = items.FirstOrDefault(item => item.Id == message.Target);
+                // Someone looking through this library picked a title, and this app started it for the room.
+                if (room.Identity?.Host == true) selected = playingItem = items.FirstOrDefault(item => item.Id == message.Target);
                 ShowPage("Room"); break;
             case "catalog-page": case "catalog-error": if (!ReceiveArtworkError(message)) ReceiveHostLibrary(message); break;
-            case "welcome":
-                RememberCurrentRoom();
-                if (room.Identity!.Host && room.HostedMedia is not null)
-                {
-                    room.Send(new("media", Data: Wire.Serialize(room.HostedMedia.Media)));
-                    PublishQueue();
-                    RoomSubtitle.Text = "Private room · Share your invitation to bring friends";
-                    SetThreadExecutionState(0x80000003);
-                }
+            case "welcome": RememberCurrentRoom(); RefreshPlayerEmpty(); break;
+            // The streaming role moved to this app, or away from it.
+            case "role": OnRoleChanged(room, message.Number == 1); break;
+            // Who belongs to the room changed, or who its creator removed.
+            case "members": RefreshSavedRooms(); break;
+            case "stream-ended":
+                if (message.Text is { Length: > 0 } streamer) SetStatus(streamer + " left, so their video ended.");
                 break;
-            case "admitted": RoomSubtitle.Text = "Admitted · Connecting to host…"; break;
             case "snapshot":
                 var snapshot = Wire.Read<RoomSnapshot>(message.Data!);
                 ShareQueuesWithNewGuests(snapshot);
                 SyncCurrentRoomName(snapshot);
+                // A different streamer numbers its playback states from the start.
+                var streamerId = snapshot.People.FirstOrDefault(p => p.IsHost)?.Id;
+                if (streamerId != followedStreamer)
+                {
+                    followedStreamer = streamerId; ResetRoomPlaybackTracking();
+                    // The queues shared by the previous streamer are not this one's.
+                    if (room.Identity?.Host != true) ClearHostQueues();
+                }
                 if (room.Identity?.Host == false)
                 {
-                    QueueStatus.Text = $"{snapshot.Queue?.Length ?? 0} videos in the host's queue";
+                    QueueStatus.Text = $"{snapshot.Queue?.Length ?? 0} videos in {StreamerName}'s queue";
                     SetQueuePill("Queue", snapshot.Queue?.Length > 0 ? $"{snapshot.Queue.Length} videos" : "Off");
                     if (guestQueueSource is null || !ReferenceEquals(QueueList.ItemsSource, guestQueueSource) || !(snapshot.Queue ?? []).SequenceEqual(guestQueueTitles))
                     { guestQueueTitles = snapshot.Queue ?? []; QueueList.ItemsSource = guestQueueSource = guestQueueTitles.Select(title => new { QueueTitle = title }).ToArray(); }
-                }
-                foreach (var id in pendingAdmissions.Keys.ToArray())
-                {
-                    var participant = snapshot.People.FirstOrDefault(p => p.Id == id);
-                    if (participant is null || participant.Approved)
-                    {
-                        pendingAdmissions.Remove(id);
-                        ShowRoomFeedback(participant is null ? "The guest left the room." : $"{participant.Name} admitted.");
-                    }
                 }
                 RecordRoomSession();
                 RefreshPeople(snapshot, settings: false); RefreshSavedRooms();
@@ -1336,7 +1374,8 @@ public partial class MainWindow : Window
                 SharedControls.IsEnabled = room.Identity?.Host == true; SharedControls.IsChecked = snapshot.SharedControls; RefreshSharedControlsChip();
                 if (room.Identity?.Host != true && !snapshot.SharedControls) { playbackPause.Clear(); playbackIntent.Clear(); }
                 if (snapshot.Playback is not null) AcceptState(snapshot.Playback);
-                if (snapshot.Media is not null && snapshot.Media.Id != loadedMedia) await LoadRoomMedia(snapshot.Media);
+                if (snapshot.Media is not null && snapshot.Media.Id != loadedMedia) { streamEndTimer.Stop(); await LoadRoomMedia(snapshot.Media); }
+                else if (snapshot.Media is null) RoomVideoEnded();
                 if (ready) RefreshTracks();
                 UpdateSessionControls();
                 RefreshSharedLibrary();
@@ -1504,7 +1543,7 @@ public partial class MainWindow : Window
             if (media.Extension.Equals(".avi", StringComparison.OrdinalIgnoreCase)) vlcMedia.AddOption(":demux=avformat");
             vlcMedia.AddOption(":sub-autodetect-file=0");
             if (client != room || generation != loadGeneration) return;
-            RoomHeading.Text = client.Snapshot?.Name ?? media.Title; RoomSubtitle.Text = media.Title + " · " + (client.Identity?.Host == true ? "You are hosting" : "Streaming from host");
+            RoomHeading.Text = client.Snapshot?.Name ?? media.Title; RoomSubtitle.Text = media.Title + " · " + StreamCaption(client);
             ShowKnownMusic();
             await PrepareVideoSurface(openPlayer: RoomPage.Visibility == Visibility.Visible);
             if (client != room || generation != loadGeneration) return;
@@ -1665,12 +1704,14 @@ public partial class MainWindow : Window
         RoomPlaybackNotice.Visibility = explanation is null || PlayerEmpty.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
         if (explanation is not null) RoomSubtitle.Text = explanation;
         else if (snapshot?.Media is { } movie)
-            RoomSubtitle.Text = movie.Title + " · " + (room!.Identity?.Host == true ? "You are hosting" : "Streaming from host");
+            RoomSubtitle.Text = movie.Title + " · " + StreamCaption(room!);
+        else if (room is { IsConnected: true } quiet)
+            RoomSubtitle.Text = quiet.Identity?.Host != true && !quiet.DirectControlsReady.IsCompletedSuccessfully ? "Connecting to the room…" : "Nothing playing · Anyone can start a video";
     }
     private void SendPlayback(bool playing, long position, bool seek = false, string? stopReason = null)
     {
         if (room?.Snapshot?.Media is not { } media) return;
-        if (room.Identity?.Host != true && room.Snapshot.SharedControls != true) { SetStatus("The host controls playback."); return; }
+        if (room.Identity?.Host != true && room.Snapshot.SharedControls != true) { SetStatus(StreamerName + " is playing the video and controls playback."); return; }
         if (!seek && target is { } current && player?.State != VLCState.Ended)
             position = playbackIntent.Position(current, Math.Max(0, player?.Time ?? 0), room.ServerNowMs);
         var command = new PlaybackState(0, media.Id, playing, position, 0, Guid.NewGuid().ToString("N"), Seek: seek, Stop: stopReason is null ? null : new(stopReason));
@@ -1691,7 +1732,7 @@ public partial class MainWindow : Window
     // The button, the L key and the … menu row all step to the next mode.
     private void ToggleLoop(object sender, RoutedEventArgs e)
     {
-        if (!LoopButton.IsEnabled) { RefreshLoopButton(); SetStatus("The host controls looping."); return; }
+        if (!LoopButton.IsEnabled) { RefreshLoopButton(); SetStatus(StreamerName + " is playing the video and controls looping."); return; }
         loopMode = loopMode switch { LoopMode.Off => LoopMode.All, LoopMode.All => LoopMode.One, _ => LoopMode.Off };
         RefreshLoopButton();
         // A folded Loop row in the … menu shows the new mode too.
@@ -1706,13 +1747,13 @@ public partial class MainWindow : Window
     private string LoopLabel => loopMode switch { LoopMode.All => "Loop all", LoopMode.One => "Loop one", _ => "Loop off" };
     private void RefreshLoopButton()
     {
-        // A guest's own earlier choice must neither show nor carry over if hosting passes to them; the host chooses.
+        // A viewer's own earlier choice must neither show nor carry over if the streaming role passes to them.
         if (room?.Identity is { Host: false } && loopMode != LoopMode.Off) { loopMode = LoopMode.Off; RefreshOverflowMenu(); }
         // The toggle's own click flips IsChecked; the mode decides it.
         LoopButton.IsChecked = loopMode != LoopMode.Off;
         LoopButton.Content = loopMode == LoopMode.One ? "" : "";
         var label = LoopLabel;
-        LoopButton.ToolTip = !LoopButton.IsEnabled ? "The host controls looping" : label + " (L)";
+        LoopButton.ToolTip = !LoopButton.IsEnabled ? "Whoever plays the video controls looping" : label + " (L)";
         System.Windows.Automation.AutomationProperties.SetName(LoopButton, label);
     }
     private void TogglePlayback(object sender, RoutedEventArgs e)
@@ -1741,7 +1782,7 @@ public partial class MainWindow : Window
     private void SeekStarted(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;
-        if (!CanSeek()) { SetStatus("The host controls playback, or the video is not ready to seek."); return; }
+        if (!CanSeek()) { SetStatus(room is { Identity.Host: false } ? StreamerName + " controls playback, or the video is not ready to seek." : "The video is not ready to seek."); return; }
         seeking = true; Timeline.CaptureMouse(); UpdateScrub(e.GetPosition(Timeline).X);
     }
     private void UpdateScrub(double x)
@@ -1872,7 +1913,7 @@ public partial class MainWindow : Window
     private void CopyInvite(object sender, RoutedEventArgs e)
     {
         if (room?.IsConnected != true || room.Identity is null) { SetStatus("Create a room from the library first."); return; }
-        try { Clipboard.SetText(room.ServerAddress + "#" + room.Identity.Room); SetStatus("Invitation copied. Guests need the Windows app and host approval."); }
+        try { Clipboard.SetText(room.ServerAddress + "#" + room.Identity.Room); SetStatus("Invitation copied. Anyone who has it and the Windows app can join."); }
         catch (ExternalException) { SetStatus("Clipboard is busy. Try Copy invite again."); }
     }
     private void ShowRoomFeedback(string text)
@@ -1883,61 +1924,36 @@ public partial class MainWindow : Window
     {
         snapshot ??= room?.Snapshot;
         if (snapshot is null) return;
+        var me = room?.Identity?.Peer; var playing = snapshot.Media is not null;
         var people = snapshot.People.Select(p => new
         {
-            p.Id, p.Name,
+            p.Id, Name = p.Id == me ? p.Name + " (you)" : p.Name,
             Voice = PresenceFor(p.Id, p.Name),
-            Status = !p.Approved ? (pendingAdmissions.ContainsKey(p.Id) ? "Waiting for admission confirmation…" : "Waiting for approval")
-                : (p.IsHost ? "Host · " : "Admitted · ") + (p.Ready ? "Ready" : "Buffering"),
-            Actions = room?.Identity?.Host == true && !p.IsHost ? Visibility.Visible : Visibility.Collapsed,
-            AdmitVisibility = p.Approved ? Visibility.Collapsed : Visibility.Visible,
-            AdmitLabel = pendingAdmissions.ContainsKey(p.Id) ? "Admitting…" : "Admit",
-            CanAdmit = !pendingAdmissions.ContainsKey(p.Id)
+            // While a video plays: who streams it, and whether each viewer has it loaded.
+            Status = !playing ? "In the room" : p.IsHost ? "Streaming" : p.Ready ? "Watching" : "Buffering",
+            // The room's creator can remove anyone else.
+            Actions = room?.Identity?.Owner == true && p.Id != me ? Visibility.Visible : Visibility.Collapsed,
         }).ToList();
         // Unchanged rows keep their containers instead of being rebuilt on every snapshot.
         if (PeopleList.ItemsSource is not System.Collections.IEnumerable shown || !shown.Cast<object>().SequenceEqual(people)) PeopleList.ItemsSource = people;
-        // The pill counts everyone in the room; for the host, guests waiting to be let in stand out instead.
-        var waiting = room?.Identity?.Host == true ? snapshot.People.Count(p => !p.Approved) : 0;
-        ParticipantsPillDetail.Text = waiting > 0 ? $"{waiting} waiting" : snapshot.People.Count().ToString();
-        ParticipantsPillDetail.Foreground = (Brush)FindResource(waiting > 0 ? "PlayerAccent" : "PlayerMuted");
+        ParticipantsPillDetail.Text = snapshot.People.Length.ToString();
         if (settings) RefreshRoomSettings();
     }
-    private async void Admit(object sender, RoutedEventArgs e)
-    {
-        var client = room;
-        if (client?.Identity?.Host != true || ((Button)sender).Tag is not string id || pendingAdmissions.ContainsKey(id)) return;
-        if (client.Snapshot?.People.Count(p => p.Approved) >= 5)
-        {
-            ShowRoomFeedback("The room is full (5 participants). Remove someone before admitting another guest."); return;
-        }
-        var request = Guid.NewGuid();
-        pendingAdmissions[id] = request;
-        ShowRoomFeedback("Admitting guest…"); RefreshPeople();
-        try
-        {
-            client.Send(new("admit", Target: id));
-            await Task.Delay(TimeSpan.FromSeconds(10), lifetime.Token);
-            if (room == client && pendingAdmissions.GetValueOrDefault(id) == request)
-            {
-                pendingAdmissions.Remove(id); RefreshPeople();
-                ShowRoomFeedback("Admission has not been confirmed. Check the connection and try again.");
-            }
-        }
-        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        catch (Exception ex)
-        {
-            if (room != client || pendingAdmissions.GetValueOrDefault(id) != request) return;
-            pendingAdmissions.Remove(id); RefreshPeople(); ShowRoomFeedback(ex.Message);
-        }
-    }
+    // The room's creator removes someone, here or away, by their connection or member id. They can't come back until
+    // the creator lets them in again.
     private void RemovePeer(object sender, RoutedEventArgs e)
     {
-        try
-        {
-            var id = (string)((Button)sender).Tag;
-            room?.Send(new("remove", Target: id));
-        }
+        if (room is not { } client || ((Button)sender).Tag is not string id) return;
+        var name = client.Roster.FirstOrDefault(p => p.Id == id)?.Name ?? client.Members.FirstOrDefault(member => member.Id == id)?.Name ?? "this person";
+        if (!Dialogs.Confirm(this, "Remove " + name + "?", name + " leaves the room and can't join it again until you let them back in.", "Remove")) return;
+        try { client.Send(new("remove", Target: id)); ShowRoomFeedback(name + " was removed."); }
         catch (IOException ex) { ShowRoomFeedback(ex.Message); SetStatus(ex.Message); }
+    }
+    private void RestoreMember(object sender, RoutedEventArgs e)
+    {
+        if (room is not { } client || ((Button)sender).Tag is not string id) return;
+        try { client.Send(new("restore", Target: id)); }
+        catch (IOException ex) { SetStatus(ex.Message); }
     }
     private void ControlsChanged(object sender, RoutedEventArgs e)
     {
@@ -1985,12 +2001,7 @@ public partial class MainWindow : Window
         if (index < 0) { SetStatus(direction > 0 ? "End of queue." : "Start of queue."); return; }
         await PlayQueueAt(index);
     }
-    private void StartHostedVideo(MediaItem item)
-    {
-        var prepared = RoomClient.PrepareHostedFile(item.Path, PlaybackTitle(item));
-        room!.PublishHostedFile(prepared, true); playingItem = item;
-    }
-    private async void LeaveRoom(object sender, RoutedEventArgs e) => await Guard(async () => { var wasRoom = room is not null; ShowPage(wasRoom ? "Rooms" : "Library"); await Disconnect(); RoomHeading.Text = "Your watch room"; RoomSubtitle.Text = "Room closed"; RefreshSavedRooms(); });
+    private async void LeaveRoom(object sender, RoutedEventArgs e) => await Guard(async () => { var wasRoom = room is not null; ShowPage(wasRoom ? "Rooms" : "Library"); await Disconnect(); RoomHeading.Text = "BlackPearl player"; RoomSubtitle.Text = wasRoom ? "You left the room" : ""; RefreshSavedRooms(); });
     private async Task Disconnect(bool preserveFullscreen = false, bool reconnecting = false)
     {
         await VoiceRoomClosed(reconnecting);
@@ -2008,6 +2019,7 @@ public partial class MainWindow : Window
         UpdateSystemMediaControls();
         RoomPlaybackNotice.Visibility = Visibility.Collapsed;
         RoomPlaybackNoticeText.Text = "";
+        streamEndTimer.Stop(); followedStreamer = null; browsingStreamerLibrary = false;
         pendingSeek = null; seeking = false; playbackPause.Clear(); playbackIntent.Clear(); appliedGeneration = readyGeneration = -1; ++loadGeneration; var old = room; room = null; target = null; loadedMedia = null; ready = false;
         mediaLoadCancellation?.Cancel();
         bridge?.CancelPendingReads();
@@ -2023,7 +2035,8 @@ public partial class MainWindow : Window
             await Task.WhenAll(StopNativePlayback(), stopBridge, disconnect);
         }
         finally { loading.Release(); }
-        PeopleList.ItemsSource = null; ParticipantsPillDetail.Text = ""; pendingAdmissions.Clear(); RoomFeedback.Text = ""; RoomFeedback.Visibility = Visibility.Collapsed;
+        PeopleList.ItemsSource = null; ParticipantsPillDetail.Text = ""; RoomFeedback.Text = ""; RoomFeedback.Visibility = Visibility.Collapsed;
+        RefreshPlayerEmpty();
         SetThreadExecutionState(0x80000000); ConnectionStatus.Text = "Local playback";
         guestBrowsePending = false; ++guestBrowseRequest; RefreshSharedLibrary();
         UpdateSessionControls(); RefreshVoice();
@@ -2055,7 +2068,7 @@ public partial class MainWindow : Window
         if (InviteButton is null || QueueList is null) return;
         RefreshQueueList();
         var connectedRoom = room?.IsConnected == true;
-        // Guests see the shared-controls chip as read-only status; only the host can change it.
+        // Viewers see the shared-controls chip as read-only status; whoever plays the video changes it.
         SharedControls.Visibility = connectedRoom ? Visibility.Visible : Visibility.Collapsed;
         SharedControls.IsEnabled = connectedRoom && room!.Identity?.Host == true;
         RefreshSharedControlsChip(); RefreshRoomStatusDot();
@@ -2078,7 +2091,7 @@ public partial class MainWindow : Window
             : QueuePlayback.FindNext(queue, queuePosition, 1, x => RecentlyExists(x.Path)) >= 0 && (room is null || connectedRoom && room!.Identity?.Host == true);
         PreviousButton.IsEnabled = restarts || (ShowingEpisodeList ? canManageEpisodes && AdjacentEpisode(-1) is not null
             : QueuePlayback.FindNext(queue, queuePosition, -1, x => RecentlyExists(x.Path)) >= 0 && (room is null || connectedRoom && room!.Identity?.Host == true));
-        // Looping restarts the video when it ends, which only the host decides in a room.
+        // Looping restarts the video when it ends, which whoever plays it decides in a room.
         LoopButton.IsEnabled = canManageEpisodes;
         RefreshLoopButton();
         ReturnToRoomButton.IsEnabled = ready || room is not null;
@@ -2097,7 +2110,7 @@ public partial class MainWindow : Window
         // Checking which saved-queue videos are playable scans the library, so playback ticks leave it to the Queues page,
         // which refreshes when it opens. Losing permission still disables its actions at once.
         if (QueuesPage.Visibility == Visibility.Visible) UpdateSavedQueueActions();
-        else if (!canManageQueue) PlaySavedQueueButton.IsEnabled = PlaySelectedSavedQueueButton.IsEnabled = AddQueueVideosButton.IsEnabled = false;
+        else if (!QueueEditable) PlaySavedQueueButton.IsEnabled = PlaySelectedSavedQueueButton.IsEnabled = AddQueueVideosButton.IsEnabled = false;
     }
     private void Fullscreen(object sender, RoutedEventArgs e)
     {

@@ -737,7 +737,7 @@ public sealed partial class RoomClient : IAsyncDisposable
         if (!coordinator.Apply(sender, message, now, out var announcement))
         {
             var error = new WireMessage(browse is null ? "error" : "catalog-error", Number: message.Number,
-                Text: browse is null ? "The host controls this action, or the command is no longer valid." : !coordinator.LibraryBrowsing ? "The host has disabled library browsing." : "Another guest is browsing. Try again when they finish.");
+                Text: browse is null ? "Whoever is playing the video controls this, or the command is no longer valid." : !coordinator.LibraryBrowsing ? "They have turned off library browsing." : "Someone else is browsing. Try again when they finish.");
             if (sender == Identity!.Peer) Message?.Invoke(error); else SendPeer(sender, error);
             return;
         }
@@ -759,9 +759,9 @@ public sealed partial class RoomClient : IAsyncDisposable
             {
                 PlaybackDiagnostics.Record("library-interaction-error", new { room = diagnosticId, command = message.Type, error = ex.GetType().Name });
                 if (negotiated.ContainsKey(sender))
-                    SendPeer(sender, new("catalog-error", Number: message.Number, Text: ex is InvalidDataException ? ex.Message : "The host could not load its library."));
+                    SendPeer(sender, new("catalog-error", Number: message.Number, Text: ex is InvalidDataException ? ex.Message : "Their library could not be loaded."));
             }))
-                SendPeer(sender, new("catalog-error", Number: message.Number, Text: "The host is busy. Try again shortly."));
+                SendPeer(sender, new("catalog-error", Number: message.Number, Text: "Their app is busy. Try again shortly."));
             return;
         }
         if (message.Type == "catalog-view")
@@ -946,12 +946,12 @@ public sealed partial class RoomClient : IAsyncDisposable
     }
     public async Task<IMediaSource> GetSourceAsync(SharedMedia media, CancellationToken ct)
     {
-        PlaybackDiagnostics.Record("media-source-request", new { room = diagnosticId, role = Identity?.Host == true ? "host" : "guest", media.Extension, bytes = media.Length,
+        PlaybackDiagnostics.Record("media-source-request", new { room = diagnosticId, streamer = Identity?.Host == true, media.Extension, bytes = media.Length,
             directReady = directConnected.Task.IsCompletedSuccessfully });
         if (Identity?.Host == true) return HostedMedia?.Media.Id == media.Id ? HostedMedia : assets.GetValueOrDefault(media.Id) ?? throw new InvalidOperationException("No shared media selected");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.Token); deadline.CancelAfter(TimeSpan.FromSeconds(35));
         await directConnected.Task.WaitAsync(deadline.Token);
-        var peer = hostPeer is not null && peers.TryGetValue(hostPeer, out var host) ? host : throw new IOException("Host media connection is unavailable");
+        var peer = hostPeer is not null && peers.TryGetValue(hostPeer, out var host) ? host : throw new IOException("The connection to whoever is playing the video is unavailable");
         await peer.Ready.WaitAsync(deadline.Token);
         PlaybackDiagnostics.Record("media-source-ready", new { room = diagnosticId, transport = peer.DiagnosticId });
         return new RemoteMediaSource(media, (offset, count, token) => ReadRemoteRangeAsync(media, offset, count, token));
@@ -969,7 +969,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                 deadline.Token.ThrowIfCancellationRequested();
                 await directConnected.Task.WaitAsync(deadline.Token);
                 if (Snapshot?.Media is not { } selected || selected.Id != media.Id && selected.Subtitles?.Any(s => s.Id == media.Id) != true)
-                    throw new IOException("The host is no longer sharing this media.");
+                    throw new IOException("This video is no longer playing in the room.");
                 var hostId = hostPeer;
                 if (hostId is null || !peers.TryGetValue(hostId, out var peer) || peer == failed || !negotiated.ContainsKey(hostId))
                 { await Task.Delay(50, deadline.Token); continue; }
@@ -993,7 +993,7 @@ public sealed partial class RoomClient : IAsyncDisposable
             }
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && !lifetime.IsCancellationRequested)
-        { throw new IOException("The host connection did not recover within 45 seconds.", ex); }
+        { throw new IOException("The connection to whoever is playing the video did not recover within 45 seconds.", ex); }
     }
     private static string DiagnosticReason(string reason)
     {

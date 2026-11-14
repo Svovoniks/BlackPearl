@@ -18,7 +18,7 @@ public sealed record RoomAddress(string Server, string Code)
         var server = ValidateServer(separator >= 0 ? value[..separator] : defaultServer);
         var code = (separator >= 0 ? value[(separator + 1)..] : value).Trim().ToUpperInvariant();
         if (code.Length != 24 || code.Any(c => !Uri.IsHexDigit(c)))
-            throw new ArgumentException("Paste the full invitation link or its 24-character room code. Ask the host for a fresh invitation if it has expired.");
+            throw new ArgumentException("Paste the full invitation link or its 24-character room code. Ask for a fresh invitation if it no longer works.");
         return new(server, code);
     }
 }

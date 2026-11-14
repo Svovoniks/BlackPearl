@@ -144,12 +144,12 @@ public partial class MainWindow
     private QueueAddRow[] queueAddRows = [];
     private async void AddQueueVideos(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
-        if (OpenedQueue is not { } saved || !CanEditQueue()) return;
+        if (OpenedQueue is not { } saved || !CanEditSavedQueues()) return;
         if (QueueAddPanel.Visibility == Visibility.Visible) { QueueAddSearch.Focus(); return; }
         // Checking files can block on a sleeping or network drive, so it runs off the UI thread.
         var library = items;
         var anyAvailable = await Task.Run(() => library.Any(x => x.Available && File.Exists(x.Path)));
-        if (closing || OpenedQueue?.Id != saved.Id || !CanEditQueue()) return;
+        if (closing || OpenedQueue?.Id != saved.Id || !CanEditSavedQueues()) return;
         if (!anyAvailable)
         {
             ShowPage("Folders");

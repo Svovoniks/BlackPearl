@@ -6,7 +6,7 @@ public static class RoomPlaybackStatus
     // the explanation even when the paused playback revision stays the same.
     public static string? Describe(RoomSnapshot? snapshot, bool reconnecting = false)
     {
-        if (reconnecting) return "Connection interrupted · Reconnecting to host…";
+        if (reconnecting) return "Connection interrupted · Reconnecting…";
         if (snapshot?.Media is null || snapshot.Playback is not { Playing: false } state) return null;
         if (state.WantsPlayback || state.Stop?.Reason == "buffering")
         {

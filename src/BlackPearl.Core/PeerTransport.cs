@@ -378,7 +378,7 @@ public sealed class PeerTransport : IDisposable
         {
             if (message.Type is "library-item" or "library-page-end")
             {
-                if (catalogChannel?.IsOpen != true) throw new IOException("Guest library is not connected");
+                if (catalogChannel?.IsOpen != true) throw new IOException("The library connection is not open");
                 catalogChannel.Send(text);
             }
             else controls!.Send(text);

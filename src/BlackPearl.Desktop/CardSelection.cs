@@ -71,7 +71,7 @@ public partial class MainWindow
         CardSelectionCount.Text = views.Length == 1 ? "1 selected" : $"{views.Length} selected";
         var videos = SelectionVideos(views);
         var playable = videos.Any(x => x.Available && File.Exists(x.Path));
-        SelectionPlay.IsEnabled = playable && room?.Identity?.Host != false;
+        SelectionPlay.IsEnabled = playable;
         SelectionQueue.IsEnabled = videos.Length > 0 && QueueChangeable;
         var watchable = views.Where(Watchable).ToArray();
         SelectionWatched.IsEnabled = watchable.Any(view => !view.IsWatched);
@@ -91,14 +91,16 @@ public partial class MainWindow
         .DistinctBy(x => x.Id).ToArray();
 
     private void SelectionPlayClick(object sender, RoutedEventArgs e) => PlayCardVideos(SelectionVideos(SelectedCardViews), (FrameworkElement)sender);
-    // Replaces the local queue with the videos that can play and starts the first.
-    private void PlayCardVideos(IEnumerable<MediaItem> videos, FrameworkElement source)
+    // Replaces the local queue with the videos that can play and starts the first. In a room where someone else is
+    // playing, that takes over the stream.
+    private async void PlayCardVideos(IEnumerable<MediaItem> videos, FrameworkElement source) => await Guard(async () =>
     {
-        if (!CanEditQueue()) return;
+        var playable = videos.Where(x => x.Available && File.Exists(x.Path)).ToArray();
+        if (playable.Length == 0 || !await BecomeStreamer() || !CanEditQueue()) return;
         queue.Clear(); queuePosition = -1; activeQueueId = null;
-        foreach (var video in videos.Where(x => x.Available && File.Exists(x.Path))) queue.Add(video);
-        PublishQueue(); RefreshQueuePickers(); NextQueued(source, new RoutedEventArgs());
-    }
+        queue.AddRange(playable);
+        PublishQueue(); RefreshQueuePickers(); await PlayQueueStep(1);
+    });
     private void SelectionQueueClick(object sender, RoutedEventArgs e) => ShowAddToQueueMenu((FrameworkElement)sender, SelectionVideos(SelectedCardViews));
     private void SelectionWatchedClick(object sender, RoutedEventArgs e) => MarkSelectionWatched(true);
     private void SelectionUnwatchedClick(object sender, RoutedEventArgs e) => MarkSelectionWatched(false);
