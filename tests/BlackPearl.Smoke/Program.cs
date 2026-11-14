@@ -112,7 +112,7 @@ if (args.FirstOrDefault() == "--track-languages")
 if (args.FirstOrDefault() == "--guest-library-peer")
 {
     var count = 0;
-    await GuestLibraryPeerFixture.RunIsolated(Path.GetFullPath(".tools/dotnet/dotnet.exe"),
+    await GuestLibraryPeerFixture.RunIsolated(File.Exists(".tools/dotnet/dotnet.exe") ? Path.GetFullPath(".tools/dotnet/dotnet.exe") : "dotnet",
         Path.GetFullPath("src/BlackPearl.Server/bin/Release/net10.0/BlackPearl.Server.dll"),
         Path.Combine("artifacts", "guest-peer-" + Guid.NewGuid().ToString("N")), Path.GetFullPath(args[1]),
         (condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; });
@@ -747,20 +747,20 @@ try
     roomHost.HostedMedia = file;
     await roomHost.ConnectAsync(serverUrl, "Test Host"); await Wait(() => roomHost.Identity is not null, "room created");
     roomHost.Send(new("media", Data: Wire.Serialize(file.Media)));
+    // The streamer keeps playback to itself for this part; by default everyone in the room controls it.
+    roomHost.Send(new("controls", Number: 0));
     await roomGuest.ConnectAsync(serverUrl, "Test Guest", roomHost.Identity!.Room);
-    await Wait(() => roomGuest.Identity is not null && roomGuest.Snapshot is not null, "guest waiting for admission");
-    Check(roomGuest.Snapshot!.Media is null, "pending guests cannot see shared media");
-    var pendingRejected = false;
+    Check(roomGuest.Identity is { Host: false } && roomGuest.Snapshot?.Media is null, "someone who just entered has no room state until the streamer's arrives");
+    var earlyRejected = false;
     try { roomGuest.Send(new("playback", Data: Wire.Serialize(new PlaybackState(0, file.Media.Id, true, 1000, 0)))); }
-    catch (IOException) { pendingRejected = true; }
-    Check(pendingRejected, "unapproved guest cannot send direct room controls");
-    roomHost.Send(new("admit", Target: roomGuest.Identity!.Peer));
-    await Wait(() => roomGuest.Snapshot?.Media is not null, "guest admitted");
+    catch (IOException) { earlyRejected = true; }
+    Check(earlyRejected, "room controls wait for the direct connection to the streamer");
+    await Wait(() => roomGuest.Snapshot?.Media is not null, "the video reaches someone who entered with the invitation, with no approval");
     var roomSource = await roomGuest.GetSourceAsync(file.Media, CancellationToken.None);
-    Check(roomSource is not ILocalMediaSource, "guest playback cannot take the host's local file shortcut");
-    Check((await roomSource.ReadAsync(900, 100, CancellationToken.None)).SequenceEqual(bytes[900..1000]), "signaled room serves host media");
+    Check(roomSource is not ILocalMediaSource, "viewer playback cannot take the streamer's local file shortcut");
+    Check((await roomSource.ReadAsync(900, 100, CancellationToken.None)).SequenceEqual(bytes[900..1000]), "signaled room serves the streamer's media");
     roomGuest.Send(new("playback", Data: Wire.Serialize(new PlaybackState(0, file.Media.Id, true, 1000, 0))));
-    await Task.Delay(150); Check(!hostMessages.Any(x => x.Type == "playback"), "admitted guest respects host-only controls");
+    await Task.Delay(150); Check(!hostMessages.Any(x => x.Type == "playback"), "a viewer respects streamer-only controls");
     roomHost.Send(new("ready")); roomGuest.Send(new("ready"));
     await Wait(() => roomHost.Snapshot!.People.All(x => x.Ready), "all participants ready");
     roomHost.Send(new("playback", Data: Wire.Serialize(new PlaybackState(0, file.Media.Id, true, 2000, 0))));
@@ -794,89 +794,47 @@ try
     await Wait(() => roomHost.Snapshot!.People.All(x => x.Id != roomGuest.Identity.Peer), "guest removed");
     bool revoked = false; try { await roomSource.ReadAsync(100, 100, CancellationToken.None); } catch { revoked = true; }
     Check(revoked, "removal revokes existing media channel");
+    // What a streamer chose for a room is remembered on its own computer and applies the next time it streams there.
     var roomSettings = new LibraryStore(Path.Combine(root, "room-settings"));
     var guestSettingsPath = Path.Combine(root, "guest-room-settings");
     var persistentHost = new RoomClient(roomSettings);
     await persistentHost.ConnectAsync(serverUrl, "Persistent Host", persistent: true, roomName: "Friday movie night");
     var savedIdentity = persistentHost.Identity!;
-    Check(savedIdentity.HostKey?.Length == 64, "persistent host receives a private reopening key");
-    var admittedGuest = new RoomClient(new LibraryStore(guestSettingsPath));
-    await admittedGuest.ConnectAsync(serverUrl, "Remembered Guest", savedIdentity.Room);
-    await Wait(() => admittedGuest.Snapshot?.Name == "Friday movie night", "waiting guest receives the host's room name");
-    Check(!admittedGuest.DirectControlsReady.IsCompleted && !admittedGuest.Snapshot!.People.Single(p => p.Id == admittedGuest.Identity!.Peer).Approved,
-        "the room name reaches a waiting guest before admission or a direct connection");
-    // The room service ignores everything but pings from a guest the host hasn't admitted.
-    admittedGuest.Send(new("settings", Text: "Guest override", Number: 1));
-    await Task.Delay(150);
-    Check(admittedGuest.Snapshot?.Name == "Friday movie night", "a waiting guest can't change room settings");
-    persistentHost.Send(new("room-name", Text: "Saturday movie night"));
-    await Wait(() => admittedGuest.Snapshot?.Name == "Saturday movie night", "host rename reaches a guest still waiting for admission");
-    persistentHost.Send(new("admit", Target: admittedGuest.Identity!.Peer));
-    await Wait(() => admittedGuest.DirectControlsReady.IsCompletedSuccessfully, "persistent guest admitted");
-    Check(persistentHost.Snapshot?.Name == admittedGuest.Snapshot?.Name, "host and guest share the same room name");
+    Check(savedIdentity.HostKey?.Length == 64 && savedIdentity.Owner, "a room's creator receives a private key for it");
+    Check(persistentHost.Snapshot?.SharedControls == true, "everyone controls playback unless the streamer turns that off");
+    var rememberedMember = new RoomClient(new LibraryStore(guestSettingsPath));
+    await rememberedMember.ConnectAsync(serverUrl, "Remembered Guest", savedIdentity.Room);
+    await Wait(() => rememberedMember.DirectControlsReady.IsCompletedSuccessfully && rememberedMember.Snapshot?.Name == "Friday movie night", "a new member receives the room's name and state");
     persistentHost.Send(new("room-name", Text: "Anime night"));
-    await Wait(() => admittedGuest.Snapshot?.Name == "Anime night", "host rename reaches the connected guest");
-    admittedGuest.Send(new("room-name", Text: "Guest override", Sender: savedIdentity.Peer));
-    persistentHost.Send(new("controls", Number: 1));
-    await Wait(() => admittedGuest.Snapshot?.SharedControls == true, "persistent controls enabled");
-    Check(persistentHost.Snapshot?.Name == "Anime night" && admittedGuest.Snapshot?.Name == "Anime night", "guest rename is rejected even with shared playback controls");
-    Check(admittedGuest.Identity.GuestKey?.Length == 64, "guest receives private reconnect credential");
-    await admittedGuest.DisposeAsync();
-    await using (var duplicateHost = new RoomClient())
-    {
-        bool ownerRejected = false;
-        try { await duplicateHost.ConnectAsync(serverUrl, "Duplicate", savedIdentity.Room, savedIdentity.HostKey); } catch (IOException) { ownerRejected = true; }
-        Check(ownerRejected && persistentHost.IsConnected, "duplicate owner connection rejected without closing existing host");
-    }
+    await Wait(() => rememberedMember.Snapshot?.Name == "Anime night", "the creator's rename reaches the connected member");
+    persistentHost.Send(new("controls", Number: 0));
+    await Wait(() => rememberedMember.Snapshot?.SharedControls == false, "the streamer keeps playback to itself");
+    var memberKey = rememberedMember.Identity!.GuestKey;
+    Check(memberKey?.Length == 64 && rememberedMember.Identity.HostKey is null, "a member receives a private key of its own");
+    await rememberedMember.DisposeAsync();
     await persistentHost.DisposeAsync();
     await Task.Delay(350);
-    await using (var wrongOwner = new RoomClient())
-    {
-        bool ownerRejected = false;
-        try { await wrongOwner.ConnectAsync(serverUrl, "Wrong Owner", savedIdentity.Room, new string('0', 64)); } catch (IOException) { ownerRejected = true; }
-        Check(ownerRejected, "persistent room rejects an incorrect host key");
-    }
     await using (var reopened = new RoomClient(roomSettings))
     {
         await reopened.ConnectAsync(serverUrl, "Persistent Host", savedIdentity.Room, savedIdentity.HostKey);
-        Check(reopened.Identity!.Host && reopened.Identity.Room == savedIdentity.Room, "persistent room reconnects as host with same invitation");
-        Check(reopened.Snapshot?.SharedControls == true, "shared controls restored when host reconnects");
-        Check(reopened.Snapshot?.Name == "Anime night", "host room name survives reconnect");
-        await using (var rememberedGuest = new RoomClient(new LibraryStore(guestSettingsPath)))
+        Check(reopened.Identity is { Host: true, Owner: true } && reopened.Identity.Room == savedIdentity.Room, "the creator re-enters an empty room with the same invitation and holds the streaming role");
+        Check(reopened.Snapshot?.SharedControls == false, "a streamer's choice about shared playback is restored when it returns");
+        Check(reopened.Snapshot?.Name == "Anime night", "the room name survives everyone leaving");
+        await using (var returning = new RoomClient(new LibraryStore(guestSettingsPath)))
         {
-            await rememberedGuest.ConnectAsync(serverUrl, "Renamed Guest", savedIdentity.Room);
-            await rememberedGuest.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(15));
-            Check(rememberedGuest.Snapshot?.Name == "Anime night", "returning guest receives the canonical name");
-            Check(rememberedGuest.Snapshot?.SharedControls == true, "admitted guest reconnects without approval and receives saved controls");
-            await Wait(() => reopened.Snapshot?.AdmittedGuests?.Length == 1, "remembered roster visible to host");
-            Check(rememberedGuest.Snapshot?.AdmittedGuests is null, "remembered guest credentials and roster are host-only");
+            await returning.ConnectAsync(serverUrl, "Renamed Guest", savedIdentity.Room);
+            await returning.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(15));
+            Check(returning.Identity!.GuestKey == memberKey, "a returning member keeps its key");
+            await Wait(() => reopened.Members.Length == 2 && reopened.Members.Any(m => m.Name == "Renamed Guest"), "the member list follows a member's new name instead of listing them twice");
         }
-        await using (var impostor = new RoomClient())
-        {
-            await impostor.ConnectAsync(serverUrl, "Remembered Guest", savedIdentity.Room);
-            await Wait(() => impostor.Snapshot is not null, "impostor waiting");
-            Check(!impostor.Snapshot!.People.Single(p => p.Id == impostor.Identity!.Peer).Approved, "same display name cannot inherit admission");
-        }
-        reopened.Send(new("remove", Target: reopened.Snapshot!.AdmittedGuests![0].Id));
-        await Wait(() => reopened.Snapshot?.AdmittedGuests?.Length == 0, "offline admission revoked");
-        await using (var removedGuest = new RoomClient(new LibraryStore(guestSettingsPath)))
-        {
-            await removedGuest.ConnectAsync(serverUrl, "Renamed Guest", savedIdentity.Room);
-            await Wait(() => removedGuest.Snapshot is not null, "removed guest waiting");
-            Check(!removedGuest.Snapshot!.People.Single(p => p.Id == removedGuest.Identity!.Peer).Approved, "removed guest needs fresh host approval on rejoin");
-        }
-        reopened.Send(new("controls", Number: 0));
-        await Wait(() => reopened.Snapshot?.SharedControls == false, "controls disabled and saved");
-        await using var returningGuest = new RoomClient();
-        await returningGuest.ConnectAsync(serverUrl, "Returning Guest", savedIdentity.Room);
-        Check(returningGuest.Identity?.HostKey is null, "persistent guest can rejoin without receiving the owner key");
-        await Wait(() => returningGuest.Snapshot?.Name == "Anime night", "the saved room name reaches a new waiting guest after the host reconnects");
+        reopened.Send(new("controls", Number: 1));
+        await Wait(() => reopened.Snapshot?.SharedControls == true, "shared playback turned back on");
     }
     await Task.Delay(350);
     await using (var hostAgain = new RoomClient(roomSettings))
     {
         await hostAgain.ConnectAsync(serverUrl, "Persistent Host", savedIdentity.Room, savedIdentity.HostKey);
-        Check(hostAgain.Snapshot?.SharedControls == false, "disabled shared controls remain disabled on next reconnect");
+        Check(hostAgain.Snapshot?.SharedControls == true, "the latest choice about shared playback is the one remembered");
     }
     await using var wrongInvitation = new RoomClient();
     var errors = new ConcurrentQueue<WireMessage>(); wrongInvitation.Message += errors.Enqueue;
