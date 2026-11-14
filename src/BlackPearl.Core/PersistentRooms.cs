@@ -4,7 +4,7 @@ using System.Text;
 namespace BlackPearl.Core;
 
 // HostKeyHash identifies the room's creator. Guests are its members: everyone who has entered with the invitation, and
-// people admitted by the host before rooms stopped needing one. Banned are the members the creator removed.
+// people admitted by its host from an app that still has one. Banned are the members the creator removed.
 public record PersistentRoom(string Code, string HostKeyHash, string[]? ApprovedGuests = null, bool SharedControls = false, AdmittedGuest[]? Guests = null, string? Name = null,
     AdmittedGuest[]? Banned = null);
 public sealed class PersistentRooms
@@ -32,13 +32,14 @@ public sealed class PersistentRooms
     private void Save(PersistentRoom room) => store.Setting(Prefix + room.Code, Wire.Serialize(room));
     public PersistentRoom[] All() { lock (gate) return rooms.ToArray(); }
     public int Count { get { lock (gate) return rooms.Count; } }
-    public void Update(string code, AdmittedGuest[] members, AdmittedGuest[] banned, string? name)
+    // sharedControls is the setting of apps up to 0.3.125, whose rooms keep it on the service.
+    public void Update(string code, AdmittedGuest[] members, AdmittedGuest[] banned, string? name, bool sharedControls = false)
     {
         lock (gate)
         {
             var index = rooms.FindIndex(x => x.Code == code);
             if (index < 0) return;
-            var updated = rooms[index] with { ApprovedGuests = members.Select(x => x.Id).ToArray(), Guests = members, Banned = banned, Name = name ?? rooms[index].Name };
+            var updated = rooms[index] with { ApprovedGuests = members.Select(x => x.Id).ToArray(), Guests = members, Banned = banned, Name = name ?? rooms[index].Name, SharedControls = sharedControls };
             // Members reconnect often; write only what changed.
             if (Wire.Serialize(updated) == Wire.Serialize(rooms[index])) return;
             rooms[index] = updated;

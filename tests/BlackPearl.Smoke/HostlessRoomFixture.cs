@@ -24,6 +24,113 @@ static class HostlessRoomFixture
         });
         await WithServer(sdk, serverDll, directory, "membership", url => Membership(url, directory, check));
         await WithServer(sdk, serverDll, directory, "crowd", url => Crowd(url, check));
+        await WithServer(sdk, serverDll, directory, "older-apps", url => OlderApps(url, check));
+    }
+
+    // Apps up to 0.3.125 speak protocol 1: create, join and resume, a host who admits guests, and signaling only between
+    // host and guest. The service still serves them, in the same rooms, one kind of app at a time. Plain sockets stand in
+    // for those apps.
+    private static async Task OlderApps(string url, Action<bool, string> check)
+    {
+        var sockets = new List<ClientWebSocket>();
+        async Task<ClientWebSocket> Open(WireMessage first)
+        {
+            var socket = new ClientWebSocket(); sockets.Add(socket);
+            await socket.ConnectAsync(new Uri(url.Replace("http", "ws") + "/room"), default);
+            await SocketMessages.SendAsync(socket, first, default);
+            return socket;
+        }
+        static async Task<WireMessage> Read(ClientWebSocket socket)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            try { return await SocketMessages.ReadAsync(socket, timeout.Token) ?? new("closed"); }
+            catch (Exception ex) when (ex is WebSocketException or OperationCanceledException) { return new("closed"); }
+        }
+        static async Task<WireMessage> Until(ClientWebSocket socket, Func<WireMessage, bool> wanted)
+        {
+            while (true) { var message = await Read(socket); if (wanted(message)) return message; if (message.Type == "closed") throw new Exception("FAIL: connection closed while waiting for a room message"); }
+        }
+        static async Task Close(ClientWebSocket socket)
+        {
+            try { using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3)); await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, timeout.Token); } catch (Exception) { socket.Abort(); }
+        }
+        static WireMessage Enter(string name, string? room, string? key = null) => new("enter", Text: name, Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, room, key)));
+        try
+        {
+            using var http = new HttpClient();
+            check((await http.GetStringAsync(url + "/health")).Contains("\"protocols\":[1,2]"), "the room service says it serves both protocols");
+
+            // An older app creates a saved room and admits a guest.
+            var host = await Open(new("create", Target: "persistent", Text: "Old host"));
+            var hostWelcome = Wire.Read<Welcome>((await Until(host, m => m.Type == "welcome")).Data!);
+            check(hostWelcome is { Host: true, HostKey.Length: 64 } && hostWelcome.IceServers is not null, "an older app still creates a room and receives its host key");
+            var guest = await Open(new("join", Text: "Old guest", Data: hostWelcome.Room));
+            var guestWelcome = Wire.Read<Welcome>((await Until(guest, m => m.Type == "welcome")).Data!);
+            var waiting = Wire.Read<RoomSnapshot>((await Until(guest, m => m.Type == "snapshot")).Data!);
+            check(guestWelcome is { Host: false, GuestKey.Length: 64 } && guestWelcome.IceServers.Length == 0 && !waiting.People.Single(p => p.Id == guestWelcome.Peer).Approved,
+                "an older app's guest still waits for its host's approval");
+            await SocketMessages.SendAsync(host, new("admit", Target: guestWelcome.Peer), default);
+            var admitted = await Until(guest, m => m.Type == "admitted");
+            check(Wire.Read<Welcome>(admitted.Data!).Peer == guestWelcome.Peer, "the host of an older app still admits its guest");
+            await Until(host, m => m is { Type: "connect" } && m.Target == guestWelcome.Peer);
+            await SocketMessages.SendAsync(host, new("signal", Target: guestWelcome.Peer, Text: "sdp", Data: "offer"), default);
+            var relayed = await Until(guest, m => m.Type == "signal");
+            check(relayed.Sender == hostWelcome.Peer && relayed.Data == "offer", "signaling between an older host and its guest is relayed");
+            await SocketMessages.SendAsync(host, new("settings", Text: "Old movie night", Number: 1), default);
+            var named = Wire.Read<RoomSnapshot>((await Until(guest, m => m.Type == "snapshot" && Wire.Read<RoomSnapshot>(m.Data!).Name == "Old movie night")).Data!);
+            check(named.SharedControls, "an older host's room name and shared-controls setting still reach its guests");
+
+            // A newer app holding the invitation is told why it can't enter while older apps are in the room.
+            var early = await Open(Enter("New app", hostWelcome.Room));
+            var refused = await Read(early);
+            check(refused is { Type: "error" } && refused.Text!.Contains("older BlackPearl"), $"a newer app is told the room is in use by older apps ({refused.Text})");
+            var presence = await RoomClient.PresenceAsync(url, [hostWelcome.Room], CancellationToken.None);
+            check(presence[hostWelcome.Room].People.Order().SequenceEqual(["Old guest", "Old host"]) && presence[hostWelcome.Room].Name == "Old movie night", "people in a room on older apps are listed for whoever holds its invitation");
+
+            // Everyone leaves. The host returns with its key; a wrong key is refused; the admitted guest needs no fresh approval.
+            await Close(guest); await Close(host);
+            await Task.Delay(300);
+            var wrong = await Open(new("resume", Target: new string('0', 64), Text: "Impostor", Data: hostWelcome.Room));
+            check(await Read(wrong) is { Type: "error", Text: "Host key is invalid" }, "an older app's wrong host key is still refused");
+            host = await Open(new("resume", Target: hostWelcome.HostKey, Text: "Old host", Data: hostWelcome.Room));
+            check(Wire.Read<Welcome>((await Until(host, m => m.Type == "welcome")).Data!).Host, "an older host still reopens its room with its key");
+            var second = await Open(new("resume", Target: hostWelcome.HostKey, Text: "Old host", Data: hostWelcome.Room));
+            check(await Read(second) is { Type: "error", Text: "The host is already connected to this room" }, "a second host connection is still refused");
+            guest = await Open(new("join", Sender: guestWelcome.GuestKey, Text: "Old guest", Data: hostWelcome.Room));
+            check((await Read(guest)).Type == "admitted", "a guest an older host admitted before returns without fresh approval");
+            await Close(guest); await Close(host);
+            await Task.Delay(300);
+
+            // The same room after its people update: the host's key makes them its creator, and the admitted guest belongs to it.
+            await using var owner = new RoomClient();
+            await owner.ConnectAsync(url, "New host", hostWelcome.Room, hostWelcome.HostKey);
+            check(owner.Identity is { Owner: true, Host: true }, "the host of an older app enters the same room from a newer one as its creator");
+            await Wait(() => owner.Snapshot?.Name == "Old movie night", "the room keeps the name its older host gave it");
+            await using var member = new RoomClient();
+            await member.ConnectAsync(url, "New guest", hostWelcome.Room, guestWelcome.GuestKey);
+            await member.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(25));
+            await Wait(() => owner.Members.Length == 2 && owner.Roster.Length == 2, "the guest an older host admitted is a member of the same room after updating, listed once");
+            await using var newcomer = new RoomClient();
+            await newcomer.ConnectAsync(url, "Newcomer", hostWelcome.Room);
+            var newcomerKey = newcomer.Identity!.GuestKey!;
+
+            // An older app is told to update while newer ones are in the room.
+            var late = await Open(new("join", Text: "Still old", Data: hostWelcome.Room));
+            var outdated = await Read(late);
+            check(outdated is { Type: "error" } && outdated.Text!.Contains("newer BlackPearl") && outdated.Text.Contains("Update the app"), $"an older app is told to update while newer apps are in the room ({outdated.Text})");
+
+            // Back on older apps: someone who entered from a newer app belongs to the room and needs no approval; a stranger still does.
+            await newcomer.DisposeAsync(); await member.DisposeAsync(); await owner.DisposeAsync();
+            await Task.Delay(300);
+            host = await Open(new("resume", Target: hostWelcome.HostKey, Text: "Old host", Data: hostWelcome.Room));
+            var roster = Wire.Read<RoomSnapshot>((await Until(host, m => m.Type == "snapshot")).Data!);
+            check(roster.AdmittedGuests?.Length == 2 && roster.AdmittedGuests.All(g => g.Name is "New guest" or "Newcomer"), "an older host lists the room's members as its admitted guests, without itself");
+            var known = await Open(new("join", Sender: newcomerKey, Text: "Newcomer", Data: hostWelcome.Room));
+            check((await Read(known)).Type == "admitted", "someone who entered from a newer app is let into the room on an older one");
+            var stranger = await Open(new("join", Text: "Stranger", Data: hostWelcome.Room));
+            check((await Read(stranger)).Type == "welcome", "a stranger on an older app still waits for the host");
+        }
+        finally { foreach (var socket in sockets) { socket.Abort(); socket.Dispose(); } }
     }
 
     internal static async Task WithServer(string sdk, string serverDll, string directory, string name, Func<string, Task> run)
