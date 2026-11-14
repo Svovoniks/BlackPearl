@@ -736,6 +736,7 @@ await GuestLibraryPeerFixture.RunIsolated(sdkPath, start.ArgumentList[0], root, 
 VoiceFixture.RunUnits(Check);
 await VoiceFixture.RunIsolated(sdkPath, start.ArgumentList[0], root, Check);
 await RoomServerFixture.Run(sdkPath, start.ArgumentList[0], Path.Combine(root, "room-server"), Check);
+await HostlessRoomFixture.Run(sdkPath, start.ArgumentList[0], Path.Combine(root, "hostless-rooms"), Check);
 using var server = externalServer is null ? Process.Start(start)! : null;
 var stdout = server?.StandardOutput.ReadToEndAsync(); var stderr = server?.StandardError.ReadToEndAsync();
 try

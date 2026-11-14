@@ -1,6 +1,6 @@
 # Deploy the room service on a VPS
 
-The VPS only coordinates rooms: invitations, admission and WebRTC signaling. Video, voice and controls go directly between participants. When a direct path fails, Cloudflare's TURN service relays it, so no media passes through the VPS and its bandwidth use stays small.
+The VPS only coordinates rooms: invitations, who is in each room, who holds the streaming role, and WebRTC signaling. Video, voice and controls go directly between participants. When a direct path fails, Cloudflare's TURN service relays it, so no media passes through the VPS and its bandwidth use stays small.
 
 Without a registered domain, use [sslip.io](https://sslip.io): a name such as `203-0-113-10.sslip.io` resolves to the IP address it spells (`203.0.113.10`), so the server can still get a public certificate. The examples below use that placeholder; substitute your server's name.
 
@@ -26,7 +26,9 @@ Without a registered domain, use [sslip.io](https://sslip.io): a name such as `2
 
 A server installed while the app was called Watchroom (`/opt/watchroom`, `watchroom.service`, `/etc/watchroom/watchroom.env`, `/var/lib/watchroom`) keeps working with its `WATCHROOM_*` settings, which the server still reads. To update it without moving anything, publish as in step 1 to `/opt/watchroom` and change `ExecStart` in `watchroom.service` to run `BlackPearl.Server.dll` instead of `Watchroom.Server.dll`. Keep the Caddy drop-in's `WATCHROOM_DOMAIN` unless you also install the new `Caddyfile`, which reads `BLACKPEARL_DOMAIN`.
 
-For an update, repeat step 1 and run `systemctl restart blackpearl`. Rooms live in memory, except persistent rooms stored under `/var/lib/blackpearl`, so a restart closes temporary rooms in progress.
+For an update, repeat step 1 and run `systemctl restart blackpearl`. Saved rooms, with their members and the people removed from them, are stored under `/var/lib/blackpearl` and survive a restart; everyone in a room is disconnected by it and their apps re-enter by themselves.
+
+The service and the apps must speak the same room protocol, which `/health` reports as `protocol`. Protocol 2 is rooms without a host; BlackPearl versions up to 0.3.125 speak protocol 1. Update the service and release the app together: an older app is told to update, and a newer app says that the room server needs updating. Rooms saved by a protocol 1 service keep their invitations, creators and guests, who become members.
 
 ## Internet acceptance test
 
@@ -34,14 +36,15 @@ Use two Windows computers on different internet connections (for example home br
 
 1. Play a real MKV and MP4 for at least 20 minutes, checking pause, seek, subtitles, and reconnection.
 2. Set `BLACKPEARL_FORCE_RELAY=true`, restart `blackpearl`, and repeat to exercise Cloudflare's relay. Restore `false` afterward.
-3. Limit host upload and verify shared buffering and automatic resume.
-4. Remove a guest while streaming and confirm media access stops. Test an expired invitation and a wrong code.
+3. Limit the streamer's upload and verify shared buffering and automatic resume.
+4. As the room's creator, remove someone while streaming and confirm media access stops and they cannot re-enter. Test a wrong code.
+5. Have a second person start a video while the first is playing one, and have the streamer leave: the stream should move, voice should not drop, and the room should stay open.
 
-The current architecture sends one copy per viewer, even through TURN, so a relay does not reduce host upload requirements. Cloudflare bills relayed traffic beyond its free allowance; monitor usage in the Cloudflare dashboard.
+The current architecture sends one copy per viewer, even through TURN, so a relay does not reduce the streamer's upload requirements. Every member also holds a connection to every other member for voice. Cloudflare bills relayed traffic beyond its free allowance; monitor usage in the Cloudflare dashboard.
 
 ## Operations
 
 - Cloudflare credentials are fetched at startup and refreshed in the background. Each credential handed to a participant stays valid for at least 12 hours. If Cloudflare is unreachable, participants receive STUN only and the service retries every minute.
 - SSH through HAProxy reaches sshd from `127.0.0.1`, so sshd logs show loopback instead of the client address.
-- Invitation codes are random 96-bit capabilities; host approval is still required. Temporary rooms expire after six hours.
+- Invitation codes are random 96-bit capabilities: anyone holding one can enter the room, and `POST /presence` tells them who is in it. The room's creator can remove a member, who is then turned away until let back in. A room holds eight people at once. Rooms the app creates are saved; unsaved rooms, which only tests create, expire after six hours.
 - The server does not persist accounts, videos, chat or libraries. Keep `/etc/blackpearl/blackpearl.env` private.

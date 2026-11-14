@@ -108,6 +108,8 @@ public partial class MainWindow
             : activity is not null && !OwnsLibrary ? $"{activity.Name} is browsing now. Their library will load when the slot is available."
             : guestBrowsePending && guestLibraryCards.Count == 0 ? "Loading " + HostLibraryName + "…"
             : HostLibraryName;
+        // The banner above already names whose library this is; the line shows only when it has more to say.
+        GuestLibraryStatus.Visibility = GuestLibraryStatus.Text == HostLibraryName ? Visibility.Collapsed : Visibility.Visible;
         if (currentPage == "Home") RenderGuestHome();
         if (allowed && (activity is null || OwnsLibrary) && currentPage is "Home" or "Library" &&
             !guestBrowsePending && guestCurrentBrowse is null && guestLibraryNotice is null)

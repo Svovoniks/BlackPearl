@@ -113,6 +113,8 @@ static class Program
             roomWindow.Loaded += async (_, _) =>
             {
                 var count = 0;
+                // --scale draws the screenshots as a display at that scaling would.
+                if (Array.IndexOf(args, "--scale") is > 0 and var scaleAt) Rescale(roomWindow, double.Parse(args[scaleAt + 1], System.Globalization.CultureInfo.InvariantCulture));
                 try { await HostlessRoomUiChecks.Run(roomWindow, store, directory, (condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }); Console.WriteLine($"{count} hostless room UI checks passed."); }
                 catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
                 finally { roomWindow.Close(); app.Shutdown(); }

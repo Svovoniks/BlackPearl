@@ -31,11 +31,13 @@ static class HostlessRoomUiChecks
             while (!condition()) { if (DateTime.UtcNow > until) throw new TimeoutException("Timeout: " + label); await Task.Delay(25); }
             check(true, label);
         }
-        var shots = Path.GetFullPath(Path.Combine("artifacts", "hostless-rooms-ui")); Directory.CreateDirectory(shots);
+        var shots = Path.GetFullPath(Path.Combine("artifacts", "hostless-rooms-ui", $"{System.Windows.Media.VisualTreeHelper.GetDpi(window).DpiScaleX * 100:F0}")); Directory.CreateDirectory(shots);
         void Save(string file, params FrameworkElement[] layers)
         {
             var size = layers[0];
-            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)(size.ActualWidth * 1.5), (int)(size.ActualHeight * 1.5), 144, 144, System.Windows.Media.PixelFormats.Pbgra32);
+            // Drawn at the window's own scaling, so fractional sizes round the way they do on screen.
+            var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(window);
+            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(size.ActualWidth * dpi.DpiScaleX), (int)Math.Ceiling(size.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, System.Windows.Media.PixelFormats.Pbgra32);
             var picture = new System.Windows.Media.DrawingVisual();
             using (var context = picture.RenderOpen())
             {
@@ -148,20 +150,22 @@ static class HostlessRoomUiChecks
 
             // Riley takes the streaming role and lets the room browse their library.
             back.SetHostedLibrary(Enumerable.Range(1, 6).Select(index => new MediaItem("riley-" + index, Path.Combine(directory, "riley-" + index + ".mkv"), "Riley's film " + index, "Movie", 2000 + index)));
+            Call("ShowPage", "Library");
+            await Wait(() => Control<ItemsControl>("PosterGrid").Items.Count > 0, "in a room, the Library tab shows the user's own titles");
+            var ownCards = Control<ItemsControl>("PosterGrid").Items.Count;
             await back.BecomeHostAsync();
             back.Send(new("catalog-permission", Number: 1));
-            Call("ShowPage", "Library");
             var offer = Control<FrameworkElement>("StreamerLibraryOffer"); var browse = Control<Button>("BrowseStreamerLibraryButton");
             await Wait(() => offer.Visibility == Visibility.Visible && browse.Content as string == "Browse Riley’s library" && Text("StreamerLibraryOfferText") == "Riley lets the room browse their library",
                 "when the streamer shares their library, the Library tab offers it without replacing the user's own");
-            check(Control<ItemsControl>("PosterGrid").Items.Count > 6 && Control<FrameworkElement>("GuestLibraryStatus").Visibility != Visibility.Visible, "the user's own library stays on screen until they choose to browse");
+            check(Control<ItemsControl>("PosterGrid").Items.Count == ownCards && ownCards != 6 && Control<FrameworkElement>("GuestLibraryStatus").Visibility != Visibility.Visible, "the user's own library stays on screen until they choose to browse");
             await Shot("11-library-offer", "LibraryPage");
             browse.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Wait(() => (bool)Field("browsingStreamerLibrary")! && Control<ItemsControl>("PosterGrid").Items.Count == 6 && browse.Content as string == "Back to my library",
                 "Browse shows the streamer's titles in the Library tab, with a way back");
             await Shot("12-browsing-their-library", "LibraryPage");
             browse.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Wait(() => !(bool)Field("browsingStreamerLibrary")! && Control<ItemsControl>("PosterGrid").Items.Count > 6 && Control<FrameworkElement>("GuestLibraryStatus").Visibility != Visibility.Visible,
+            await Wait(() => !(bool)Field("browsingStreamerLibrary")! && Control<ItemsControl>("PosterGrid").Items.Count == ownCards && Control<FrameworkElement>("GuestLibraryStatus").Visibility != Visibility.Visible,
                 "Back to my library returns to the user's own titles");
             await Wait(() => back.Snapshot?.LibraryActivity is null, "leaving their library frees it for the next person");
             await (Task)Call("Disconnect", false, false)!;
