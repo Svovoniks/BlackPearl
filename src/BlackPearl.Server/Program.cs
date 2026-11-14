@@ -5,9 +5,13 @@ using System.Text;
 using System.Threading.Channels;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using BlackPearl.Core;
 
+// The room service: who is in each room, who streams, and WebRTC signaling between members. A room has no host.
+// Anyone holding its invitation enters, every member connects to every other, and one member at a time holds the
+// streaming role, which keeps the room's playback state. Video, voice and controls never pass through here.
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRateLimiter(options =>
 {
@@ -20,13 +24,13 @@ var app = builder.Build();
 // Behind the bundled reverse proxy, rate limits apply to the client address it reports; only loopback proxies are trusted.
 app.UseForwardedHeaders(new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto });
 app.UseRateLimiter();
-// Half-open sockets close after a missed pong so a returning host is not rejected for minutes.
+// Half-open sockets close after a missed pong, so a member who left is not shown in the room for minutes.
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20), KeepAliveTimeout = TimeSpan.FromSeconds(30) });
 var rooms = new ConcurrentDictionary<string, Room>();
 // Settings are BLACKPEARL_*; servers configured while the app was called Watchroom keep their WATCHROOM_* names.
 string? Config(string name) => builder.Configuration[AppEnvironment.Prefix + name] is { Length: > 0 } value ? value : builder.Configuration[AppEnvironment.FormerPrefix + name];
 int Setting(string? text, int fallback) => int.TryParse(text, out var value) && value > 0 ? value : fallback;
-// Temporary rooms cannot be resumed by their host, so an empty one only waits briefly for rejoining guests.
+// Temporary rooms are not saved, so an empty one only waits briefly for its members to return.
 var emptyRoomGraceMs = Setting(Config("EMPTY_ROOM_SECONDS"), 300) * 1000L;
 var persistentPerHour = Setting(Config("PERSISTENT_ROOMS_PER_HOUR"), 20);
 const int TemporaryRoomLimit = 1000, PersistentRoomLimit = 10000;
@@ -59,11 +63,15 @@ _ = Task.Run(async () =>
 var persistentRooms = new PersistentRooms(Config("DATA") ?? Path.Combine(AppContext.BaseDirectory, "data"));
 foreach (var saved in persistentRooms.All())
 {
-    var restored = new Room(saved.Code, true) { SharedControls = saved.SharedControls, Name = saved.Name };
-    restored.ApprovedGuests.UnionWith(saved.ApprovedGuests ?? []); rooms[saved.Code] = restored;
-    foreach (var guest in saved.Guests ?? []) restored.GuestNames[guest.Id] = guest.Name;
+    var restored = new Room(saved.Code, true) { Name = saved.Name, OwnerHash = saved.HostKeyHash };
+    foreach (var guest in saved.Guests ?? []) restored.Members[guest.Id] = guest.Name;
+    // Rooms saved before members had names list only their ids.
+    foreach (var id in saved.ApprovedGuests ?? []) restored.Members.TryAdd(id, "Guest");
+    foreach (var removed in saved.Banned ?? []) { restored.Banned[removed.Id] = removed.Name; restored.Members.Remove(removed.Id); }
+    rooms[saved.Code] = restored;
 }
-void SaveRoom(Room room) { if (room.Persistent) persistentRooms.Update(room.Code, room.Guests(), room.SharedControls, room.Name); }
+void SaveRoom(Room room) { if (room.Persistent) persistentRooms.Update(room.Code, room.MemberList(), room.BannedList(), room.Name); }
+static bool ValidRoomName(string? name) => !string.IsNullOrWhiteSpace(name) && name.Trim().Length <= 100 && !name.Any(char.IsControl);
 var cloudflare = CloudflareTurn.Create(builder.Configuration["CLOUDFLARE_TURN_KEY_ID"], builder.Configuration["CLOUDFLARE_TURN_API_TOKEN"],
     builder.Configuration["CLOUDFLARE_TURN_API"] ?? "https://rtc.live.cloudflare.com/v1",
     TimeSpan.FromSeconds(Setting(builder.Configuration["CLOUDFLARE_TURN_TTL_SECONDS"], 86400)), TimeSpan.FromSeconds(Setting(builder.Configuration["CLOUDFLARE_TURN_RETRY_SECONDS"], 60)), app.Logger);
@@ -78,140 +86,125 @@ string[] IceServers(string peer)
     var secret = Config("TURN_SECRET");
     if (!string.IsNullOrWhiteSpace(turn) && !string.IsNullOrWhiteSpace(secret))
     {
-        var username = $"{DateTimeOffset.UtcNow.AddHours(8).ToUnixTimeSeconds()}:{peer}";
+        // Rooms stay open for a day at a time, so credentials outlast the longest connection.
+        var username = $"{DateTimeOffset.UtcNow.AddHours(26).ToUnixTimeSeconds()}:{peer}";
         var credential = Convert.ToBase64String(HMACSHA1.HashData(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(username)));
         foreach (var address in turn.Split(';', StringSplitOptions.RemoveEmptyEntries)) urls.Add(CloudflareTurn.WithCredentials(address, username, credential));
     }
     return urls.ToArray();
 }
 bool forceRelay = Config("FORCE_RELAY") == "true";
-app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = 1, persistentRooms = true,
+app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = RoomProtocol.Version, persistentRooms = true,
     relayConfigured = cloudflare?.HasRelay == true || !string.IsNullOrEmpty(Config("TURN")),
     stunConfigured = cloudflare is not null || !string.IsNullOrEmpty(Config("STUN")) }));
+// Who is in each room right now, for people who hold its invitation. The app shows it before they enter.
+app.MapPost("/presence", ([FromBody] string[] codes) =>
+{
+    if (codes.Length > 32) return Results.BadRequest();
+    var found = new Dictionary<string, RoomPresenceInfo>();
+    foreach (var code in codes.Select(code => (code ?? "").Trim().ToUpperInvariant()).Distinct())
+        if (rooms.TryGetValue(code, out var room) && room.Expires >= Wire.Now)
+            lock (room.Gate) found[code] = new(room.Name, room.People.Values.OrderBy(p => p.Arrived).Select(p => p.Name).ToArray());
+    return Results.Ok(found);
+});
 app.Map("/room", async context =>
 {
     if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
     using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
-    lifetime.CancelAfter(TimeSpan.FromHours(6));
+    lifetime.CancelAfter(TimeSpan.FromHours(24));
     Room? room = null; Member? member = null;
     try
     {
         using var handshake = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); handshake.CancelAfter(TimeSpan.FromSeconds(10));
         var first = await SocketMessages.ReadAsync(socket, handshake.Token);
-        if (first is null || first.Type is not ("create" or "join" or "resume")) throw new InvalidDataException("Expected create, join or resume");
+        // Apps from before rooms lost their host say create, join or resume. They can't take part in these rooms.
+        if (first?.Type is "create" or "join" or "resume") throw new InvalidDataException("Rooms changed in a newer BlackPearl. Update the app to use rooms.");
+        if (first is null || first.Type != "enter") throw new InvalidDataException("Expected enter");
+        var request = Wire.Read<EnterRequest>(first.Data ?? "{}");
+        if (request.Protocol != RoomProtocol.Version)
+            throw new InvalidDataException(request.Protocol > RoomProtocol.Version ? "This room server is older than your BlackPearl. Whoever runs it needs to update it."
+                : "Rooms changed in a newer BlackPearl. Update the app to use rooms.");
         var name = (first.Text ?? "Guest").Trim();
         if (name.Length is < 1 or > 40 || name.Any(char.IsControl)) throw new InvalidDataException("Invalid display name");
-        var host = first.Type is "create" or "resume";
-        string? hostKey = null;
-        if (first.Type == "create")
+        if (request.RoomName is not null && !ValidRoomName(request.RoomName)) throw new InvalidDataException("Invalid room name");
+        var key = request.Key is { Length: 64 } supplied && supplied.All(Uri.IsHexDigit) ? supplied : null;
+        if (request.Room is null)
         {
-            // Only live temporary rooms count toward the temporary cap; persistent rooms have their own limits.
-            if (first.Target == "persistent" ? persistentRooms.Count >= PersistentRoomLimit || !AllowPersistent(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", Wire.Now)
+            // Only live temporary rooms count toward the temporary cap; saved rooms have their own limits.
+            if (!request.Temporary ? persistentRooms.Count >= PersistentRoomLimit || !AllowPersistent(context.Connection.RemoteIpAddress?.ToString() ?? "unknown", Wire.Now)
                 : rooms.Values.Count(x => !x.Persistent && x.Expires >= Wire.Now) >= TemporaryRoomLimit)
-                throw new InvalidDataException(first.Target == "persistent" ? "Persistent room limit reached. Try again later." : "Server room limit reached");
-            room = new Room(Convert.ToHexString(RandomNumberGenerator.GetBytes(12)), first.Target == "persistent");
-            if (room.Persistent) hostKey = persistentRooms.Create(room.Code);
+                throw new InvalidDataException(request.Temporary ? "Server room limit reached" : "Persistent room limit reached. Try again later.");
+            room = new Room(Convert.ToHexString(RandomNumberGenerator.GetBytes(12)), !request.Temporary) { Name = request.RoomName?.Trim() };
+            // Whoever creates a room gets the key that marks them as its creator.
+            key = room.Persistent ? persistentRooms.Create(room.Code, room.Name) : PersistentRooms.NewKey();
+            room.OwnerHash = PersistentRooms.Hash(key);
             rooms[room.Code] = room;
         }
-        else if (!rooms.TryGetValue((first.Data ?? "").Trim().ToUpperInvariant(), out room) || room.Expires < Wire.Now) throw new InvalidDataException("Invitation is invalid or expired");
-        if (first.Type == "resume")
-        {
-            if (!room!.Persistent || !persistentRooms.Verify(room.Code, first.Target)) throw new InvalidDataException("Host key is invalid");
-            hostKey = first.Target;
-        }
-        var guestKey = host ? null : first.Sender is { Length: 64 } key && key.All(Uri.IsHexDigit) ? key : Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        member = new Member(Guid.NewGuid().ToString("N"), name, host, socket, lifetime, guestKey);
+        else if (!rooms.TryGetValue(request.Room.Trim().ToUpperInvariant(), out room) || room.Expires < Wire.Now) throw new InvalidDataException("Invitation is invalid or expired");
+        key ??= PersistentRooms.NewKey();
+        member = new Member(Guid.NewGuid().ToString("N"), name, socket, lifetime, key);
         var sender = member.SendLoop();
         lock (room.Gate)
         {
-            // The sweep removes rooms under this lock; never admit a member into a removed room.
+            // The sweep removes rooms under this lock; never let a member into a removed room.
             if (!rooms.TryGetValue(room.Code, out var live) || live != room) throw new InvalidDataException("Invitation is invalid or expired");
-            if (room.People.Count >= 9) throw new InvalidDataException("Room is full");
-            if (host && room.People.Values.Any(x => x.Host)) throw new InvalidDataException("The host is already connected to this room");
-            if (!host && room.ApprovedGuests.Contains(member.GuestHash!) && room.People.Values.Count(x => x.Approved) < 5 && !room.People.Values.Any(x => x.GuestHash == member.GuestHash)) member.Approved = true;
-            room.People.Add(member.Id, member);
-            member.Send(new(member.Approved && !host ? "admitted" : "welcome", Data: Wire.Serialize(new Welcome(room.Code, member.Id, host, member.Approved ? IceServers(member.Id) : [], forceRelay, hostKey, guestKey))));
+            if (room.Banned.ContainsKey(member.Hash)) throw new InvalidDataException("You were removed from this room. Its creator can let you back in.");
+            member.Owner = member.Hash == room.OwnerHash;
+            // Someone entering again replaces their earlier connection: usually one the network dropped before the
+            // service noticed. Refusing instead would lock them out until that connection timed out.
+            foreach (var earlier in room.People.Values.Where(x => x.Hash == member.Hash).ToArray()) { room.Leave(earlier); earlier.Close("You entered this room from another BlackPearl window."); }
+            if (room.People.Count >= RoomProtocol.MaxPresent) throw new InvalidDataException($"Room is full ({RoomProtocol.MaxPresent} people)");
+            if (member.Owner && request.RoomName is not null) room.Name = request.RoomName.Trim();
+            room.Name ??= "Room " + room.Code[..6];
+            room.Remember(member);
+            room.People.Add(member.Id, member); member.Arrived = ++room.Arrivals;
+            // With nobody streaming, the role rests with whoever has been here longest.
+            if (room.HostId is null) { room.HostId = member.Id; room.Epoch++; }
+            SaveRoom(room);
+            member.Send(new("welcome", Data: Wire.Serialize(new Welcome(room.Code, member.Id, room.HostId == member.Id, IceServers(member.Id), forceRelay, member.Owner ? key : null, key, member.Owner))));
             room.Snapshot();
-            if (!host && member.Approved) room.People.Values.FirstOrDefault(x => x.Host)?.Send(new("connect", Target: member.Id));
-            if (host) foreach (var guest in room.People.Values.Where(x => !x.Host && x.Approved)) member.Send(new("connect", Target: guest.Id));
         }
-        // Token bucket: the host's burst covers resume signaling for every guest; sustained floods still disconnect.
-        var (burst, perSecond) = host ? (400.0, 160.0) : (120.0, 80.0);
-        var tokens = burst; var refilled = Wire.Now;
+        // Token bucket: the burst covers signaling with every other member at once; sustained floods still disconnect.
+        const double Burst = 400, PerSecond = 160;
+        var tokens = Burst; var refilled = Wire.Now;
         while (!lifetime.IsCancellationRequested)
         {
             var message = await SocketMessages.ReadAsync(socket, lifetime.Token); if (message is null) break;
-            var now = Wire.Now; tokens = Math.Min(burst, tokens + (now - refilled) * perSecond / 1000); refilled = now;
+            var now = Wire.Now; tokens = Math.Min(Burst, tokens + (now - refilled) * PerSecond / 1000); refilled = now;
             if (--tokens < 0) throw new InvalidDataException("Message rate limit exceeded");
             lock (room.Gate)
             {
                 if (message.Type == "ping") { member.Send(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
-                if (!member.Approved) continue;
+                // A connection that was replaced or removed keeps its socket for a moment; it no longer acts in the room.
+                if (!room.People.ContainsKey(member.Id)) continue;
                 switch (message.Type)
                 {
-                    case "reconnect" when !member.Host && member.AllowBroadcast():
-                        room.Snapshot();
-                        room.People.Values.FirstOrDefault(x => x.Host)?.Send(new("connect", Target: member.Id));
-                        break;
-                    case "admit" when member.Host:
-                        if (room.People.TryGetValue(message.Target ?? "", out var guest) && !guest.Approved && room.People.Values.Count(x => x.Approved) < 5)
-                        {
-                            guest.Approved = true;
-                            room.ApprovedGuests.Add(guest.GuestHash!); room.GuestNames[guest.GuestHash!] = guest.Name; SaveRoom(room);
-                            guest.Send(new("admitted", Data: Wire.Serialize(new Welcome(room.Code, guest.Id, false, IceServers(guest.Id), forceRelay, GuestKey: guest.GuestKey))));
-                            member.Send(new("connect", Target: guest.Id)); room.Snapshot();
-                        }
-                        break;
-                    case "remove" when member.Host:
-                        var removed = room.People.Values.FirstOrDefault(x => !x.Host && (x.Id == message.Target || x.GuestHash == message.Target));
-                        if (removed is not null)
-                        { room.ApprovedGuests.Remove(removed.GuestHash!); room.GuestNames.Remove(removed.GuestHash!); SaveRoom(room); removed.Approved = false; removed.Lifetime.Cancel(); room.Broadcast(new("peer-left", Sender: removed.Id)); room.Snapshot(); }
-                        else if (room.ApprovedGuests.Remove(message.Target ?? ""))
-                        { room.GuestNames.Remove(message.Target!); SaveRoom(room); room.Snapshot(); }
-                        break;
                     case "signal":
-                        if (room.People.TryGetValue(message.Target ?? "", out var target) && target.Approved && (target.Host || member.Host)) target.Send(message with { Sender = member.Id });
+                        if (room.People.TryGetValue(message.Target ?? "", out var target) && target != member) target.Send(message with { Sender = member.Id });
                         break;
-                    case "media" when member.Host:
-                        var media = Wire.Read<SharedMedia>(message.Data!);
-                        if (media.Length <= 0 || media.Title.Length > 300 || media.Id.Length > 128 || media.Extension.Length > 16) throw new InvalidDataException("Invalid media");
-                        room.Media = media; room.ResumeWhenReady = false;
-                        foreach (var p in room.People.Values) p.Ready = false;
-                        room.Playback = new(++room.Revision, media.Id, false, 0, Wire.Now); room.Snapshot();
+                    // Asks another member to start a new direct connection to this one.
+                    case "reconnect" when member.AllowBroadcast():
+                        if (room.People.TryGetValue(message.Target ?? "", out var peer) && peer != member) peer.Send(new("connect", Target: member.Id));
                         break;
-                    case "settings" when member.Host:
-                    case "controls" when member.Host:
-                        if (message.Text is not null)
-                        {
-                            if (string.IsNullOrWhiteSpace(message.Text) || message.Text.Trim().Length > 100 || message.Text.Any(char.IsControl)) throw new InvalidDataException("Invalid room name");
-                            room.Name = message.Text.Trim();
-                        }
-                        room.SharedControls = message.Number == 1; SaveRoom(room); room.Snapshot(); break;
-                    case "queue" when member.Host:
-                        var queue = Wire.Read<string[]>(message.Data!);
-                        if (queue.Length > 1000 || queue.Any(x => x is null || x.Length > 300)) throw new InvalidDataException("Invalid queue");
-                        room.Queue = queue; room.Snapshot(); break;
-                    case "playback" when (member.Host || room.SharedControls) && member.AllowBroadcast():
-                        var desired = Wire.Read<PlaybackState>(message.Data!);
-                        if (room.Media is null || desired.MediaId != room.Media.Id || desired.PositionMs < 0 || desired.PositionMs > 7 * 86400000L) break;
-                        room.ResumeWhenReady = desired.Playing && room.People.Values.Any(x => x.Approved && !x.Ready);
-                        room.Playback = desired with { Revision = ++room.Revision, Playing = desired.Playing && !room.ResumeWhenReady, AtUnixMs = Wire.Now + (desired.Playing && !room.ResumeWhenReady ? 200 : 0) };
-                        room.Broadcast(new("playback", Data: Wire.Serialize(room.Playback))); break;
-                    // Readiness broadcasts reach every member; ignore unchanged state and bound each member's rate.
-                    case "buffering" when (member.Ready || room.Playback is { Playing: true }) && member.AllowBroadcast():
-                        member.Ready = false;
-                        if (room.Playback is { Playing: true } current)
-                        {
-                            room.ResumeWhenReady = true;
-                            room.Playback = current with { Revision = ++room.Revision, Playing = false, PositionMs = SyncMath.TargetPosition(current, Wire.Now), AtUnixMs = Wire.Now };
-                            room.Broadcast(new("playback", Data: Wire.Serialize(room.Playback)));
-                            room.Broadcast(new("notice", Text: $"{member.Name} is buffering. Playback resumes when everyone is ready."));
-                        }
-                        room.Snapshot();
+                    // Starting a video takes the streaming role from whoever holds it.
+                    case "claim" when room.HostId != member.Id && member.AllowBroadcast():
+                        room.HostId = member.Id; room.Epoch++; room.Snapshot(); break;
+                    case "rename" when member.Owner && member.AllowBroadcast():
+                        if (!ValidRoomName(message.Text)) throw new InvalidDataException("Invalid room name");
+                        room.Name = message.Text!.Trim(); SaveRoom(room); room.Snapshot(); break;
+                    // The creator removes someone by their connection or by their member id. A removed member can't
+                    // enter again until the creator lets them back in.
+                    case "remove" when member.Owner:
+                        var present = room.People.Values.FirstOrDefault(x => x != member && (x.Id == message.Target || x.Hash == message.Target));
+                        var removedId = present?.Hash ?? message.Target ?? "";
+                        if (removedId == room.OwnerHash || !room.Members.Remove(removedId, out var removedName)) break;
+                        room.Banned[removedId] = removedName;
+                        if (present is not null) { room.Leave(present, snapshot: false); present.Close("You were removed from this room."); }
+                        SaveRoom(room); room.Snapshot(); break;
+                    case "restore" when member.Owner:
+                        if (room.Banned.Remove(message.Target ?? "")) { SaveRoom(room); room.Snapshot(); }
                         break;
-                    case "ready" when !member.Ready && member.AllowBroadcast():
-                        member.Ready = true; room.TryResume(); room.Snapshot(); break;
                 }
             }
         }
@@ -231,27 +224,14 @@ app.Map("/room", async context =>
     catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or IOException) { }
     finally
     {
-        if (room is not null && member is not null)
-        {
-            lock (room.Gate)
-            {
-                var registered = room.People.Remove(member.Id);
-                if (registered && member.Host)
-                {
-                    room.Media = null; room.Playback = null; room.Queue = []; room.ResumeWhenReady = false;
-                    room.Broadcast(new("peer-left", Sender: member.Id)); room.Snapshot();
-                }
-                else if (registered) { room.Broadcast(new("peer-left", Sender: member.Id)); room.TryResume(); room.Snapshot(); }
-                if (registered && room.People.Count == 0) room.EmptySince = Wire.Now;
-            }
-        }
+        if (room is not null && member is not null) lock (room.Gate) room.Leave(member);
         lifetime.Cancel(); socket.Abort();
     }
 });
 await app.RunAsync();
 
 // Cloudflare issues shared short-lived TURN credentials through an authenticated API. A background loop keeps them
-// fresh even while no rooms are open, so startup and admission never wait on Cloudflare and every credential handed out
+// fresh even while no rooms are open, so startup and entry never wait on Cloudflare and every credential handed out
 // stays valid for at least half its lifetime (12 hours by default).
 sealed class CloudflareTurn(string keyId, string token, string api, TimeSpan lifetime, TimeSpan retryInterval, ILogger logger)
 {
@@ -330,22 +310,22 @@ sealed class CloudflareTurn(string keyId, string token, string api, TimeSpan lif
     }
 }
 
-sealed class Member(string id, string name, bool host, WebSocket socket, CancellationTokenSource lifetime, string? guestKey = null)
+// One connection to a room. Hash identifies the person across connections without storing their key.
+sealed class Member(string id, string name, WebSocket socket, CancellationTokenSource lifetime, string key)
 {
-    public string? GuestKey => guestKey;
-    public string? GuestHash { get; } = guestKey is null ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(guestKey)));
-    public string Id => id; public string Name => name; public bool Host { get; } = host;
-    public bool Approved = host;
-    public bool Ready;
+    public string Hash { get; } = PersistentRooms.Hash(key);
+    public string Id => id; public string Name => name;
+    public bool Owner;
+    // Order of arrival in the room.
+    public long Arrived;
     private double broadcastTokens = 20; private long broadcastRefilled = Wire.Now;
-    // Called under the room lock for member messages that broadcast to everyone.
+    // Called under the room lock for member messages that reach other members.
     public bool AllowBroadcast()
     {
         var now = Wire.Now; broadcastTokens = Math.Min(20, broadcastTokens + (now - broadcastRefilled) * 4 / 1000.0); broadcastRefilled = now;
         if (broadcastTokens < 1) return false;
         broadcastTokens--; return true;
     }
-    public CancellationTokenSource Lifetime => lifetime;
     private readonly Channel<(WireMessage Message, TaskCompletionSource? Sent)> outgoing = Channel.CreateBounded<(WireMessage, TaskCompletionSource?)>(128);
     public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null))) lifetime.Cancel(); }
     public async Task SendAndWaitAsync(WireMessage message)
@@ -354,6 +334,8 @@ sealed class Member(string id, string name, bool host, WebSocket socket, Cancell
         if (!outgoing.Writer.TryWrite((message, sent))) throw new IOException("Room send queue full");
         await sent.Task.WaitAsync(TimeSpan.FromSeconds(2), lifetime.Token);
     }
+    // Tells the app why its connection ends, then ends it. The app does not come back on its own after this.
+    public void Close(string reason) => _ = SendAndWaitAsync(new("closed", Text: reason)).ContinueWith(_ => { try { lifetime.Cancel(); } catch (ObjectDisposedException) { } }, TaskScheduler.Default);
     public async Task SendLoop()
     {
         try { await foreach (var msg in outgoing.Reader.ReadAllAsync(lifetime.Token)) { await SocketMessages.SendAsync(socket, msg.Message, lifetime.Token); msg.Sent?.TrySetResult(); } }
@@ -365,27 +347,46 @@ sealed class Room(string code, bool persistent = false)
     public object Gate { get; } = new(); public string Code => code;
     public bool Persistent { get; } = persistent;
     public string? Name;
-    public long Expires { get; } = persistent ? long.MaxValue : Wire.Now + 6 * 3600000; public long Revision;
-    public long EmptySince = Wire.Now;
+    // The creator, who can rename the room and remove people.
+    public string? OwnerHash;
+    // The member holding the streaming role, and how many times it has changed hands.
+    public string? HostId; public long Epoch;
+    public long Expires { get; } = persistent ? long.MaxValue : Wire.Now + 6 * 3600000;
+    public long EmptySince = Wire.Now, Arrivals;
     public Dictionary<string, Member> People { get; } = new();
-    public HashSet<string> ApprovedGuests { get; } = [];
-    public Dictionary<string, string> GuestNames { get; } = [];
-    public AdmittedGuest[] Guests() => ApprovedGuests.Select(id => new AdmittedGuest(id, GuestNames.GetValueOrDefault(id, "Guest"))).ToArray();
-    public SharedMedia? Media; public PlaybackState? Playback; public bool SharedControls; public bool ResumeWhenReady; public string[] Queue = [];
-    public void TryResume()
+    // Everyone who has entered, by member id, with the name they last used.
+    public Dictionary<string, string> Members { get; } = [];
+    public Dictionary<string, string> Banned { get; } = [];
+    public AdmittedGuest[] MemberList() => Members.Select(pair => new AdmittedGuest(pair.Key, pair.Value)).ToArray();
+    public AdmittedGuest[] BannedList() => Banned.Select(pair => new AdmittedGuest(pair.Key, pair.Value)).ToArray();
+    public void Remember(Member member)
     {
-        if (!ResumeWhenReady || Playback is null || People.Values.Any(x => x.Approved && !x.Ready)) return;
-        ResumeWhenReady = false;
-        Playback = Playback with { Revision = ++Revision, Playing = true, AtUnixMs = Wire.Now + 200 };
-        Broadcast(new("playback", Data: Wire.Serialize(Playback)));
+        // A full list forgets someone who is not here; they are remembered again when they next enter.
+        if (!Members.ContainsKey(member.Hash) && Members.Count >= RoomProtocol.MaxMembers &&
+            Members.Keys.FirstOrDefault(id => id != OwnerHash && People.Values.All(p => p.Hash != id)) is { } forgotten) Members.Remove(forgotten);
+        Members[member.Hash] = member.Name;
     }
-    public void Broadcast(WireMessage message) { foreach (var p in People.Values.Where(x => x.Approved)) p.Send(message); }
+    public void Leave(Member member, bool snapshot = true)
+    {
+        if (!People.Remove(member.Id)) return;
+        Broadcast(new("peer-left", Sender: member.Id));
+        if (HostId == member.Id)
+        {
+            // Their video ends with them. The role passes to whoever has been here longest; in an empty room, the next
+            // person to enter takes it.
+            HostId = People.Values.OrderBy(x => x.Arrived).FirstOrDefault()?.Id; Epoch++;
+        }
+        if (snapshot) Snapshot();
+        if (People.Count == 0) EmptySince = Wire.Now;
+    }
+    public void Broadcast(WireMessage message) { foreach (var p in People.Values) p.Send(message); }
     public void Snapshot()
     {
+        var snapshot = new RoomSnapshot(People.Values.OrderBy(x => x.Arrived).Select(x => new Participant(x.Id, x.Name, x.Id == HostId, true, false, x.Hash, x.Owner)).ToArray(),
+            null, null, false, [], MemberList(), Name, Epoch: Epoch);
+        var message = new WireMessage("snapshot", Data: Wire.Serialize(snapshot));
+        WireMessage? forOwner = null;
         foreach (var p in People.Values)
-        {
-            var visible = People.Values.Where(x => p.Host || x.Approved || x.Id == p.Id).Select(x => new Participant(x.Id, x.Name, x.Host, x.Approved, x.Ready, p.Host ? x.GuestHash : null)).ToArray();
-            p.Send(new("snapshot", Data: Wire.Serialize(new RoomSnapshot(visible, p.Approved ? Media : null, p.Approved ? Playback : null, SharedControls, p.Approved ? Queue : [], p.Host ? Guests() : null, Name))));
-        }
+            p.Send(p.Owner ? forOwner ??= new("snapshot", Data: Wire.Serialize(snapshot with { Removed = BannedList() })) : message);
     }
 }

@@ -2,9 +2,10 @@ using System.Collections.Concurrent;
 
 namespace BlackPearl.Core;
 
-// Voice chat over the room's direct connections. Guests send their microphone frames to the host; the host
-// relays each speaker's frames to everyone else in voice. Frames bypass the control loop for latency, so the
-// relay reads an immutable routing table that the control loop republishes whenever voice state changes.
+// Voice chat over the room's direct connections. Each speaker sends its microphone frames straight to everyone else
+// in voice, so voice carries on whoever is streaming and when the streamer changes. Who is in voice is part of the
+// room state the streamer keeps. Frames bypass the control loop for latency, so sending and receiving read an immutable
+// routing table that is replaced whenever the room state changes.
 public sealed partial class RoomClient
 {
     private IVoiceSink? voiceOutput;
@@ -12,13 +13,14 @@ public sealed partial class RoomClient
     public IVoiceSink? VoiceOutput { get => Volatile.Read(ref voiceOutput); set => Volatile.Write(ref voiceOutput, value); }
     // Bit 1: in voice; bit 2: microphone muted.
     private int voiceDesired;
-    private sealed record VoiceRoutes(IReadOnlyDictionary<string, byte> Talkers, string[] Listeners, byte HostSlot, bool HostListening, bool HostTalking);
-    private VoiceRoutes voiceRoutes = new(new Dictionary<string, byte>(), [], 0, false, false);
+    // Talkers: the slot of everyone else whose microphone is on. Listeners: everyone else in voice.
+    private sealed record VoiceRoutes(IReadOnlyDictionary<string, byte> Talkers, string[] Listeners, byte Slot, bool Talking);
+    private VoiceRoutes voiceRoutes = new(new Dictionary<string, byte>(), [], 0, false);
     private sealed class VoiceBudget { public double Tokens = 50; public long Refilled = Environment.TickCount64; }
     private readonly ConcurrentDictionary<string, VoiceBudget> voiceBudgets = new();
     private (string Key, long At)? voiceSent;
     public bool InVoice => (Volatile.Read(ref voiceDesired) & 1) != 0;
-    // The host supports voice and, for guests, its direct connection is up.
+    // The room's state is known, and whoever keeps it supports voice.
     public bool VoiceAvailable => IsConnected && Snapshot?.Voice is not null && (Identity?.Host == true || directConnected.Task.IsCompletedSuccessfully);
     public VoiceMember? VoiceState(string peer) => Snapshot?.Voice?.FirstOrDefault(v => v.Peer == peer);
     public void SetVoice(bool joined, bool muted)
@@ -33,8 +35,9 @@ public sealed partial class RoomClient
         if (Identity?.Host == true) { if (coordinator is not null) ApplyHostCommand(Identity.Peer, new("voice", Number: Volatile.Read(ref voiceDesired))); }
         else ReconcileVoice();
     }
-    // Guests repeat their state until the host's snapshot reflects it, including after a reconnect replaced the
-    // transport: quickly at first so joining voice is not held up by one lost message, then every few seconds.
+    // Members repeat their state until the streamer's snapshot reflects it, including after a reconnect replaced the
+    // connection or the streaming role moved: quickly at first so joining voice is not held up by one lost message,
+    // then every few seconds.
     private int voiceRetries;
     private void ReconcileVoice()
     {
@@ -51,49 +54,38 @@ public sealed partial class RoomClient
         // Check again shortly rather than waiting for the next health tick.
         _ = Task.Delay(interval + 50, lifetime.Token).ContinueWith(_ => Post(new("voice-local")), TaskContinuationOptions.OnlyOnRanToCompletion);
     }
-    private void UpdateVoiceRoutes()
+    private void UpdateVoiceRoutes(RoomSnapshot snapshot)
     {
-        if (coordinator is null || Identity is not { } identity) return;
-        var members = coordinator.Voice.ToArray();
-        var host = members.FirstOrDefault(v => v.Peer == identity.Peer);
+        if (Identity is not { } identity) return;
+        var members = snapshot.Voice ?? [];
+        var mine = members.FirstOrDefault(v => v.Peer == identity.Peer);
         Volatile.Write(ref voiceRoutes, new(
-            members.Where(v => v.Joined && !v.Muted && v.Peer != identity.Peer).ToDictionary(v => v.Peer, v => (byte)v.Slot),
-            members.Where(v => v.Joined && v.Peer != identity.Peer).Select(v => v.Peer).ToArray(),
-            (byte)(host?.Slot ?? 0), host?.Joined == true, host is { Joined: true, Muted: false }));
+            members.Where(v => v.Joined && !v.Muted && v.Peer != identity.Peer).GroupBy(v => v.Peer).ToDictionary(v => v.Key, v => (byte)v.First().Slot),
+            members.Where(v => v.Joined && v.Peer != identity.Peer).Select(v => v.Peer).Distinct().ToArray(),
+            (byte)(mine?.Slot ?? 0), mine is { Joined: true, Muted: false }));
     }
     // Called on the capture thread with a frame whose slot is not yet set.
     public void TransmitVoice(ReadOnlySpan<byte> frame)
     {
         if (Volatile.Read(ref voiceDesired) != 1 || !IsConnected || frame.Length > VoicePacket.HeaderBytes + VoicePacket.MaxPayload) return;
-        if (Identity?.Host == true)
-        {
-            var routes = Volatile.Read(ref voiceRoutes);
-            if (!routes.HostTalking || routes.HostSlot == 0) return;
-            Span<byte> stamped = stackalloc byte[frame.Length];
-            frame.CopyTo(stamped); stamped[1] = routes.HostSlot;
-            foreach (var listener in routes.Listeners)
-                if (negotiated.ContainsKey(listener) && peers.TryGetValue(listener, out var peer)) peer.SendVoice(stamped);
-        }
-        else if (hostPeer is { } host && negotiated.ContainsKey(host) && peers.TryGetValue(host, out var peer)) peer.SendVoice(frame);
+        var routes = Volatile.Read(ref voiceRoutes);
+        // The room has to know this member is in voice with its microphone on before the others accept its frames.
+        if (!routes.Talking || routes.Slot == 0) return;
+        Span<byte> stamped = stackalloc byte[frame.Length];
+        frame.CopyTo(stamped); stamped[1] = routes.Slot;
+        foreach (var listener in routes.Listeners)
+            if (negotiated.ContainsKey(listener) && peers.TryGetValue(listener, out var peer)) peer.SendVoice(stamped);
     }
     // Called on a native transport thread.
     private void ReceiveVoice(string sender, PeerTransport transport, ReadOnlySpan<byte> frame)
     {
-        if (!VoicePacket.TryRead(frame, out var slot, out var sequence, out var flags, out var payload)) return;
+        if (!InVoice || !VoicePacket.TryRead(frame, out _, out var sequence, out var flags, out var payload)) return;
         if (!peers.TryGetValue(sender, out var current) || current != transport || !negotiated.ContainsKey(sender)) return;
-        if (Identity?.Host == true)
-        {
-            var routes = Volatile.Read(ref voiceRoutes);
-            // Only people in voice with their microphone on may speak, and none faster than real time allows.
-            if (!routes.Talkers.TryGetValue(sender, out var assigned) || !AdmitVoice(sender)) return;
-            Span<byte> stamped = stackalloc byte[frame.Length];
-            frame.CopyTo(stamped); stamped[1] = assigned;
-            if (routes.HostListening) VoiceOutput?.Receive(assigned, sequence, flags, payload);
-            foreach (var listener in routes.Listeners)
-                if (listener != sender && negotiated.ContainsKey(listener) && peers.TryGetValue(listener, out var peer)) peer.SendVoice(stamped);
-        }
-        else if (sender == hostPeer && slot != 0 && InVoice && slot != VoiceState(Identity?.Peer ?? "")?.Slot)
-            VoiceOutput?.Receive(slot, sequence, flags, payload);
+        // The slot comes from the room state for the member this connection belongs to, never from the frame, so nobody
+        // can speak as someone else. Only people in voice with their microphone on are heard, and none faster than
+        // real time allows.
+        if (!Volatile.Read(ref voiceRoutes).Talkers.TryGetValue(sender, out var assigned) || !AdmitVoice(sender)) return;
+        VoiceOutput?.Receive(assigned, sequence, flags, payload);
     }
     private bool AdmitVoice(string sender)
     {

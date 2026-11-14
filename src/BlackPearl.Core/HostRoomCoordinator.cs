@@ -1,11 +1,20 @@
 namespace BlackPearl.Core;
 
-internal sealed record HostRoomState(long Sequence, long HostNowMs, RoomSnapshot Snapshot);
+// Epoch is the room service's count of streaming-role changes when this state was published.
+internal sealed record HostRoomState(long Sequence, long HostNowMs, RoomSnapshot Snapshot, long Epoch = 0);
 
-// Accessed by RoomClient's single control event loop. Discovery supplies identity
-// and admission; the host owns all playback, readiness and queue state.
+// Accessed by RoomClient's single control event loop. The room service supplies who is in the room and who holds the
+// streaming role; that member, called the host here, owns all playback, readiness and queue state while it holds it.
 internal sealed class HostRoomCoordinator(string host)
 {
+    // A member taking over the streaming role carries on from the room state it last received: what the room watched
+    // last and who is in voice. The previous streamer's video, playback and queue end with its role.
+    public void Inherit(RoomSnapshot previous)
+    {
+        LastSession = previous.LastSession is { } session && RoomSessions.Valid(session) ? session with { LibraryId = null } : null;
+        foreach (var member in previous.Voice ?? [])
+            if (people.ContainsKey(member.Peer) && member.Slot is >= 1 and <= 250 && voice.Values.All(v => v.Slot != member.Slot)) voice[member.Peer] = member;
+    }
     private readonly Dictionary<string, Participant> people = [];
     private readonly HashSet<string> departed = [];
     private readonly HashSet<string> scopedReadiness = [];

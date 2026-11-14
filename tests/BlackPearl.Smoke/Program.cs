@@ -46,6 +46,17 @@ if (args.FirstOrDefault() == "--room-resilience")
     Console.WriteLine($"{checks} room resilience checks passed."); return;
 }
 
+if (args.FirstOrDefault() == "--hostless-rooms")
+{
+    var checks = 0;
+    PlaybackDiagnostics.Initialize(Path.GetFullPath(Path.Combine("artifacts", "hostless-rooms-" + Guid.NewGuid().ToString("N"), "logs")));
+    await HostlessRoomFixture.Run(File.Exists(".tools/dotnet/dotnet.exe") ? Path.GetFullPath(".tools/dotnet/dotnet.exe") : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet", Path.GetFullPath(args[1]),
+        Path.GetFullPath(Path.Combine("artifacts", "hostless-rooms-" + Guid.NewGuid().ToString("N"))), (condition, name) =>
+        { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); checks++; });
+    await PlaybackDiagnostics.FlushAsync();
+    Console.WriteLine($"{checks} hostless room checks passed. Diagnostics: {PlaybackDiagnostics.DirectoryPath}"); return;
+}
+
 if (args.FirstOrDefault() == "--metadata-fixes")
 {
     var checks = 0;
@@ -516,12 +527,15 @@ Check(QueuePlayback.FindNext(playbackEntries, 2, 1, _ => true) == -1 && QueuePla
 var persistentRegistryPath = Path.Combine(root, "persistent-registry");
 var registry = new PersistentRooms(persistentRegistryPath); var reusableCode = Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
 var ownerKey = registry.Create(reusableCode);
-Check(new PersistentRooms(persistentRegistryPath).Verify(reusableCode, ownerKey), "persistent room owner survives registry restart");
-registry.Update(reusableCode, [new("admitted-guest-hash", "Guest")], true, "Movie night");
+Check(new PersistentRooms(persistentRegistryPath).All().Single().HostKeyHash == PersistentRooms.Hash(ownerKey), "a room's creator survives a registry restart");
+registry.Update(reusableCode, [new("member-hash", "Guest")], [new("removed-hash", "Removed")], "Movie night");
 var restoredRoom = new PersistentRooms(persistentRegistryPath).All().Single();
-Check(restoredRoom.SharedControls && restoredRoom.Guests?.Single().Name == "Guest", "room settings and admitted roster survive server registry restart");
-Check(restoredRoom.Name == "Movie night", "waiting-room name survives server registry restart");
-Check(!registry.Verify(reusableCode, new string('0', 64)) && !Wire.Serialize(registry.All()).Contains(ownerKey), "server stores only hashed host keys and rejects wrong owners");
+Check(restoredRoom.Guests?.Single().Name == "Guest" && restoredRoom.Banned?.Single().Id == "removed-hash", "a room's members and the people removed from it survive a registry restart");
+Check(restoredRoom.Name == "Movie night", "a room's name survives a registry restart");
+Check(!Wire.Serialize(registry.All()).Contains(ownerKey), "the server stores only the hash of the creator's key");
+// A room saved by a server from before rooms lost their host: its admitted guests are its members.
+new LibraryStore(persistentRegistryPath).Setting("persistentRoom:LEGACY", """{"code":"LEGACY","hostKeyHash":"AB","approvedGuests":["old-guest"],"sharedControls":true,"guests":[{"id":"old-guest","name":"Old guest"}],"name":"Old room"}""");
+Check(new PersistentRooms(persistentRegistryPath).All().Single(x => x.Code == "LEGACY") is { Banned: null, Name: "Old room" } legacyRoom && legacyRoom.Guests!.Single().Id == "old-guest", "rooms saved by an older server load with their guests as members");
 var queueDefinition = new SavedQueue("test", "Weekend", ["third", "second", "third"]);
 library.Setting("queues", Wire.Serialize(new[] { queueDefinition }));
 Check(Wire.Read<SavedQueue[]>(new LibraryStore(Path.Combine(root, "db")).Setting("queues")!).Single().MediaIds.SequenceEqual(queueDefinition.MediaIds), "saved queue persists order and duplicate entries");
