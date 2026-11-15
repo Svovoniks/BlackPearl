@@ -168,7 +168,7 @@ public static class Ffmpeg
         {
             "h264_nvenc" => ["-c:v", encoder, "-preset", "p4", "-rc", "vbr", "-cq", "24", "-b:v", "0", "-no-scenecut", "1", "-forced-idr", "1", .. shared],
             "h264_qsv" => ["-c:v", encoder, "-preset", "fast", "-global_quality", "24", "-forced_idr", "1", .. shared],
-            "h264_amf" => ["-c:v", encoder, "-rc", "vbr_peak", "-b:v", rate, .. shared],
+            "h264_amf" => ["-c:v", encoder, "-rc", "vbr_peak", "-b:v", rate, "-forced_idr", "1", .. shared],
             "libx264" => ["-c:v", encoder, "-preset", "veryfast", "-crf", "22", "-sc_threshold", "0", "-keyint_min", "100000", .. shared],
             _ => ["-c:v", encoder, "-b:v", rate, .. shared],
         };

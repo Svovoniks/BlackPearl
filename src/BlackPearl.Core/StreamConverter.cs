@@ -43,25 +43,30 @@ internal sealed class TransportSegmenter(int segmentMs, double originSeconds)
         var pid = (packet[1] & 0x1F) << 8 | packet[2];
         if (pid == 0) { packet.CopyTo(tables); association = true; }
         else if (pid == MapPid) { packet.CopyTo(tables.AsSpan(Packet)); map = true; }
-        else if (pid == VideoPid && Keyframe(packet) is { } timestamp)
+        else if (pid == VideoPid && Frame(packet, out var keyframe) is { } timestamp)
         {
             var index = (int)Math.Floor((timestamp / 90000.0 - Ffmpeg.TimestampOffsetSeconds - originSeconds) * 1000 / segmentMs + 0.0001);
-            if (index > Index || current is null)
+            if (keyframe && (index > Index || current is null))
             {
                 if (current is { Length: > 0 } done) completed(Index, done.ToArray());
                 Index = Math.Max(index, 0); current = new MemoryStream();
                 if (association && map) current.Write(tables);
             }
+            // An encoder that ignores the forced keyframes would leave one piece growing for the whole film.
+            else if (current is not null && index > Index + 1) throw new InvalidDataException("The encoder did not begin a new piece where one starts.");
         }
         current?.Write(packet);
     }
 
-    // The timestamp of the frame that starts in this packet, when it is a keyframe.
-    private static long? Keyframe(ReadOnlySpan<byte> packet)
+    // The timestamp of the frame that starts in this packet, and whether it is a keyframe.
+    private static long? Frame(ReadOnlySpan<byte> packet, out bool keyframe)
     {
-        if ((packet[1] & 0x40) == 0 || (packet[3] & 0x20) == 0 || packet[4] == 0 || (packet[5] & 0x40) == 0) return null;
-        var start = 5 + packet[4];
+        keyframe = false;
+        if ((packet[1] & 0x40) == 0) return null;
+        var adaptation = (packet[3] & 0x20) != 0;
+        var start = adaptation ? 5 + packet[4] : 4;
         if (start + 14 > Packet || packet[start] != 0 || packet[start + 1] != 0 || packet[start + 2] != 1 || (packet[start + 7] & 0x80) == 0) return null;
+        keyframe = adaptation && packet[4] != 0 && (packet[5] & 0x40) != 0;
         var b = packet.Slice(start + 9, 5);
         return (long)(b[0] >> 1 & 7) << 30 | (long)b[1] << 22 | (long)(b[2] >> 1) << 15 | (long)b[3] << 7 | (long)(b[4] >> 1);
     }

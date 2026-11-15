@@ -10,6 +10,7 @@ BlackPearl dynamically links the following components. Package versions and cont
 | --- | --- | --- |
 | LibVLCSharp / WPF | 3.10.1 | https://code.videolan.org/videolan/LibVLCSharp |
 | VideoLAN LibVLC Windows | 3.0.23.1 | https://code.videolan.org/videolan/vlc |
+| FFmpeg, `ffmpeg/ffmpeg.exe` with its `LICENSE.txt` (converts a room's video to a lower quality while it plays; GPL-3.0 "essentials" build by gyan.dev with x264 and libass, shipped unmodified and run as a separate program) | 9.0.2 | https://ffmpeg.org, build and corresponding source: https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2, https://www.gyan.dev/ffmpeg/builds |
 | DataChannelDotnet | 1.3.1 | https://www.nuget.org/packages/DataChannelDotnet |
 | libdatachannel and bundled OpenSSL | Included in DataChannelDotnet | https://github.com/paullouisageneau/libdatachannel |
 | Concentus (managed Opus voice codec) | 2.2.2 | https://github.com/lostromb/concentus |
