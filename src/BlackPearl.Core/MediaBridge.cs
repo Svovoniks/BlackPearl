@@ -147,6 +147,18 @@ public sealed class MediaBridge : IAsyncDisposable
     public void SetReadAhead(long bytes) { source?.SetReadAhead(bytes); stream?.StartReadAhead(); }
     public long BufferedAheadBytes => source?.CachedAheadBytes ?? stream?.BufferedAheadBytes ?? 0;
     public bool BuffersWholeVideo => source?.Unbounded == true || stream?.BuffersWholeVideo == true;
+    // The playback time up to which the video is held, for a player at positionMs of a video durationMs long: what
+    // the timeline draws as buffered. A converted stream's pieces give it exactly. A file's bytes are taken as spread
+    // evenly over its length, so for a file it is an estimate, except that a file held to its end reads as the end.
+    public long BufferedUntilMs(long positionMs, long durationMs)
+    {
+        if (durationMs <= 0) return 0;
+        positionMs = Math.Clamp(positionMs, 0, durationMs);
+        if (stream is not null) return Math.Clamp(stream.BufferedUntilMs, positionMs, durationMs);
+        if (source is null) return positionMs;
+        if (source.CachedToEnd) return durationMs;
+        return Math.Min(durationMs, positionMs + (long)((double)source.CachedAheadBytes * durationMs / Math.Max(1, source.Media.Length)));
+    }
     public bool PlaysConvertedStream => stream is not null;
     public void CancelPendingReads()
     {

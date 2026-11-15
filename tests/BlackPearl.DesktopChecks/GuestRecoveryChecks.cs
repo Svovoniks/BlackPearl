@@ -92,6 +92,10 @@ static class GuestRecoveryChecks
             await Wait(() => cache is not null && cache.StoredBytes >= host.HostedMedia.Media.Length);
             Check(((MediaBridge)Field("bridge")!).BuffersWholeVideo && player.Time < player.Length / 2,
                 "a guest downloads the rest of the room's video into its cache file while the start is still playing");
+            // The timeline draws what is buffered; a file held to its end reads as buffered to the end.
+            var timeline = (System.Windows.Controls.Slider)window.FindName("Timeline");
+            await Wait(() => SliderBuffer.GetFraction(timeline) == 1);
+            Check(timeline.Value < timeline.Maximum / 2, $"the timeline shows the whole video as buffered while the start is still playing (buffered to {SliderBuffer.GetFraction(timeline):P0}, position {timeline.Value / timeline.Maximum:P0})");
             var priorPosition = player.Time;
             var bridge = Field("bridge"); var loadedMedia = Field("loadedMedia"); var loadGeneration = Field("loadGeneration");
             var restored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

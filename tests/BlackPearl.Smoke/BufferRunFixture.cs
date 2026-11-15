@@ -128,6 +128,7 @@ static class BufferRunFixture
                 Console.WriteLine($"{now / 1000.0,4:F0}  {player.State,-8} {TimeSpan.FromMilliseconds(Math.Max(0, player.Time)):mm\\:ss}     {bridge.BufferedAheadBytes / 1e6,8:F1} MB   {bytes / 1e6,7:F1} MB  {received.RepeatedBytes / 1e6,5:F1}  {(bytes - lastBytes) * 8.0 / (now - lastAt) / 1000,5:F1} Mbps" +
                     (converter is null ? "" : $"   {converter.ConvertedSegments * StreamConverter.SegmentMs / 1000 / 60.0,5:F1} min ({converter.Encoder})") +
                     // What the viewer's app would report to whoever plays the video.
+                    $"   bar to {TimeSpan.FromMilliseconds(bridge.BufferedUntilMs(player.Time, player.Length)):h\\:mm\\:ss}" +
                     $"   measured {(guest.Received.Rate is { } measured ? $"{measured.Kbps / 1000.0:F1} Mbps{(measured.AgeMs > 3000 ? $", {measured.AgeMs / 1000} s ago" : "")}" : "nothing yet")}");
                 lastBytes = bytes; lastAt = now;
             }

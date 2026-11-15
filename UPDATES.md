@@ -298,6 +298,11 @@ seconds, the player offers the best quality that fits (`StreamQuality.Suggest`),
 or the smallest when none does, once per video; the card leaves after 45 seconds.
 Nothing is measured while nobody else is in the room, or once a viewer has the
 whole video buffered.
+A viewer's timeline draws how far the video is **buffered** as a lighter grey
+(`SliderBuffer.Fraction`, from `MediaBridge.BufferedUntilMs`). A converted
+stream's pieces give the time exactly; for a file the buffered bytes are taken as
+spread evenly over its length, so the bar is an estimate there. A video played
+from this PC draws none.
 The diagnostics log records `stream-quality`, `stream-convert` and
 `stream-quality-offer` events on the streaming side and `piece-read` on the viewer's.
 `dotnet run --project tests/BlackPearl.Smoke -c Release -- --buffer-run <video> --quality 720p`

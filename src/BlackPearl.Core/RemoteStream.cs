@@ -97,6 +97,11 @@ public sealed class RemoteStream : IDisposable
             }
         }
     }
+    // The playback time up to which the video is held from the piece being played, or -1 before anything is played.
+    public long BufferedUntilMs
+    {
+        get { lock (gate) { if (anchor < 0) return -1; var index = anchor; while (index < Stream.Segments && Has(index)) index++; return Math.Min(Stream.DurationMs, (long)index * Stream.SegmentMs); } }
+    }
     public int BufferedAheadSegments
     {
         get { lock (gate) { var index = Math.Max(anchor, 0); while (index < Stream.Segments && Has(index)) index++; return index - Math.Max(anchor, 0); } }

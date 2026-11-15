@@ -48,6 +48,15 @@ public partial class MainWindow
     }
     // Begin read-ahead once the first frames are playing, so it never competes with startup for the streamer's
     // bandwidth. From then on the rest of the video downloads continuously, also while paused.
+    // How far the room's video is held ahead of the position, drawn on the timeline in a lighter grey. A video played
+    // from this PC has nothing to buffer and draws none.
+    private void RefreshBufferedBar()
+    {
+        var length = bridge is not null && player is not null ? player.Length : 0;
+        var buffered = length > 0 ? Math.Clamp((double)bridge!.BufferedUntilMs(player!.Time, length) / length, 0, 1) : 0;
+        if (Math.Abs(SliderBuffer.GetFraction(Timeline) - buffered) > 0.0005 || buffered is 0 or 1) SliderBuffer.SetFraction(Timeline, buffered);
+    }
+
     private void StartReadAhead()
     {
         if (bridge is null || readAheadMediaBytes is not { } mediaBytes || !ready || player is not { } native ||

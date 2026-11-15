@@ -253,6 +253,33 @@ static class StreamQualityChecks
             var player = (MediaPlayer)Field("player")!;
             HostReady();
             await Wait(() => player.IsPlaying && player.Time > 500, "the converted stream plays");
+            // The timeline draws how far the video is buffered as a lighter grey over the rail, under the played part.
+            var timeline = Control<Slider>("Timeline");
+            await Wait(() => SliderBuffer.GetFraction(timeline) == 1, "the stream is read ahead to its end, and the timeline shows all of it as buffered", 60);
+            // The most opaque pixel in a column of the drawn slider: the rail alone, or the rail under the buffered bar.
+            int Rail(double at, string? save = null)
+            {
+                timeline.UpdateLayout();
+                var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(timeline);
+                var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(timeline.ActualWidth * dpi.DpiScaleX), (int)Math.Ceiling(timeline.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, System.Windows.Media.PixelFormats.Pbgra32);
+                var picture = new System.Windows.Media.DrawingVisual();
+                using (var context = picture.RenderOpen())
+                    context.DrawRectangle(new System.Windows.Media.VisualBrush(timeline) { Stretch = System.Windows.Media.Stretch.None, AlignmentX = System.Windows.Media.AlignmentX.Left, AlignmentY = System.Windows.Media.AlignmentY.Top }, null, new Rect(0, 0, timeline.ActualWidth, timeline.ActualHeight));
+                bitmap.Render(picture);
+                if (save is not null) { var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap)); using var file = File.Create(Path.Combine(shots, save)); encoder.Save(file); }
+                var pixel = new byte[4]; var most = 0;
+                for (var y = 0; y < bitmap.PixelHeight; y++) { bitmap.CopyPixels(new Int32Rect((int)(bitmap.PixelWidth * at), y, 1, 1), pixel, 4, 0); most = Math.Max(most, pixel[3]); }
+                return most;
+            }
+            // Set and read in one go: the next playback tick puts the real value back.
+            SliderBuffer.SetFraction(timeline, 0); var bare = Rail(0.8);
+            SliderBuffer.SetFraction(timeline, 0.6); var part = (Near: Rail(0.55, "7-timeline-buffered-to-60.png"), Far: Rail(0.65));
+            SliderBuffer.SetFraction(timeline, 1); var whole = Rail(0.8);
+            Console.WriteLine($"Timeline rail opacity: bare {bare}, buffered {whole}; buffered to 60%: {part.Near} at 55%, {part.Far} at 65%; position {timeline.Value / timeline.Maximum:P0}");
+            check(timeline.Value < timeline.Maximum / 2 && bare is > 40 and < 90 && whole > bare + 40 && Math.Abs(part.Near - whole) <= 6 && Math.Abs(part.Far - bare) <= 6,
+                "the buffered part of the timeline is drawn lighter than the rest of the rail, and ends where the buffer does");
+            Call("ShowPlayerControls"); Call("PlaybackTickCore");
+            await Shot("6-viewer-buffered");
             check(Math.Abs(player.Length - probe.DurationMs) < 500 && player.IsSeekable, $"it has the film's full length ({player.Length} ms) and can seek");
             Call("ShowPlayerControls"); Call("PlaybackTickCore");
             check(PillStrip.GetShown(Control<ToggleButton>("QualityPill")) && Text("QualityPillText") == "480p" && !Control<ListBox>("QualityChoices").IsEnabled && Text("QualityHint").Contains("Riley"),

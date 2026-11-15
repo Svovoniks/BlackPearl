@@ -1523,7 +1523,7 @@ public partial class MainWindow : Window
             playbackRecovery.Clear(); readAheadMediaBytes = null;
             cancellation.Token.ThrowIfCancellationRequested();
             if (target?.Playing == true) SendReadiness("buffering");
-            if (bridge is not null) await bridge.DisposeAsync(); bridge = null;
+            if (bridge is not null) await bridge.DisposeAsync(); bridge = null; RefreshBufferedBar();
             // The converted stream is on its way: opening the file now would only be replaced a moment later.
             if (converted is { Preparing: true })
             {
@@ -1632,6 +1632,7 @@ public partial class MainWindow : Window
             Timeline.Value = shown;
             PlaybackTime.Text = FormatTime(shown) + " / " + FormatTime(player.Length);
         }
+        RefreshBufferedBar();
         var wantsPlayback = WantsMediaPlayback;
         PlayButton.Content = wantsPlayback ? "\uF8AE" : "\uF5B0";
         PlayButton.ToolTip = wantsPlayback ? "Pause (Space)" : "Play (Space)";
@@ -2053,7 +2054,7 @@ public partial class MainWindow : Window
         await loading.WaitAsync();
         try
         {
-            var oldBridge = bridge; bridge = null;
+            var oldBridge = bridge; bridge = null; RefreshBufferedBar();
             oldBridge?.CancelPendingReads();
             var stopBridge = oldBridge is null ? Task.CompletedTask : oldBridge.DisposeAsync().AsTask();
             await Task.WhenAll(StopNativePlayback(), stopBridge, disconnect);

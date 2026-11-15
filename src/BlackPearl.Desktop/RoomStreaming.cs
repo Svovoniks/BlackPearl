@@ -99,7 +99,7 @@ public partial class MainWindow
         try
         {
             if (room != client || client.Snapshot?.Media is not null || loadedMedia is not null) return;
-            var oldBridge = bridge; bridge = null;
+            var oldBridge = bridge; bridge = null; RefreshBufferedBar();
             oldBridge?.CancelPendingReads();
             await Task.WhenAll(StopNativePlayback(), oldBridge is null ? Task.CompletedTask : oldBridge.DisposeAsync().AsTask());
             if (room != client || client.Snapshot?.Media is not null) return;

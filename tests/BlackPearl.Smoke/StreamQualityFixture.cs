@@ -121,6 +121,10 @@ static class StreamQualityFixture
 
         await using var bridge = new MediaBridge();
         var url = await bridge.StartAsync(remote);
+        // What the timeline draws as buffered: up to the end of the last piece held from the one being played.
+        using (var fresh = new RemoteStream(stream, (_, _, _, _) => Task.FromException<byte[]>(new IOException("unused")), null))
+            check(fresh.BufferedUntilMs == -1 && remote.BufferedUntilMs == stream.DurationMs && bridge.BufferedUntilMs(13000, stream.DurationMs) == stream.DurationMs && bridge.BufferedUntilMs(13000, 0) == 0,
+                "a stream read ahead to its last piece is buffered to the end of the video");
         Core.Initialize();
         using var vlc = new LibVLC("--vout=dummy", "--no-video-title-show", "--quiet");
         using var player = new MediaPlayer(vlc);
