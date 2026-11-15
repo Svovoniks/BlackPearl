@@ -112,10 +112,6 @@ public sealed class PeerTransport : IDisposable
     }
     private readonly TaskCompletionSource catalogOpened = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Task LibraryReady => Task.WhenAll(ControlReady, catalogOpened.Task);
-    public void EnableLibraryChannel()
-    {
-        if (catalogChannel is null) Attach(peer.CreateDataChannel(new RtcCreateDataChannelArgs { Label = "room-catalog-v1" }));
-    }
     private sealed class PendingRange(int count)
     {
         public TaskCompletionSource<byte[]> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -199,9 +195,10 @@ public sealed class PeerTransport : IDisposable
         // Ranges are identified independently. Reliable unordered delivery avoids
         // holding later bytes behind retransmission of an earlier range.
         Attach(peer.CreateDataChannel(new RtcCreateDataChannelArgs { Label = "media", Unordered = true }));
-        // Older apps close channels they do not recognize; the room then treats them as unable to use voice.
         // Frames older than the deepest prebuffer plus a little are useless, so they are never retransmitted past that.
         Attach(peer.CreateDataChannel(new RtcCreateDataChannelArgs { Label = VoiceLabel, Unordered = true, Unreliable = true, MaxPacketLifetime = 400 }));
+        // Library pages and shared queues have their own stream, so they never delay room controls.
+        Attach(peer.CreateDataChannel(new RtcCreateDataChannelArgs { Label = "room-catalog-v1" }));
     }
     private void IsolateMedia()
     {
@@ -381,7 +378,7 @@ public sealed class PeerTransport : IDisposable
         {
             if (message.Type is "library-item" or "library-page-end")
             {
-                if (catalogChannel?.IsOpen != true) throw new IOException("Guest library is not connected");
+                if (catalogChannel?.IsOpen != true) throw new IOException("The library connection is not open");
                 catalogChannel.Send(text);
             }
             else controls!.Send(text);

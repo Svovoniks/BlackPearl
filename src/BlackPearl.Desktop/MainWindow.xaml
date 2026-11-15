@@ -266,6 +266,10 @@
    <!-- Library -->
    <Grid x:Name="LibraryPage"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <StackPanel x:Name="LocalLibraryHeader">
+     <!-- In a room, someone who isn't playing the video can look through the library of whoever is, when that person allows it. -->
+     <Border x:Name="StreamerLibraryOffer" Visibility="Collapsed" Background="{DynamicResource AccentSoft}" CornerRadius="10" Padding="14,6" Margin="0,0,0,12">
+      <DockPanel><Button x:Name="BrowseStreamerLibraryButton" DockPanel.Dock="Right" Click="BrowseStreamerLibrary" Padding="12,0" Margin="8,0,0,0"/><TextBlock Text="&#xE716;" DockPanel.Dock="Left" Style="{StaticResource Icon}" Foreground="{DynamicResource Accent}" Margin="0,0,10,0"/><TextBlock x:Name="StreamerLibraryOfferText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite"/></DockPanel>
+     </Border>
      <TextBlock x:Name="GuestLibraryStatus" Visibility="Collapsed" Style="{StaticResource MutedText}" Margin="0,0,0,12" AutomationProperties.LiveSetting="Polite"/>
      <Border x:Name="HostLibraryActivity" Visibility="Collapsed" Background="{DynamicResource AccentSoft}" CornerRadius="10" Padding="14,6" Margin="0,0,0,12">
       <DockPanel><Button x:Name="BrowseWithGuestButton" DockPanel.Dock="Right" Click="BrowseWithGuest" Padding="12,0" Margin="8,0,0,0" Visibility="Collapsed"/><Button DockPanel.Dock="Right" Content="Permissions" Click="OpenLibraryPermissions" Padding="12,0" Margin="8,0,0,0"/><TextBlock Text="&#xE716;" DockPanel.Dock="Left" Style="{StaticResource Icon}" Foreground="{DynamicResource Accent}" Margin="0,0,10,0"/><TextBlock x:Name="HostLibraryActivityText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite"/></DockPanel>
@@ -445,8 +449,8 @@
      </Grid></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
      <StackPanel x:Name="EmptyLibrary" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="420"><Border Width="76" Height="76" CornerRadius="38" Background="{DynamicResource AccentSoft}" Margin="0,0,0,22"><TextBlock Text="&#xE8B7;" Style="{StaticResource Icon}" FontSize="30" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center"/></Border><TextBlock Text="Your library starts here" FontWeight="SemiBold" FontSize="24" TextAlignment="Center" TextWrapping="Wrap"/><TextBlock Text="Add a video folder to discover movies and shows. Your files stay where they are." Style="{StaticResource MutedText}" TextAlignment="Center" Margin="0,10,0,24"/><WrapPanel HorizontalAlignment="Center"><Button Content="Add folder" Style="{StaticResource Primary}" ContentTemplate="{StaticResource AddContent}" Tag="Folders" Click="Navigate"/><Button Content="Join a friend" ContentTemplate="{StaticResource PeopleContent}" Click="JoinFromWelcome" Margin="0,0,8,8"/><Button Content="Add a title" ContentTemplate="{StaticResource AddContent}" Click="AddTitleClick" Margin="0,0,0,8" ToolTip="Add a show or film you don't have files for yet"/></WrapPanel></StackPanel>
      <StackPanel x:Name="NoResults" Visibility="Collapsed" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="420"><TextBlock Text="&#xE721;" Style="{StaticResource EmptyStateIcon}" Foreground="{DynamicResource Muted}"/><TextBlock Text="No titles found" FontFamily="{StaticResource DisplayFont}" FontSize="26" FontWeight="SemiBold" TextAlignment="Center"/><TextBlock x:Name="NoResultsHint" Text="Try another search or clear your filters." Style="{StaticResource MutedText}" TextAlignment="Center" Margin="0,10,0,22"/><Button x:Name="FindTitleButton" Style="{StaticResource Primary}" Click="FindTitleClick" HorizontalAlignment="Center" Margin="0,0,0,10" Visibility="Collapsed"/><Button x:Name="ResetFiltersButton" Content="Clear search and filters" Click="ResetFilters" HorizontalAlignment="Center" Margin="0"/></StackPanel>
-     <!-- The browsing guest's mouse, shown to the host while following them. -->
-     <Canvas x:Name="GuestPointerLayer" IsHitTestVisible="False" ClipToBounds="True"><Grid x:Name="GuestPointer" Width="24" Height="24" Margin="-12,-12,0,0" Visibility="Collapsed" AutomationProperties.Name="Guest pointer"><Grid.RenderTransform><TranslateTransform x:Name="GuestPointerPosition"/></Grid.RenderTransform><Ellipse Fill="{DynamicResource Accent}" Opacity="0.3"/><Ellipse Stroke="{DynamicResource Accent}" StrokeThickness="2.5"/></Grid></Canvas></Grid>
+     <!-- The mouse of whoever is browsing this library, shown to its owner while following them. -->
+     <Canvas x:Name="GuestPointerLayer" IsHitTestVisible="False" ClipToBounds="True"><Grid x:Name="GuestPointer" Width="24" Height="24" Margin="-12,-12,0,0" Visibility="Collapsed" AutomationProperties.Name="Pointer of whoever is browsing your library"><Grid.RenderTransform><TranslateTransform x:Name="GuestPointerPosition"/></Grid.RenderTransform><Ellipse Fill="{DynamicResource Accent}" Opacity="0.3"/><Ellipse Stroke="{DynamicResource Accent}" StrokeThickness="2.5"/></Grid></Canvas></Grid>
     <!-- Several selected cards: what can be done to all of them at once. Ctrl+click or Shift+click selects, Esc clears. -->
     <local:Stone x:Name="CardSelectionBar" Depth="Popup" Grid.Row="2" Visibility="Collapsed" Background="{DynamicResource Raised}" CornerRadius="16" Padding="16,6,8,6" Margin="0,10,8,16" AutomationProperties.Name="Selected titles">
      <DockPanel>
@@ -530,7 +534,7 @@
    <ScrollViewer x:Name="WelcomePage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
     <StackPanel MaxWidth="560" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,24">
      <Image Source="Assets/BlackPearl.png" Width="72" Height="72" HorizontalAlignment="Center" Margin="0,0,0,24"/><TextBlock Text="Welcome to BlackPearl" FontFamily="{StaticResource DisplayFont}" FontSize="36" FontWeight="SemiBold" TextAlignment="Center"/>
-     <TextBlock Text="Add your videos or join a friend. Only the host needs the files." Style="{StaticResource MutedText}" FontSize="15" TextAlignment="Center" Margin="0,10,0,28"/>
+     <TextBlock Text="Add your videos or join a friend. Only whoever plays a video needs its file." Style="{StaticResource MutedText}" FontSize="15" TextAlignment="Center" Margin="0,10,0,28"/>
      <WrapPanel HorizontalAlignment="Center"><Button Content="Add folder" Tag="Folders" Click="Navigate" Style="{StaticResource Primary}" ContentTemplate="{StaticResource AddContent}" Padding="20,8"/><Button Content="Join a friend" Click="JoinFromWelcome" ContentTemplate="{StaticResource PeopleContent}" Padding="20,8" Margin="0,0,8,8"/><Button Content="Add a title" Click="AddTitleClick" ContentTemplate="{StaticResource AddContent}" Padding="20,8" Margin="0,0,0,8" ToolTip="Add the shows and films you want; they show as missing until their files are here"/></WrapPanel>
     </StackPanel>
    </ScrollViewer>
@@ -950,14 +954,14 @@
          <Button x:Name="AddSubtitleRuleButton" Content="Add exception" Style="{StaticResource QuietButton}" ContentTemplate="{StaticResource AddContent}" Click="AddSubtitleRule" HorizontalAlignment="Left" Margin="-12,0,0,0"/>
         </StackPanel>
        </Border>
-       <Expander Header="How language preferences work" Foreground="{DynamicResource Muted}" Margin="-6,8,0,0"><TextBlock Text="Each list is tried in order until the video has a matching track; an empty list uses the video's own defaults. Exceptions follow the selected audio language, and adding Off last turns subtitles off when nothing matches. Manual subtitle choices last until the next video. Saved preferences apply to the next video; guests follow the host’s tracks." Style="{StaticResource Hint}" Margin="0,4,0,0"/></Expander>
+       <Expander Header="How language preferences work" Foreground="{DynamicResource Muted}" Margin="-6,8,0,0"><TextBlock Text="Each list is tried in order until the video has a matching track; an empty list uses the video's own defaults. Exceptions follow the selected audio language, and adding Off last turns subtitles off when nothing matches. Manual subtitle choices last until the next video. Saved preferences apply to the next video; in a room, everyone follows the tracks of whoever plays the video." Style="{StaticResource Hint}" Margin="0,4,0,0"/></Expander>
        <TextBlock x:Name="TrackPreferencesError" Style="{StaticResource FieldError}"/>
       </StackPanel></local:Stone>
       <local:Stone Style="{StaticResource Card}"><StackPanel>
        <TextBlock Text="Streaming buffer" Style="{StaticResource CardTitle}"/>
        <TextBlock Text="Video to buffer ahead (seconds)" Style="{StaticResource FieldLabel}"/><TextBox x:Name="StreamingBufferSeconds" MaxLength="3" Width="120" HorizontalAlignment="Left" AutomationProperties.Name="Video buffer ahead in seconds" ToolTip="Choose from 2 to 60 seconds"/>
        <TextBlock x:Name="StreamingBufferError" Style="{StaticResource FieldError}" AutomationProperties.LiveSetting="Polite"/>
-       <TextBlock Text="Default: 30 seconds. Playback starts as soon as a few seconds are ready; BlackPearl then keeps downloading up to this much video ahead while you watch. Applies to the next streamed video. Larger buffers use more memory but do not delay starting or seeking. During a brief host connection interruption, playback continues from buffered video for up to this time, then pauses if recovery has not finished. Actual coverage depends on available bandwidth." Style="{StaticResource Hint}"/>
+       <TextBlock Text="Default: 30 seconds. Playback starts as soon as a few seconds are ready; BlackPearl then keeps downloading up to this much video ahead while you watch. Applies to the next streamed video. Larger buffers use more memory but do not delay starting or seeking. During a brief connection interruption, playback continues from buffered video for up to this time, then pauses if recovery has not finished. Actual coverage depends on available bandwidth." Style="{StaticResource Hint}"/>
       </StackPanel></local:Stone>
       <local:Stone Style="{StaticResource Card}"><DockPanel>
        <Button DockPanel.Dock="Right" Content="Open default apps" Click="OpenDefaultAppsSettings" VerticalAlignment="Center" Margin="16,0,0,0" AutomationProperties.HelpText="Opens Windows Settings, where you can choose BlackPearl for video files"/>
@@ -967,7 +971,7 @@
      <ScrollViewer x:Name="VoicePreferences" Tag="Voice" Visibility="Collapsed" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" IsVisibleChanged="VoicePreferencesVisibilityChanged" Padding="0,0,16,0"><StackPanel MaxWidth="844" Width="{Binding ViewportWidth, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" Margin="0,0,0,12" HorizontalAlignment="Left">
       <local:Stone Style="{StaticResource Card}"><StackPanel>
        <TextBlock Text="Devices" Style="{StaticResource CardTitle}" Margin="0,0,0,4"/>
-       <TextBlock Text="Talk with everyone in your room while you watch. Join voice from the player's top bar or the Participants panel." Style="{StaticResource Hint}" Margin="0,0,0,14"/>
+       <TextBlock Text="Talk with everyone in your room while you watch. Join voice from the Rooms page, the player's top bar or the Participants panel." Style="{StaticResource Hint}" Margin="0,0,0,14"/>
        <TextBlock Text="Microphone" Style="{StaticResource FieldLabel}"/>
        <ComboBox x:Name="VoiceInputPicker" DisplayMemberPath="Name" SelectedValuePath="Id" AutomationProperties.Name="Microphone for voice chat" Margin="0,6,0,8" MaxWidth="460" HorizontalAlignment="Left" MinWidth="320"/>
        <!-- A live level meter while this page is open: speak and watch it move. -->
@@ -1051,7 +1055,7 @@
    <!-- Saved watch rooms -->
    <Grid x:Name="RoomsPage" Visibility="Collapsed">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-    <Grid Margin="0,0,0,20"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="Watch in sync with friends. Only the host needs the video." Style="{StaticResource MutedText}" VerticalAlignment="Center" Margin="0,0,16,0"/><StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"><Button x:Name="ReturnToRoomButton" Content="Return to player" ContentTemplate="{StaticResource PlayContent}" Tag="Room" Click="Navigate" Style="{StaticResource HeaderAction}" Margin="0,0,4,0"/><Button x:Name="AddSavedInvitationButton" Content="Join a room" Click="JoinClick" Style="{StaticResource HeaderAction}" Margin="0,0,4,0" ToolTip="Paste an invitation link or room code to add it to your saved rooms"/><Button x:Name="CreateSavedRoomButton" Content="Create room" ContentTemplate="{StaticResource AddContent}" Click="CreatePersistentRoom" Style="{StaticResource HeaderCreate}"/></StackPanel></Grid>
+    <Grid Margin="0,0,0,20"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="Watch in sync with friends. Anyone in a room can play a video; only they need the file." Style="{StaticResource MutedText}" VerticalAlignment="Center" Margin="0,0,16,0"/><StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"><Button x:Name="ReturnToRoomButton" Content="Return to player" ContentTemplate="{StaticResource PlayContent}" Tag="Room" Click="Navigate" Style="{StaticResource HeaderAction}" Margin="0,0,4,0"/><Button x:Name="AddSavedInvitationButton" Content="Join a room" Click="JoinClick" Style="{StaticResource HeaderAction}" Margin="0,0,4,0" ToolTip="Paste an invitation link or room code to enter that room"/><Button x:Name="CreateSavedRoomButton" Content="Create room" ContentTemplate="{StaticResource AddContent}" Click="CreatePersistentRoom" Style="{StaticResource HeaderCreate}"/></StackPanel></Grid>
     <!-- Hero: what the connected room is playing, or what the most recent room watched last time. -->
     <local:Stone x:Name="RoomHero" Grid.Row="1" Depth="Slab" Height="200" CornerRadius="20" local:RoundedClip.Radius="20" Background="{DynamicResource Surface}" Margin="0,0,0,24" Visibility="Collapsed">
      <Grid>
@@ -1094,7 +1098,7 @@
        <StackPanel Orientation="Horizontal">
         <Button x:Name="RoomHeroResume" Content="Return to player" Click="ResumeRoomHero" Style="{StaticResource Primary}" ContentTemplate="{StaticResource PlayContent}" Padding="20,8"/>
         <Button x:Name="RoomHeroSecondary" Click="RoomHeroSecondaryClick" Visibility="Collapsed"/>
-        <Button x:Name="RoomHeroDisconnect" Content="Disconnect" Click="LeaveRoom" Style="{StaticResource QuietButton}" AutomationProperties.Name="Disconnect from room"/>
+        <Button x:Name="RoomHeroDisconnect" Content="Leave" Click="LeaveRoom" Style="{StaticResource QuietButton}" AutomationProperties.Name="Leave room"/>
        </StackPanel>
       </StackPanel>
      </Grid>
@@ -1106,9 +1110,9 @@
        <Style x:Key="TileLabel" TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{DynamicResource Muted}"/><Setter Property="Margin" Value="0,0,0,10"/></Style>
        <Style x:Key="Tile" TargetType="local:Stone"><Setter Property="Depth" Value="Slab"/><Setter Property="Background" Value="{DynamicResource Surface}"/><Setter Property="CornerRadius" Value="20"/><Setter Property="Padding" Value="18,16"/></Style>
       </DockPanel.Resources>
-      <!-- The saved rooms, on the app's thread selector (ThreadBar.cs) like the library's categories; a live room has a dot. -->
+      <!-- The saved rooms, on the app's thread selector (ThreadBar.cs) like the library's categories. The room the app is in has a green dot; a room other people are in has an accent one. -->
       <local:ThreadBar DockPanel.Dock="Top" HorizontalAlignment="Left" Margin="0,0,0,6">
-       <ListBox x:Name="SavedRoomsList" Background="Transparent" BorderThickness="0" Padding="0" SelectionChanged="SavedRoomSelectionChanged" AutomationProperties.Name="Saved watch rooms" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+       <ListBox x:Name="SavedRoomsList" Background="Transparent" BorderThickness="0" Padding="0" SelectionChanged="SavedRoomSelectionChanged" MouseDoubleClick="SavedRoomDoubleClicked" AutomationProperties.Name="Saved watch rooms" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
         <ListBox.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ListBox.ItemsPanel>
         <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
          <Setter Property="Foreground" Value="{DynamicResource Muted}"/><Setter Property="FontFamily" Value="{StaticResource DisplayFont}"/><Setter Property="FontSize" Value="19"/>
@@ -1121,7 +1125,10 @@
             <TextBlock Text="{Binding Name}" MaxWidth="220" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
            </StackPanel>
           </Border>
-          <ControlTemplate.Triggers><Trigger Property="Tag" Value="live"><Setter TargetName="LiveDot" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
+          <ControlTemplate.Triggers>
+           <Trigger Property="Tag" Value="live"><Setter TargetName="LiveDot" Property="Visibility" Value="Visible"/></Trigger>
+           <Trigger Property="Tag" Value="busy"><Setter TargetName="LiveDot" Property="Visibility" Value="Visible"/><Setter TargetName="LiveDot" Property="Fill" Value="{DynamicResource Accent}"/></Trigger>
+          </ControlTemplate.Triggers>
          </ControlTemplate></Setter.Value></Setter>
          <Style.Triggers>
           <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="{DynamicResource Ink}"/></Trigger>
@@ -1142,16 +1149,28 @@
            <TextBlock x:Name="SavedRoomHeading" Text="Choose a room" FontSize="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
            <DockPanel Margin="0,4,0,0">
             <Ellipse x:Name="SavedRoomStatusDot" Width="7" Height="7" Fill="{DynamicResource Muted}" VerticalAlignment="Center" Margin="0,0,7,0"/>
-            <TextBlock x:Name="SavedRoomStatus" Text="Create a room or save an invitation to get started." Style="{StaticResource MutedText}" FontSize="12.5" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="SavedRoomStatus" Text="Create a room, or join one with an invitation." Style="{StaticResource MutedText}" FontSize="12.5" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
            </DockPanel>
            <!-- Actions sit on their own row so the status beside the heading is never squeezed. -->
-           <WrapPanel Margin="0,12,0,0"><Button x:Name="ConnectSavedRoomButton" Content="Connect" Click="ConnectSavedRoom" Style="{StaticResource Primary}" VerticalAlignment="Center" Margin="0,0,8,0"/><Button x:Name="DisconnectSavedRoomButton" Content="Disconnect" Click="LeaveRoom" Visibility="Collapsed" AutomationProperties.Name="Disconnect from room" VerticalAlignment="Center" Margin="0"/></WrapPanel>
-           <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Margin="0,14,0,0" Padding="0,12,0,0">
+           <!-- The room's buttons and the voice buttons are two groups: in a narrow tile the voice group moves to a row of its own. -->
+           <WrapPanel Margin="0,12,0,0">
+            <StackPanel Orientation="Horizontal" Margin="0,0,8,8">
+             <Button x:Name="ConnectSavedRoomButton" Content="Join" Click="ConnectSavedRoom" Style="{StaticResource Primary}" Margin="0"/>
+             <Button x:Name="DisconnectSavedRoomButton" Content="Leave" Click="LeaveRoom" Visibility="Collapsed" AutomationProperties.Name="Leave room" Margin="8,0,0,0"/>
+            </StackPanel>
+            <!-- Voice from here: away from the room it joins the room and voice in one click; in the room it joins or leaves voice. -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+             <Button x:Name="SavedRoomVoiceButton" Click="ToggleSavedRoomVoice" Margin="0" AutomationProperties.Name="Join voice chat"><StackPanel Orientation="Horizontal"><TextBlock x:Name="SavedRoomVoiceIcon" Text="&#xE720;" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,9,0"/><TextBlock x:Name="SavedRoomVoiceText" Text="Join voice" VerticalAlignment="Center"/></StackPanel></Button>
+             <Button x:Name="SavedRoomVoiceMute" Click="ToggleVoiceMute" FontFamily="{StaticResource IconFont}" FontSize="14" Width="40" Padding="0" Margin="8,0,0,0" Visibility="Collapsed" Content="&#xE720;" ToolTip="Mute microphone (V)" AutomationProperties.Name="Mute microphone"/>
+            </StackPanel>
+           </WrapPanel>
+           <TextBlock x:Name="SavedRoomVoiceStatus" Style="{StaticResource MutedText}" FontSize="11.5" Margin="0,0,0,8" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite"/>
+           <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Margin="0,6,0,0" Padding="0,12,0,0">
             <StackPanel>
              <TextBlock Text="Invite friends" Style="{StaticResource TileLabel}" Margin="0,0,0,6"/>
              <Viewbox Stretch="Uniform" StretchDirection="DownOnly" HorizontalAlignment="Left"><TextBlock x:Name="SavedRoomCode" FontFamily="Consolas" FontSize="22" Foreground="{DynamicResource Ink}" AutomationProperties.Name="Room code"/></Viewbox>
              <TextBlock x:Name="SavedRoomInviteHint" Style="{StaticResource MutedText}" FontSize="11.5" Margin="0,4,0,12"/>
-             <WrapPanel><Button x:Name="CopySavedInviteButton" Content="Copy invitation" Click="CopySavedInvitation" Style="{StaticResource Primary}"/><Button x:Name="CopySavedCodeButton" Content="Copy code" Click="CopySavedCode" ToolTip="Friends on the same room server can paste just the code"/></WrapPanel>
+             <WrapPanel><Button x:Name="CopySavedCodeButton" Content="Copy code" Click="CopySavedCode" Style="{StaticResource Primary}" ToolTip="Friends paste the code under Join a room"/></WrapPanel>
             </StackPanel>
            </Border>
            <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Margin="0,14,0,0" Padding="0,12,0,0">
@@ -1172,32 +1191,32 @@
           </StackPanel>
          </Grid>
         </local:Stone>
-        <!-- People: the host admits and removes guests here; guests see who is in the room. -->
+        <!-- People: who is in the room and who belongs to it. Its creator can remove someone, and let them back in. -->
         <local:Stone x:Name="SavedRoomGuestManagement" Grid.Column="2" Grid.RowSpan="3" Style="{StaticResource Tile}">
          <DockPanel>
-          <DockPanel DockPanel.Dock="Top"><TextBlock x:Name="SavedRoomGuestCount" DockPanel.Dock="Right" Style="{StaticResource MutedText}" FontSize="11.5"/><TextBlock x:Name="SavedRoomGuestHeading" Text="Guests" Style="{StaticResource TileLabel}"/></DockPanel>
+          <DockPanel DockPanel.Dock="Top"><TextBlock x:Name="SavedRoomGuestCount" DockPanel.Dock="Right" Style="{StaticResource MutedText}" FontSize="11.5"/><TextBlock x:Name="SavedRoomGuestHeading" Text="People" Style="{StaticResource TileLabel}"/></DockPanel>
           <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <!-- With nobody to list, the hint becomes an empty state in the middle of the tile. -->
           <StackPanel x:Name="SavedRoomGuestHintPanel" Margin="0,0,0,12">
            <Border x:Name="SavedRoomGuestEmptyIcon" Width="52" Height="52" CornerRadius="26" Background="{DynamicResource AccentSoft}" HorizontalAlignment="Center" Margin="0,0,0,12" Visibility="Collapsed"><TextBlock Text="&#xE716;" Style="{StaticResource Icon}" FontSize="20" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center"/></Border>
-           <TextBlock x:Name="SavedRoomGuestHint" Text="Connect as the host to manage guests." Style="{StaticResource MutedText}" FontSize="11.5"/>
+           <TextBlock x:Name="SavedRoomGuestHint" Text="Nobody has joined yet. Copy the code and send it to your friends." Style="{StaticResource MutedText}" FontSize="11.5"/>
           </StackPanel>
-          <ItemsControl x:Name="SavedRoomGuests" Grid.Row="1" AutomationProperties.Name="Saved room guests"><ItemsControl.ItemTemplate><DataTemplate>
+          <ItemsControl x:Name="SavedRoomGuests" Grid.Row="1" AutomationProperties.Name="People in this room"><ItemsControl.ItemTemplate><DataTemplate>
            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <Border Width="32" Height="32" CornerRadius="16" Background="{Binding Tint}" Opacity="{Binding Presence}" Margin="0,0,10,0" VerticalAlignment="Center"><TextBlock Text="{Binding Initial}" FontWeight="Bold" FontSize="13" Foreground="#14121F" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
             <StackPanel Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center"><TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Status}" Style="{StaticResource MutedText}" FontSize="11"/></StackPanel>
-            <WrapPanel Grid.Column="2" VerticalAlignment="Center"><Button Content="{Binding AdmitLabel}" Tag="{Binding Id}" Click="Admit" Visibility="{Binding AdmitVisibility}" IsEnabled="{Binding CanAdmit}" Style="{StaticResource Primary}" Padding="10,0" MinHeight="30" Height="30" Margin="0,0,4,0"/><Button Content="Remove" Tag="{Binding Id}" Click="RemovePeer" Visibility="{Binding ManageVisibility}" IsEnabled="{Binding CanRemove}" Style="{StaticResource QuietButton}" Padding="8,0" MinHeight="30" Height="30" Margin="0"/></WrapPanel>
+            <WrapPanel Grid.Column="2" VerticalAlignment="Center"><Button Content="Let back in" Tag="{Binding Id}" Click="RestoreMember" Visibility="{Binding RestoreVisibility}" Style="{StaticResource QuietButton}" Padding="8,0" MinHeight="30" Height="30" Margin="0"/><Button Content="Remove" Tag="{Binding Id}" Click="RemovePeer" Visibility="{Binding RemoveVisibility}" Style="{StaticResource QuietButton}" Padding="8,0" MinHeight="30" Height="30" Margin="0"/></WrapPanel>
            </Grid>
           </DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
           </Grid>
          </DockPanel>
         </local:Stone>
-        <!-- What guests may do; only the host sees this tile. -->
+        <!-- What the others may do while this person plays a video in the room. Each person chooses for themselves. -->
         <local:Stone x:Name="SavedRoomHostControls" Grid.Column="4" Style="{StaticResource Tile}">
          <StackPanel>
-          <TextBlock Text="Guests can" Style="{StaticResource TileLabel}" Margin="0,0,0,4"/>
-          <ToggleButton x:Name="SavedRoomSharedControls" Content="Play, pause and seek" ToolTip="Guests can play, pause and seek. Changes save immediately." Click="SavedRoomControlsChanged" AutomationProperties.Name="Saved room shared controls" Style="{StaticResource Switch}"/>
-          <CheckBox x:Name="SavedRoomLibraryBrowsing" Content="Browse my library" ToolTip="One admitted guest can browse at a time. Turning this off ends the active session." Checked="SavedRoomLibraryChanged" Unchecked="SavedRoomLibraryChanged" AutomationProperties.Name="Allow guests to browse my library" Style="{StaticResource Switch}"/>
+          <TextBlock Text="While you play a video, others can" Style="{StaticResource TileLabel}" Margin="0,0,0,4" TextWrapping="Wrap"/>
+          <ToggleButton x:Name="SavedRoomSharedControls" Content="Play, pause and seek" ToolTip="Everyone in the room can play, pause and seek the video you play. Changes save immediately." Click="SavedRoomControlsChanged" AutomationProperties.Name="Let others play, pause and seek" Style="{StaticResource Switch}"/>
+          <CheckBox x:Name="SavedRoomLibraryBrowsing" Content="Browse my library" ToolTip="One person can browse at a time. Turning this off ends the active session." Checked="SavedRoomLibraryChanged" Unchecked="SavedRoomLibraryChanged" AutomationProperties.Name="Let others browse my library" Style="{StaticResource Switch}"/>
          </StackPanel>
         </local:Stone>
         <local:Stone x:Name="SavedRoomActions" Grid.Column="4" Grid.Row="2" Style="{StaticResource Tile}">
@@ -1222,7 +1241,7 @@
       <vlc:VideoView x:Name="Video">
        <!-- A nonzero alpha keeps the native overlay hit-testable over the video. -->
        <Grid x:Name="PlayerOverlay" Background="#01000000" Focusable="True" PreviewMouseLeftButtonDown="PlayerOverlayPressed" MouseMove="PlayerMouseMoved" MouseLeftButtonDown="VideoClicked" MouseLeave="PlayerMouseLeft" MouseWheel="VideoWheel" PreviewKeyDown="KeyPressed" PreviewKeyUp="KeyReleased">
-        <Border x:Name="PlayerEmpty" Background="#0B0B0E"><Viewbox x:Name="PlayerEmptyContent" Stretch="Uniform" StretchDirection="DownOnly" Margin="16,72,16,128"><StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"><Border Width="76" Height="76" CornerRadius="38" Background="{DynamicResource PlayerAccentSoft}" HorizontalAlignment="Center"><TextBlock Text="&#xF5B0;" FontFamily="{StaticResource IconFont}" FontSize="28" Foreground="{DynamicResource PlayerAccent}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="4,0,0,0"/></Border><TextBlock Text="Choose a video to play" FontSize="21" FontWeight="SemiBold" Foreground="#F4F4F7" HorizontalAlignment="Center" Margin="0,20,0,20"/><Button Content="Browse library" Tag="Library" Click="Navigate" Style="{StaticResource PlayerButton}" HorizontalAlignment="Center" Margin="0"/></StackPanel></Viewbox></Border>
+        <Border x:Name="PlayerEmpty" Background="#0B0B0E"><Viewbox x:Name="PlayerEmptyContent" Stretch="Uniform" StretchDirection="DownOnly" Margin="16,72,16,128"><StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"><Border Width="76" Height="76" CornerRadius="38" Background="{DynamicResource PlayerAccentSoft}" HorizontalAlignment="Center"><TextBlock Text="&#xF5B0;" FontFamily="{StaticResource IconFont}" FontSize="28" Foreground="{DynamicResource PlayerAccent}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="4,0,0,0"/></Border><TextBlock x:Name="PlayerEmptyTitle" Text="Choose a video to play" FontSize="21" FontWeight="SemiBold" Foreground="#F4F4F7" HorizontalAlignment="Center" Margin="0,20,0,0"/><TextBlock x:Name="PlayerEmptyHint" Visibility="Collapsed" FontSize="13" Foreground="#A9ABB8" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="420" HorizontalAlignment="Center" Margin="0,8,0,0"/><Border Height="20"/><Button Content="Browse library" Tag="Library" Click="Navigate" Style="{StaticResource PlayerButton}" HorizontalAlignment="Center" Margin="0"/></StackPanel></Viewbox></Border>
         <!-- Audio has no picture, so the player shows the track's artwork and names while music plays; see MusicPlayback. -->
         <Grid x:Name="AudioPlayback" Visibility="Collapsed" Background="#0B0B0E" IsHitTestVisible="False" ClipToBounds="True">
          <Image x:Name="AudioBackdrop" Stretch="UniformToFill" Opacity="0.45" Margin="-80"><Image.Effect><BlurEffect Radius="70" RenderingBias="Performance"/></Image.Effect></Image>
@@ -1257,13 +1276,13 @@
            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top">
             <StackPanel x:Name="RoomHeaderDetails" Orientation="Horizontal" VerticalAlignment="Top">
              <Border x:Name="RoomStatusChip" Style="{StaticResource PlayerChip}"><StackPanel Orientation="Horizontal"><Ellipse x:Name="RoomStatusDot" Width="7" Height="7" Fill="#6B6D7A" VerticalAlignment="Center" Margin="0,0,7,0"/><TextBlock x:Name="ConnectionStatus" Text="Local playback" Foreground="#D9DAE2" FontSize="11.5" MaxWidth="180" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/></StackPanel></Border>
-             <ToggleButton x:Name="SharedControls" Click="ControlsChanged" Visibility="Collapsed" Style="{StaticResource PlayerChipToggle}" ToolTip="Let admitted guests play, pause and seek" AutomationProperties.Name="Allow shared controls"><StackPanel Orientation="Horizontal"><TextBlock x:Name="SharedControlsIcon" Text="&#xE72E;" Style="{StaticResource PlayerPillIcon}" FontSize="11" Margin="0,0,6,0"/><TextBlock x:Name="SharedControlsText" Text="Host controls"/></StackPanel></ToggleButton>
+             <ToggleButton x:Name="SharedControls" Click="ControlsChanged" Visibility="Collapsed" Style="{StaticResource PlayerChipToggle}" ToolTip="Let everyone in the room play, pause and seek" AutomationProperties.Name="Allow shared controls"><StackPanel Orientation="Horizontal"><TextBlock x:Name="SharedControlsIcon" Text="&#xE72E;" Style="{StaticResource PlayerPillIcon}" FontSize="11" Margin="0,0,6,0"/><TextBlock x:Name="SharedControlsText" Text="Everyone can control"/></StackPanel></ToggleButton>
             </StackPanel>
             <!-- Room actions share one pill: the microphone switch and voice while in a room, invite, and leave. -->
             <Border Style="{StaticResource PlayerHeaderGroup}"><StackPanel Orientation="Horizontal">
              <Button x:Name="VoiceMuteButton" Click="ToggleVoiceMute" Style="{StaticResource PlayerSegmentIcon}" Visibility="Collapsed" Content="&#xE720;" ToolTip="Mute microphone (V)" AutomationProperties.Name="Mute microphone"/>
              <Button x:Name="VoiceButton" Click="ToggleVoice" Style="{StaticResource PlayerSegmentButton}" Visibility="Collapsed" ToolTip="Join voice chat to talk while you watch" AutomationProperties.Name="Join voice chat"><StackPanel Orientation="Horizontal"><TextBlock x:Name="VoiceButtonIcon" Text="&#xE95B;" Style="{StaticResource PlayerPillIcon}"/><TextBlock x:Name="VoiceButtonText" Text="Voice" VerticalAlignment="Center"/><Border x:Name="VoiceCountBadge" Visibility="Collapsed" Background="#3FB97A" CornerRadius="8" MinWidth="16" Height="16" Padding="5,0" Margin="7,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="VoiceCountText" Foreground="#0B0B0E" FontSize="10" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border></StackPanel></Button>
-             <Button x:Name="InviteButton" Content="&#xE71B;" Click="CopyInvite" Style="{StaticResource PlayerSegmentIcon}" ToolTip="Copy invite" AutomationProperties.Name="Copy invite"/>
+             <Button x:Name="InviteButton" Content="&#xE71B;" Click="CopyInvite" Style="{StaticResource PlayerSegmentIcon}" ToolTip="Copy room code" AutomationProperties.Name="Copy room code"/>
              <Button x:Name="LeaveButton" Content="Leave" Click="LeaveRoom" Style="{StaticResource PlayerSegmentButton}" Padding="10,0"/>
             </StackPanel></Border>
             <!-- The docked player has no caption row: the window buttons sit in the bar's corner, and the bar drags the window. -->
@@ -1412,7 +1431,7 @@
                   <!-- This person's level for you, up to twice as loud. -->
                   <Slider Width="70" Minimum="0" Maximum="200" SmallChange="5" LargeChange="10" IsMoveToPointEnabled="True" Style="{StaticResource PlayerSlider}" Value="{Binding Voice.Level, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding Voice.LocalMuteVisibility}" ToolTip="{Binding Voice.LevelHelp}" AutomationProperties.Name="{Binding Voice.LevelHelp}" Margin="4,0,0,0"/>
                  </StackPanel>
-                 <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Visibility="{Binding Actions}"><Button Content="{Binding AdmitLabel}" Visibility="{Binding AdmitVisibility}" IsEnabled="{Binding CanAdmit}" Tag="{Binding Id}" Click="Admit" Style="{StaticResource Primary}" Padding="10,0" Height="30" MinHeight="30" FontSize="12" Margin="0,0,6,0"/><Button Content="Remove" Tag="{Binding Id}" Click="RemovePeer" Style="{StaticResource QuietButton}" Padding="8,0" Height="30" MinHeight="30" FontSize="12" Margin="0"/></StackPanel>
+                 <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Visibility="{Binding Actions}"><Button Content="Remove" Tag="{Binding Id}" Click="RemovePeer" Style="{StaticResource QuietButton}" Padding="8,0" Height="30" MinHeight="30" FontSize="12" Margin="0"/></StackPanel>
                 </Grid>
                </DataTemplate></ListBox.ItemTemplate></ListBox>
                <TextBlock x:Name="RoomFeedback" Visibility="Collapsed" Foreground="{DynamicResource Accent}" TextWrapping="Wrap" Margin="4,8,4,0"/>

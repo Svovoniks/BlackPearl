@@ -9,7 +9,7 @@ static class RelayStreamingFixture
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         using var socket = new System.Net.WebSockets.ClientWebSocket();
         await socket.ConnectAsync(new Uri(new Uri(server.Replace("https://", "wss://").Replace("http://", "ws://")), "/room"), timeout.Token);
-        await SocketMessages.SendAsync(socket, new("create", Text: "Transport regression"), timeout.Token);
+        await SocketMessages.SendAsync(socket, new("enter", Text: "Transport regression", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, Temporary: true))), timeout.Token);
         try
         {
             var identity = Wire.Read<Welcome>((await SocketMessages.ReadAsync(socket, timeout.Token))!.Data!);

@@ -80,8 +80,7 @@ public partial class MainWindow
     private async Task ReconnectRoomAsync(RoomClient previous)
     {
         if (roomReconnect is not null || closing || previous.Identity is not { } identity || previous.ServerAddress is not { } server) return;
-        // Rejoining uses the same saved guest admission or host credential.
-        if (identity.Host && identity.HostKey is null) return;
+        // Re-entering uses the member's saved key for the room.
         using var retry = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         roomReconnect = retry;
         var name = SavedDisplayName;
@@ -105,20 +104,31 @@ public partial class MainWindow
                 var candidate = NewRoom();
                 try
                 {
-                    await candidate.ConnectAsync(server, name, identity.Room, identity.HostKey, roomName: identity.Host ? roomName : null);
+                    await candidate.ConnectAsync(server, name, identity.Room, identity.HostKey, roomName: identity.Owner ? roomName : null);
                     if (retry.IsCancellationRequested || room != candidate) { await candidate.DisposeAsync(); return; }
-                    if (identity.Host && source is not null && File.Exists(source.LocalPath))
-                    {
-                        candidate.SetHostedFile(source.LocalPath, source.Media.Title);
-                        candidate.Send(new("media", Data: Wire.Serialize(candidate.HostedMedia!.Media)));
-                        candidate.Send(new("playback", Data: Wire.Serialize(new PlaybackState(0, candidate.HostedMedia.Media.Id, playback?.Playing == true, position, 0))));
-                    }
-                    if (resumedItem is not null && (!identity.Host || source is not null && File.Exists(source.LocalPath)))
-                        playingItem = items.FirstOrDefault(item => item.Id == resumedItem.Id) ?? resumedItem;
                     RememberCurrentRoom();
                     if (ConnectedSavedRoom is { } saved) PublishRoomSession(candidate, saved);
-                    RoomSubtitle.Text = identity.Host ? "Reconnected · You are the host" : "Reconnected · Waiting for the host";
+                    RoomSubtitle.Text = "Reconnected";
+                    // This app was playing for the room: carry on from where it stopped, unless someone else started a
+                    // video meanwhile. Theirs stays.
+                    if (identity.Host && source is not null && File.Exists(source.LocalPath))
+                    {
+                        try { await candidate.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(8), retry.Token); }
+                        catch (Exception ex) when (ex is TimeoutException or IOException) { }
+                        if (room == candidate && candidate.Snapshot?.Media is null)
+                        {
+                            if (resumedItem is not null) playingItem = items.FirstOrDefault(item => item.Id == resumedItem.Id) ?? resumedItem;
+                            await candidate.StartStreamAsync(RoomClient.PrepareHostedFile(source.LocalPath, source.Media.Title), playback?.Playing == true, position, retry.Token);
+                        }
+                    }
                     SetStatus("Room connection restored."); UpdateSessionControls(); return;
+                }
+                // Removed from the room, or the room is gone: trying again won't change it.
+                catch (RoomRejectedException ex)
+                {
+                    if (room == candidate) await Disconnect(reconnecting: true); else await candidate.DisposeAsync();
+                    await Disconnect();
+                    SetStatus(ex.Message); RoomSubtitle.Text = ex.Message; RefreshSavedRooms(); return;
                 }
                 // A health-check or connect timeout is another failed attempt, not a reason to stop retrying.
                 catch (Exception ex) when (ex is IOException or System.Net.Http.HttpRequestException or System.Net.WebSockets.WebSocketException ||

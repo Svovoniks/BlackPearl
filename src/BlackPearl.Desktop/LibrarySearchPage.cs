@@ -74,7 +74,7 @@ public partial class MainWindow
     private void UpdateSearchNote()
     {
         if (SearchNote is null) return;
-        var text = !librarySearch ? "" : GuestLibrary ? "Searching the host’s library by name. Filters work in your own library."
+        var text = !librarySearch ? "" : GuestLibrary ? "Searching " + HostLibraryName + " by name. Filters work in your own library."
             : languageIndexProgress is { } progress ? $"Reading audio and subtitle languages · {progress.Done:N0} of {progress.Total:N0} videos" : "";
         SearchNote.Text = text;
         SearchNote.Visibility = text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;

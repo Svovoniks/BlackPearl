@@ -4,8 +4,9 @@ using BlackPearl.Core;
 
 namespace BlackPearl.Desktop;
 
-// In a room, guests' Queues page shows the host's saved queues. Guests add, remove, reorder and create; the host
-// applies each change to its own queues and shares the result. Only the host plays, renames or deletes queues.
+// In a room, whoever holds the streaming role shares its saved queues. Someone looking through that person's library
+// sees those queues on the Queues page and can add, remove, reorder and create; the owner's app applies each change to
+// its own queues and shares the result. Only their owner plays, renames or deletes them. "Host" here is that person.
 public partial class MainWindow
 {
     private readonly DispatcherTimer queueShareTimer = new() { Interval = TimeSpan.FromMilliseconds(150) };
@@ -20,11 +21,11 @@ public partial class MainWindow
     // Checks connect two windows directly instead of over a peer connection.
     internal Action<string, WireMessage>? queueOutbox;
 
-    private bool ShowingHostQueues => hostQueues is not null && room is { IsConnected: true, Identity.Host: false };
+    private bool ShowingHostQueues => browsingStreamerLibrary && hostQueues is not null && room is { IsConnected: true, Identity.Host: false };
     // The queues the Queues page shows and edits: the host's for a guest in a room, otherwise this app's own.
     private List<SavedQueue> QueueSource => ShowingHostQueues ? hostQueueList : savedQueues;
     private Dictionary<string, MediaItem> QueueMedia() => ShowingHostQueues ? hostQueueMedia : MediaById();
-    private string HostName => room?.Snapshot?.People.FirstOrDefault(person => person.IsHost)?.Name ?? "The host";
+    private string HostName => StreamerName;
 
     private void InitializeQueueSharing() => queueShareTimer.Tick += (_, _) => { queueShareTimer.Stop(); ShareQueues(); };
     // Edits come in bursts (a reorder saves and republishes the queue); share once they settle.
@@ -74,7 +75,9 @@ public partial class MainWindow
     private void ReceiveQueueMessage(RoomClient client, string sender, WireMessage message)
     {
         if (client.Identity?.Host == true) { ReceiveGuestQueueEdit(client, sender, message); return; }
-        if (message.Type == QueueSharing.ErrorMessage) { ShowQueueFeedback(message.Text ?? "The host could not change the queue."); return; }
+        // Every member is connected to every other; only whoever holds the streaming role shares its queues.
+        if (sender != HostPeerId()) return;
+        if (message.Type == QueueSharing.ErrorMessage) { ShowQueueFeedback(message.Text ?? "That queue change could not be made."); return; }
         if (message.Type != QueueSharing.StateMessage) return;
         SharedQueues? state;
         try { state = queueAssembler.Add(message); }
@@ -124,7 +127,7 @@ public partial class MainWindow
             case "add":
                 if (savedQueues.FirstOrDefault(saved => saved.Id == edit.QueueId) is not { } target) return "That queue no longer exists.";
                 var added = AddToSavedQueue(target, Videos(edit.MediaIds));
-                if (added == 0) return "Those videos are not available in the host's library right now.";
+                if (added == 0) return "Those videos are not available in that library right now.";
                 SetStatus($"{guest} added {VideoCount(added)} to {target.Name}.");
                 return null;
             case "create":

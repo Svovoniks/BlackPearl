@@ -263,9 +263,10 @@ static class PlayerLayoutChecks
         var rowHidden = Visibility.Collapsed; var rowShown = Visibility.Visible;
         peopleList.ItemsSource = new[]
         {
-            new { Id = "a", Name = "svovoniks", Status = "Host · Ready", Voice = (object?)null, Actions = rowHidden, AdmitVisibility = rowHidden, AdmitLabel = "Admit", CanAdmit = true },
-            new { Id = "b", Name = "Riley", Status = "Admitted · Ready", Voice = (object?)null, Actions = rowShown, AdmitVisibility = rowHidden, AdmitLabel = "Admit", CanAdmit = true },
-            new { Id = "c", Name = "Sam", Status = "Waiting for approval", Voice = (object?)null, Actions = rowShown, AdmitVisibility = rowShown, AdmitLabel = "Admit", CanAdmit = true },
+            // The room's creator watching Riley's video: they can remove the others.
+            new { Id = "a", Name = "svovoniks (you)", Status = "Watching", Voice = (object?)null, Actions = rowHidden },
+            new { Id = "b", Name = "Riley", Status = "Streaming", Voice = (object?)null, Actions = rowShown },
+            new { Id = "c", Name = "Sam", Status = "Buffering", Voice = (object?)null, Actions = rowShown },
         };
         var participantsContent = (FrameworkElement)participantsMenu.Child;
         participantsContent.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));

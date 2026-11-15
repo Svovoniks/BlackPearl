@@ -171,32 +171,28 @@ static class GuestLibraryPeerFixture
         var departures = new ConcurrentQueue<WireMessage>();
         guest.Message += message => { if (message.Type == "peer-left") departures.Enqueue(message); };
         await host.DisposeAsync();
-        await AwaitDirect(() => guest.IsConnected && guest.Snapshot?.People.All(p => !p.IsHost) == true,
-            "guest stays connected in the room after the host leaves");
-        check(guest.Snapshot?.Media is null && guest.Snapshot?.Playback is null, "host departure clears unavailable playback");
-        check(departures.Count == 1 && departures.Single().Text == "Library Host", "host departure emits one named disconnect notification");
+        await AwaitDirect(() => guest.IsConnected && guest.Identity!.Host && guest.Snapshot?.People.Length == 1,
+            "a member stays in the room and holds the streaming role after the streamer leaves");
+        check(guest.Snapshot?.Media is null && guest.Snapshot?.Playback is null, "the streamer's departure clears its playback");
+        check(departures.Count == 1 && departures.Single().Text == "Library Host", "the streamer's departure emits one named disconnect notification");
         await using var waiting = new RoomClient();
-        await waiting.ConnectAsync(server, "Offline joining guest", identity.Room);
-        await AwaitDirect(() => waiting.Snapshot?.People.Any(p => p.Id == waiting.Identity!.Peer) == true,
-            "new guest can join and wait while the host is offline");
+        await waiting.ConnectAsync(server, "Later member", identity.Room);
+        await waiting.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(25));
+        check(waiting.Snapshot?.People.Length == 2, "someone new enters and connects while the room's creator is away");
         await using var returning = new RoomClient();
         await returning.ConnectAsync(server, "Library Host", identity.Room, identity.HostKey);
-        await guest.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(25));
-        await AwaitDirect(() => guest.Snapshot?.People.Any(p => p.Id == returning.Identity!.Peer && p.IsHost) == true,
-            "waiting admitted guest automatically reconnects when the host returns");
-        returning.SetHostedFile(video, "Returned video");
-        returning.Send(new("media", Data: Wire.Serialize(returning.HostedMedia!.Media)));
-        await AwaitDirect(() => guest.Snapshot?.Media?.Title == "Returned video", "returned host starts a fresh direct playback session");
-        returning.Send(new("admit", Target: waiting.Identity!.Peer));
-        await waiting.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(25));
-        check(waiting.Snapshot?.Media?.Title == "Returned video", "offline joining guest receives playback only after host admission");
+        await returning.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(25));
+        check(returning.Identity is { Owner: true, Host: false }, "the returning creator joins the others without taking the streaming role");
+        await returning.StartStreamAsync(RoomClient.PrepareHostedFile(video, "Returned video"), false);
+        await AwaitDirect(() => guest.Snapshot?.Media?.Title == "Returned video" && waiting.Snapshot?.Media?.Title == "Returned video" && !guest.Identity!.Host,
+            "a video the returning creator starts reaches everyone, and the streaming role moves to them");
         await waiting.DisposeAsync();
-        await AwaitDirect(() => departures.Any(m => m.Text == "Offline joining guest"), "guests receive named notifications when another guest disconnects");
+        await AwaitDirect(() => departures.Any(m => m.Text == "Later member"), "members receive named notifications when another member disconnects");
         var transports = (System.Collections.IDictionary)typeof(RoomClient).GetField("peers", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(guest)!;
         ((IDisposable)transports[returning.Identity!.Peer]!).Dispose();
         await AwaitDirect(() => guest.IsConnected && !guest.DirectControlsReady.IsCompletedSuccessfully,
-            "unexpected peer loss leaves guest in the room while rebuilding controls");
+            "unexpected loss of the connection to the streamer leaves the viewer in the room while rebuilding it");
         await guest.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30));
-        check(guest.Snapshot?.Media?.Title == "Returned video", "guest automatically repairs a failed peer connection without rejoining the room");
+        check(guest.Snapshot?.Media?.Title == "Returned video", "a viewer automatically repairs a failed connection to the streamer without re-entering the room");
     }
 }

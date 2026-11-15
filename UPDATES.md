@@ -243,11 +243,11 @@ updater refuses downgrades.
 Playback snapshots distinguish requested Play/Pause from a temporary buffering
 hold. Readiness messages from updated apps carry the movie ID and seek generation;
 late readiness for an earlier seek is ignored. Explicit seeks supersede buffering
-at the previous position. The guest bridge retains 16 MiB of recently read
+at the previous position. A viewer's bridge retains 16 MiB of recently read
 movie data plus the read-ahead window; canceled seeks stop transfers that have no
 remaining consumers. VLC's network cache is chosen per movie from the measured
 round trip (1.5–5 s), so starting and seeking wait only for that short buffer.
-Guest read-ahead is selected per movie from the saved **Settings →
+A viewer's read-ahead is selected per movie from the saved **Settings →
 Playback → Video to buffer ahead (seconds)** setting. It defaults to 30 seconds
 and accepts whole seconds from 2 to 60. Once the first frames play, the bridge
 prefetches that much video (estimated from the file's average bitrate plus 25%,
@@ -258,18 +258,22 @@ retained. Larger values use more memory but do not lengthen startup or seeking.
 Saved changes apply to the next streamed video; local-file playback bypasses
 network buffering.
 Buffering recovery requires 750 ms of stable full cache.
-Temporary peer losses request a replacement immediately while room discovery is
-available. Six seconds without host control replies also starts recovery, checked
-every two seconds. The guest retains its video input and cache, continues already
+Every member of a room holds a direct connection to every other. A lost one is
+replaced while the room service is reachable: the member whose id sorts first
+makes the new offer, and the other asks for one through the room service. Six
+seconds without control replies from whoever is playing the video also starts
+recovery (twelve for the other members, whose connections carry only voice),
+checked every two seconds. A viewer retains its video input and cache, continues already
 running playback from buffered data for up to the active buffer setting after
 recovery starts, and retries interrupted media ranges for up to 45 seconds.
 Playback pauses sooner if the native input starves, fails or ends, or if Pause
 is pending; a paused input never starts merely because recovery begins. Restored connections
 resynchronize playback and report readiness again. A failed native player input
-is reopened when necessary; genuine host departure still clears unavailable media.
+is reopened when necessary; when the streamer really leaves, its video is cleared
+and the streaming role passes to whoever has been in the room longest.
 Participant departure alerts wait 30 seconds and are canceled when that peer's
 control handshake returns, avoiding sounds and floating alerts for brief losses.
-Diagnostics include command queueing, host receipt/acceptance, acknowledgement,
+Diagnostics include command queueing, the streamer's receipt/acceptance, acknowledgement,
 player application, and scoped readiness, making network delay distinguishable
 from a playback hold. The `applied` event records issuing the native player action;
 `native-time` and `settle-end` establish when the native position catches up.
@@ -281,7 +285,8 @@ devices, together with the approximate time of the failure.
 
 `diagnostics.jsonl` contains timestamped structured events for app version,
 room-service capabilities, peer connection states, control-channel negotiation,
-guest departures, media loading, buffering, sync corrections, and transfer errors.
+member departures, changes of the streaming role, media loading, buffering, sync
+corrections, and transfer errors.
 It excludes invitation codes, credentials, raw signaling, and movie contents.
 Updated peers negotiate an independent connection for media so a congested movie
 transfer cannot queue playback commands behind its SCTP traffic. Diagnostics

@@ -45,7 +45,7 @@ public sealed partial class RoomClient
                 // Artwork decoding reads files; keep the control loop responsive for clock and state replies.
                 if (!Offload(() => artwork?.Invoke(SharedLibrary.ArtworkPath(source, request)) ?? "",
                     data => SendArtwork(sender, "catalog-artwork-chunk", message.Number, key, data, request.FullHd),
-                    ex => Fail(ex, "Artwork is unavailable."))) Fail(new IOException("Library work queue is full"), "The host is busy. Try again shortly.");
+                    ex => Fail(ex, "Artwork is unavailable."))) Fail(new IOException("Library work queue is full"), "Their app is busy. Try again shortly.");
             }
             else
             {
@@ -65,11 +65,11 @@ public sealed partial class RoomClient
                     PublishHostedFile(prepared.Selection, true, prepared.Resume);
                     Message?.Invoke(new("catalog-started", Target: item.Id));
                     SendPeer(sender, new("catalog-started", Target: item.Id));
-                }, ex => Fail(ex, "The host could not open this video."))) Fail(new IOException("Library work queue is full"), "The host is busy. Try again shortly.");
+                }, ex => Fail(ex, "That video could not be opened."))) Fail(new IOException("Library work queue is full"), "Their app is busy. Try again shortly.");
             }
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or System.Text.Json.JsonException or ArgumentException or UnauthorizedAccessException)
-        { Fail(ex, "The host could not complete this library request."); }
+        { Fail(ex, "That library request could not be completed."); }
         return true;
     }
     // Replies with chunks keyed by title; one empty chunk means the host has no artwork for that title.

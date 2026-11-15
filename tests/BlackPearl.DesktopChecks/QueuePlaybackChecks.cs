@@ -122,12 +122,16 @@ static class QueuePlaybackChecks
             try
             {
                 Call("UpdateSessionControls");
-                check(!Control<Button>("PlaySelectedQueueButton").IsEnabled && !Control<Button>("PlaySelectedSavedQueueButton").IsEnabled,
-                    "guests cannot use either local queue playback action");
+                check(!Control<Button>("PlaySelectedQueueButton").IsEnabled, "someone watching another member's video cannot play from the player's queue, which is the streamer's");
+                Call("ShowPage", "Queues"); Call("UpdateSavedQueueActions");
+                check(Control<Button>("PlaySavedQueueButton").IsEnabled, "their own saved queues stay theirs to play, which takes over the stream");
                 await (Task)Call("PlayQueueAt", 0)!;
+                check(Field<int>("queuePosition") == 3 && Field<MediaItem>("playingItem").Id == last.Id,
+                    "a viewer's direct request cannot replace the streamer's video or queue");
+                // This fixture's room has no connection, so the streaming role is never granted.
                 await (Task)Call("PlaySavedQueueEntry", saved, 0)!;
                 check(Field<int>("queuePosition") == 3 && Field<MediaItem>("playingItem").Id == last.Id,
-                    "guest direct requests cannot replace the host-controlled video or queue");
+                    "a saved queue does not start for the room until the streaming role has moved");
             }
             finally { Set("room", null); }
         }

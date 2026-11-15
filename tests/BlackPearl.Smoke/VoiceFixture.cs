@@ -387,12 +387,12 @@ static class VoiceFixture
         check(host.VoiceAvailable && !host.Snapshot!.Voice![0].Joined, "the host starts out of voice");
         await a.ConnectAsync(url, "Voice A", host.Identity!.Room);
         await Wait(() => a.Snapshot is not null);
-        check(!a.VoiceAvailable, "a guest waiting for admission cannot use voice yet");
-        // Asking to join voice before admission is remembered and applied once the host lets them in.
+        check(!a.VoiceAvailable, "voice waits for the room state from whoever holds the streaming role");
+        // Asking to join voice before that connection is up is remembered and applied once it is.
         a.SetVoice(true, false);
         host.Send(new("admit", Target: a.Identity!.Peer));
         await a.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(25));
-        await Wait(() => host.VoiceState(a.Identity.Peer)?.Joined == true, "a guest who chose voice while waiting is in voice once admitted");
+        await Wait(() => host.VoiceState(a.Identity.Peer)?.Joined == true, "someone who chose voice while still connecting is in voice once connected");
         await b.ConnectAsync(url, "Voice B", host.Identity.Room);
         await Wait(() => host.Snapshot!.People.Any(p => p.Id == b.Identity!.Peer));
         host.Send(new("admit", Target: b.Identity!.Peer));
@@ -403,6 +403,7 @@ static class VoiceFixture
         int Slot(RoomClient client) => host.VoiceState(client.Identity!.Peer)!.Slot;
         await Wait(() => a.Snapshot?.Voice?.Single(v => v.Peer == a.Identity.Peer).Joined == true && a.InVoice, "a guest sees itself in voice");
         await WaitForVoiceChannels(host, a, b);
+        check(HostlessRoomFixture.Negotiated(a).ContainsKey(b.Identity.Peer) && HostlessRoomFixture.Negotiated(b).ContainsKey(a.Identity.Peer), "two members who are not streaming hold a direct connection to each other");
 
         var talkerA = new Talker(a);
         await talkerA.Speak(25, 440);
@@ -416,13 +417,13 @@ static class VoiceFixture
         await Wait(() => a.VoiceState(b.Identity.Peer)?.Joined == true && a.VoiceState(host.Identity.Peer)?.Joined == true);
         await talkerA.Speak(30, 440);
         await Wait(() => bSink.From(Slot(a)) >= 28 && hostSink.From(Slot(a)) >= 28, "the host and the other guest both hear a guest talking");
-        check(aSink.Frames.IsEmpty, "a guest never hears their own voice relayed back");
+        check(aSink.Frames.IsEmpty, "nobody hears their own voice back");
         var frequency = Decode(bSink.Frames.Where(f => f.Slot == Slot(a)).Select(f => f.Payload));
-        check(Goertzel(frequency, 440) > 0.05 && Goertzel(frequency, 440) > Goertzel(frequency, 660) * 10, "relayed audio decodes to the speaker's own voice at the other guest");
+        check(Goertzel(frequency, 440) > 0.05 && Goertzel(frequency, 440) > Goertzel(frequency, 660) * 10, "audio decodes to the speaker's own voice at another member");
         var latencies = bSink.Frames.Where(f => f.Slot == Slot(a) && talkerA.Sent.ContainsKey(f.Sequence))
             .Select(f => (f.At - talkerA.Sent[f.Sequence]) * 1000.0 / Stopwatch.Frequency).Order().ToArray();
         var p95 = latencies[(int)(latencies.Length * 0.95)];
-        check(p95 < 100, $"guest-to-guest relay through the host adds little delay (median {latencies[latencies.Length / 2]:F1} ms, p95 {p95:F1} ms)");
+        check(p95 < 100, $"voice sent straight to each listener adds little delay (median {latencies[latencies.Length / 2]:F1} ms, p95 {p95:F1} ms)");
 
         hostSink.Clear(); aSink.Clear(); bSink.Clear();
         var talkerHost = new Talker(host);
@@ -439,32 +440,32 @@ static class VoiceFixture
         await Wait(() => hostSink.From(Slot(a)) >= 23 && hostSink.From(Slot(b)) >= 23 && aSink.From(Slot(b)) >= 23 && bSink.From(Slot(a)) >= 23,
             "two guests talking at once are both heard by everyone else");
         var fromB = Decode(aSink.Frames.Where(f => f.Slot == Slot(b)).Select(f => f.Payload));
-        check(Goertzel(fromB, 880) > Goertzel(fromB, 440) * 10, "overlapping speakers stay separate streams instead of being mixed by the host");
+        check(Goertzel(fromB, 880) > Goertzel(fromB, 440) * 10, "overlapping speakers stay separate streams");
 
-        // Muting: the host refuses to relay a muted guest even if their app keeps sending.
+        // Muting: listeners refuse a muted member's frames even if their app keeps sending.
         b.SetVoice(true, true);
         await Wait(() => host.VoiceState(b.Identity.Peer)?.Muted == true && a.VoiceState(b.Identity.Peer)?.Muted == true, "muting is visible to the whole room");
         hostSink.Clear(); aSink.Clear();
         await talkerB.Speak(20, 880);
         check(aSink.From(Slot(b)) == 0, "a muted guest's app stops sending");
         var forged = new byte[VoicePacket.HeaderBytes + 3];
-        for (ushort s = 0; s < 20; s++) { VoicePacket.Write(forged, 0, s, 0, [0xF8, 0xFF, 0xFE]); Peers(b)[host.Identity.Peer].SendVoice(forged); }
+        for (ushort s = 0; s < 20; s++) { VoicePacket.Write(forged, 0, s, 0, [0xF8, 0xFF, 0xFE]); Peers(b)[host.Identity.Peer].SendVoice(forged); Peers(b)[a.Identity.Peer].SendVoice(forged); }
         await Task.Delay(400);
-        check(hostSink.Frames.IsEmpty && aSink.Frames.IsEmpty, "the host drops frames from a muted guest even if they are sent anyway");
+        check(hostSink.Frames.IsEmpty && aSink.Frames.IsEmpty, "listeners drop frames from a muted member even if they are sent anyway");
         b.SetVoice(true, false);
-        await Wait(() => host.VoiceState(b.Identity.Peer)?.Muted == false);
+        await Wait(() => host.VoiceState(b.Identity.Peer)?.Muted == false && a.VoiceState(b.Identity.Peer)?.Muted == false);
 
-        // A guest cannot impersonate another speaker's slot.
+        // Nobody can speak as someone else.
         aSink.Clear(); hostSink.Clear();
-        for (ushort s = 100; s < 110; s++) { VoicePacket.Write(forged, (byte)Slot(host), s, 0, [0xF8, 0xFF, 0xFE]); Peers(b)[host.Identity.Peer].SendVoice(forged); }
+        for (ushort s = 100; s < 110; s++) { VoicePacket.Write(forged, (byte)Slot(host), s, 0, [0xF8, 0xFF, 0xFE]); Peers(b)[a.Identity.Peer].SendVoice(forged); }
         await Wait(() => aSink.Frames.Count >= 9);
-        check(aSink.Frames.All(f => f.Slot == Slot(b)), "the host labels relayed frames with the real sender, ignoring a forged speaker slot");
+        check(aSink.Frames.All(f => f.Slot == Slot(b)), "a listener labels frames with the member whose connection they arrived on, ignoring a forged speaker slot");
 
-        // Flooding: far more frames than real time allows are capped by the host.
+        // Flooding: far more frames than real time allows are capped by each listener.
         aSink.Clear(); hostSink.Clear();
-        for (ushort s = 0; s < 1000; s++) { VoicePacket.Write(forged, 0, (ushort)(200 + s), 0, [0xF8, 0xFF, 0xFE]); Peers(b)[host.Identity.Peer].SendVoice(forged); }
+        for (ushort s = 0; s < 1000; s++) { VoicePacket.Write(forged, 0, (ushort)(200 + s), 0, [0xF8, 0xFF, 0xFE]); Peers(b)[a.Identity.Peer].SendVoice(forged); }
         await Task.Delay(800);
-        check(aSink.From(Slot(b)) is > 0 and < 160, $"a guest flooding voice frames is limited to real-time rates ({aSink.From(Slot(b))} of 1000 relayed)");
+        check(aSink.From(Slot(b)) is > 0 and < 160, $"someone flooding voice frames is limited to real-time rates ({aSink.From(Slot(b))} of 1000 accepted)");
         var garbage = new byte[1200]; Random.Shared.NextBytes(garbage); garbage[0] = 1;
         for (var i = 0; i < 20; i++) Peers(b)[host.Identity.Peer].SendVoice(garbage);
         await Task.Delay(300);
@@ -484,7 +485,7 @@ static class VoiceFixture
         hostSink.Clear();
         await talkerA.Speak(10, 440);
         await Task.Delay(300);
-        check(hostSink.Frames.IsEmpty, "the host stops hearing voice after leaving it, though it keeps relaying for guests");
+        check(hostSink.Frames.IsEmpty, "the streamer stops hearing voice after leaving it");
         host.SetVoice(true, false); b.SetVoice(true, false);
         await Wait(() => host.VoiceState(b.Identity.Peer)?.Joined == true && host.VoiceState(host.Identity.Peer)?.Joined == true);
 
@@ -508,9 +509,23 @@ static class VoiceFixture
         await Wait(() => c.Snapshot?.Voice?.Count(v => v.Joined) == 3, "a late joiner sees who is already in voice");
         c.SetVoice(true, false);
         await Wait(() => host.VoiceState(c.Identity.Peer)?.Joined == true);
-        await WaitForVoiceChannels(host, c);
+        await WaitForVoiceChannels(host, a, b, c);
         await talkerA.Speak(25, 440);
         await Wait(() => cSink.From(Slot(a)) >= 20, "a late joiner hears the people already talking");
+
+        // Voice does not depend on who streams: the role moves, nobody reconnects, and everyone keeps their slot.
+        var slotOfA = Slot(a);
+        var links = Peers(a).Values.Select(p => p.DiagnosticId).Order().ToArray();
+        await b.BecomeHostAsync();
+        await Wait(() => new[] { host, a, c }.All(m => m.DirectControlsReady.IsCompletedSuccessfully && m.Snapshot?.People.SingleOrDefault(p => p.IsHost)?.Id == b.Identity.Peer && m.Snapshot.Voice?.Count(v => v.Joined) == 4),
+            "everyone is still in voice after the streaming role moves to another member");
+        check(Slot(a) == slotOfA && Peers(a).Values.Select(p => p.DiagnosticId).Order().SequenceEqual(links), "the handover keeps every voice slot and every connection");
+        hostSink.Clear(); bSink.Clear(); cSink.Clear();
+        await talkerA.Speak(25, 440);
+        await Wait(() => hostSink.From(slotOfA) >= 20 && bSink.From(slotOfA) >= 20 && cSink.From(slotOfA) >= 20, "voice carries on after the streaming role moves");
+        // Back to the first member for the rest.
+        await host.BecomeHostAsync();
+        await Wait(() => new[] { a, b, c }.All(m => m.DirectControlsReady.IsCompletedSuccessfully && m.Snapshot?.People.SingleOrDefault(p => p.IsHost)?.Id == host.Identity.Peer && m.Snapshot.Voice?.Count(v => v.Joined) == 4));
 
         // A guest leaving the room is removed from voice for everyone.
         var leaving = a.Identity.Peer;
@@ -521,10 +536,11 @@ static class VoiceFixture
         await Wait(() => hostSink.From(Slot(b)) >= 15 && cSink.From(Slot(b)) >= 15, "the remaining people keep talking after someone leaves");
     }
 
-    static async Task WaitForVoiceChannels(RoomClient host, params RoomClient[] guests)
+    // Every pair among these members has its voice channel open in both directions.
+    static async Task WaitForVoiceChannels(params RoomClient[] members)
     {
-        var until = DateTime.UtcNow.AddSeconds(15);
-        while (!guests.All(g => Peers(host).TryGetValue(g.Identity!.Peer, out var p) && p.IsVoiceOpen && Peers(g).TryGetValue(host.Identity!.Peer, out var q) && q.IsVoiceOpen))
+        var until = DateTime.UtcNow.AddSeconds(25);
+        while (!members.All(from => members.All(to => from == to || Peers(from).TryGetValue(to.Identity!.Peer, out var p) && p.IsVoiceOpen)))
         {
             if (DateTime.UtcNow > until) throw new Exception("Timeout: voice channels did not open");
             await Task.Delay(50);

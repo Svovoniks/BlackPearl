@@ -5,7 +5,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using BlackPearl.Core;
 
-// Exercises the room service's cleanup and rate limits plus host resilience against misbehaving guests.
+// Exercises the room service's cleanup and rate limits, plus the streamer's resilience against misbehaving members.
 static class RoomServerFixture
 {
     public static async Task Run(string sdk, string serverDll, string directory, Action<bool, string> check)
@@ -42,61 +42,61 @@ static class RoomServerFixture
                 socket.Dispose();
             }
 
-            var (temporary, created) = await Open(new("create", Text: "Host"));
+            static WireMessage Enter(string name, string? room = null, string? key = null, bool temporary = true) =>
+                new("enter", Text: name, Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, room, key, Temporary: temporary)));
+            var (temporary, created) = await Open(Enter("First"));
             var temporaryCode = Wire.Read<Welcome>(created.Data!).Room;
             await Close(temporary); await Task.Delay(3500);
-            var (late, rejected) = await Open(new("join", Text: "Guest", Data: temporaryCode));
+            var (late, rejected) = await Open(Enter("Late", temporaryCode));
             check(rejected is { Type: "error", Text: "Invitation is invalid or expired" }, "server sweeps an empty temporary room after its grace period");
             await Close(late);
 
-            var (live, liveWelcome) = await Open(new("create", Text: "Host"));
+            var (live, liveWelcome) = await Open(Enter("First"));
             await Task.Delay(3500);
-            var (waiting, joined) = await Open(new("join", Text: "Guest", Data: Wire.Read<Welcome>(liveWelcome.Data!).Room));
+            var (waiting, joined) = await Open(Enter("Second", Wire.Read<Welcome>(liveWelcome.Data!).Room));
             check(joined.Type == "welcome", "server keeps temporary rooms that still have members");
 
-            for (var i = 0; i < 200; i++) await SocketMessages.SendAsync(live, new("ping", Number: i), default);
+            for (var i = 0; i < 300; i++) await SocketMessages.SendAsync(live, new("ping", Number: i), default);
             var pongs = 0;
-            while (pongs < 200) { var reply = await Read(live); if (reply.Type == "pong") pongs++; else if (reply.Type is "error" or "closed") break; }
-            check(pongs == 200, "host signaling bursts above the old 80 message window stay connected");
-            var guestError = "";
+            while (pongs < 300) { var reply = await Read(live); if (reply.Type == "pong") pongs++; else if (reply.Type is "error" or "closed") break; }
+            check(pongs == 300, "signaling bursts for a room full of members stay connected");
+            var floodError = "";
             try
             {
-                for (var i = 0; i < 300; i++) await SocketMessages.SendAsync(waiting, new("ping", Number: i), default);
-                for (var i = 0; i < 400 && guestError == ""; i++) { var reply = await Read(waiting); if (reply.Type is "error" or "closed") guestError = reply.Text ?? reply.Type; }
+                for (var i = 0; i < 1200; i++) await SocketMessages.SendAsync(waiting, new("ping", Number: i), default);
+                for (var i = 0; i < 1300 && floodError == ""; i++) { var reply = await Read(waiting); if (reply.Type is "error" or "closed") floodError = reply.Text ?? reply.Type; }
             }
-            catch (WebSocketException) { guestError = "closed"; }
-            check(guestError is "Message rate limit exceeded" or "closed", "guest message floods still disconnect that guest");
+            catch (WebSocketException) { floodError = "closed"; }
+            check(floodError is "Message rate limit exceeded" or "closed", "message floods still disconnect that member");
             await Close(waiting); await Close(live);
 
-            var (owner, ownerWelcome) = await Open(new("create", Target: "persistent", Text: "Owner"));
+            var (owner, ownerWelcome) = await Open(Enter("Owner", temporary: false));
             var saved = Wire.Read<Welcome>(ownerWelcome.Data!);
             await Close(owner); await Task.Delay(3500);
-            var (resumed, resumedWelcome) = await Open(new("resume", Target: saved.HostKey, Text: "Owner", Data: saved.Room));
-            check(resumedWelcome.Type == "welcome" && Wire.Read<Welcome>(resumedWelcome.Data!).Room == saved.Room, "persistent rooms survive the sweep and resume with their host key");
-            await Close(resumed);
-            var (second, secondWelcome) = await Open(new("create", Target: "persistent", Text: "Owner"));
+            var (returned, returnedWelcome) = await Open(Enter("Owner", saved.Room, saved.HostKey));
+            check(returnedWelcome.Type == "welcome" && Wire.Read<Welcome>(returnedWelcome.Data!) is { Owner: true } again && again.Room == saved.Room, "saved rooms survive the sweep, and their creator returns with their key");
+            await Close(returned);
+            var (second, secondWelcome) = await Open(Enter("Owner", temporary: false));
             await Close(second);
-            var (third, limited) = await Open(new("create", Target: "persistent", Text: "Owner"));
-            check(secondWelcome.Type == "welcome" && limited is { Type: "error", Text: "Persistent room limit reached. Try again later." }, "persistent room creation is limited per address");
+            var (third, limited) = await Open(Enter("Owner", temporary: false));
+            check(secondWelcome.Type == "welcome" && limited is { Type: "error", Text: "Persistent room limit reached. Try again later." }, "saved room creation is limited per address");
             await Close(third);
 
-            var (readyHost, readyWelcome) = await Open(new("create", Text: "Host"));
-            var readyRoom = Wire.Read<Welcome>(readyWelcome.Data!).Room;
-            var (spammer, spamWelcome) = await Open(new("join", Text: "Spammer", Data: readyRoom));
-            await SocketMessages.SendAsync(readyHost, new("admit", Target: Wire.Read<Welcome>(spamWelcome.Data!).Peer), default);
-            for (var reply = await Read(spammer); reply.Type != "admitted"; reply = await Read(spammer)) if (reply.Type == "closed") throw new IOException("Spammer was not admitted");
-            var hostSnapshots = 0;
+            // One member cannot make the service flood another with requests.
+            var (target, targetWelcome) = await Open(Enter("Target"));
+            var targetIdentity = Wire.Read<Welcome>(targetWelcome.Data!);
+            var (spammer, _) = await Open(Enter("Spammer", targetIdentity.Room));
+            var requests = 0;
             var counting = Task.Run(async () =>
             {
-                try { while (true) { var reply = await Read(readyHost); if (reply.Type == "snapshot") Interlocked.Increment(ref hostSnapshots); if (reply.Type == "closed") break; } }
+                try { while (true) { var reply = await Read(target); if (reply.Type == "connect") Interlocked.Increment(ref requests); if (reply.Type == "closed") break; } }
                 catch (Exception) { }
             });
-            await Task.Delay(300); Interlocked.Exchange(ref hostSnapshots, 0);
-            for (var i = 0; i < 50; i++) await SocketMessages.SendAsync(spammer, new(i % 2 == 0 ? "ready" : "buffering"), default);
-            for (var i = 0; i < 50; i++) await SocketMessages.SendAsync(spammer, new("ready"), default);
+            for (var i = 0; i < 100; i++) await SocketMessages.SendAsync(spammer, new("reconnect", Target: targetIdentity.Peer), default);
+            for (var i = 0; i < 100; i++) await SocketMessages.SendAsync(spammer, new("claim"), default);
             await Task.Delay(1000);
-            check(Volatile.Read(ref hostSnapshots) is > 0 and <= 30, $"one guest's readiness spam is bounded before it reaches other members ({hostSnapshots} snapshots)");
-            await Close(spammer); await Close(readyHost); await counting.WaitAsync(TimeSpan.FromSeconds(10));
+            check(Volatile.Read(ref requests) is > 0 and <= 30, $"one member's requests are bounded before they reach other members ({requests} of 100 relayed)");
+            await Close(spammer); await Close(target); await counting.WaitAsync(TimeSpan.FromSeconds(15));
 
             await HostSurvivesGuests(url, directory, check);
         }
@@ -149,7 +149,7 @@ static class RoomServerFixture
             async Task<string[]> CreateRoom()
             {
                 using var socket = new ClientWebSocket(); await socket.ConnectAsync(new Uri(url.Replace("http", "ws") + "/room"), default);
-                await SocketMessages.SendAsync(socket, new("create", Text: "Host"), default);
+                await SocketMessages.SendAsync(socket, new("enter", Text: "Host", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, Temporary: true))), default);
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 var reply = await SocketMessages.ReadAsync(socket, timeout.Token);
                 socket.Abort();

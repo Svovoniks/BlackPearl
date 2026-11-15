@@ -49,14 +49,18 @@ public record MediaItem(string Id, string Path, string Title, string Kind, int? 
     public string? DetailOverview => new[] { EpisodeOverview, SeasonOverview, Overview }.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
     public override string ToString() => IsMusic ? QueueTitle : Episode is not null ? Caption + " · " + Title : Title;
 }
+// HostKey is the creator's key for the room: it lets them rename it and remove people. Everyone else's key is kept
+// in settings under the room's address.
 public record SavedRoom(string Id, string Name, string Server, string Code, string? HostKey = null)
 {
-    public string Caption => (HostKey is null ? "Guest" : "Host") + " · " + (Uri.TryCreate(Server, UriKind.Absolute, out var address) ? address.Host : Server);
+    public string Caption => (HostKey is null ? "Joined" : "Created by you") + " · " + (Uri.TryCreate(Server, UriKind.Absolute, out var address) ? address.Host : Server);
     public override string ToString() => Name + " · " + Caption;
 }
 public record SavedQueue(string Id, string Name, string[] MediaIds);
 public record SharedMedia(string Id, string Title, long Length, string Extension, SharedMedia[]? Subtitles = null);
-public record Participant(string Id, string Name, bool IsHost, bool Approved, bool Ready = false, string? GuestId = null);
+// IsHost marks whoever is streaming, or would be: the one member whose app keeps the room's playback state. The room
+// service moves it to whoever starts a video, and to someone else when that person leaves. Owner marks the room's creator.
+public record Participant(string Id, string Name, bool IsHost, bool Approved, bool Ready = false, string? GuestId = null, bool Owner = false);
 public record PlaybackState(long Revision, string MediaId, bool Playing, long PositionMs, long AtUnixMs, string? CommandId = null,
     bool? RequestedPlaying = null, long Generation = 0, bool Seek = false, PlaybackStop? Stop = null)
 {
@@ -69,14 +73,31 @@ public record RoomTracks(string MediaId, SharedTrack? Audio = null, SharedTrack?
 public record SubtitleAttachment(string MediaId, SharedMedia Subtitle);
 public record WireMessage(string Type, string? Target = null, string? Sender = null,
     string? Text = null, string? Data = null, long Number = 0);
-public record Welcome(string Room, string Peer, bool Host, string[] IceServers, bool ForceRelay, string? HostKey = null, string? GuestKey = null);
+// The first message a client sends the room service. Room is the invitation's code, or null to create a room. Key is
+// the member's saved key for the room, or null on a first visit; the creator's key also proves ownership.
+public record EnterRequest(int Protocol, string? Room = null, string? Key = null, string? RoomName = null, bool Temporary = false);
+// Host says whether this member holds the streaming role right now; it changes during a session. HostKey is set only
+// for the room's creator.
+public record Welcome(string Room, string Peer, bool Host, string[] IceServers, bool ForceRelay, string? HostKey = null, string? GuestKey = null, bool Owner = false);
 public record AdmittedGuest(string Id, string Name);
 public record RoomSnapshot(Participant[] People, SharedMedia? Media, PlaybackState? Playback, bool SharedControls, string[]? Queue = null, AdmittedGuest[]? AdmittedGuests = null, string? Name = null,
     bool LibraryBrowsing = false, LibraryBrowseActivity? LibraryActivity = null, RoomTracks? Tracks = null, RoomSession? LastSession = null,
     // Null from hosts without voice chat; otherwise everyone whose app supports voice, in or out of it.
     VoiceMember[]? Voice = null,
     // True from hosts that show the browsing guest's mouse; guests send catalog-pointer only to them.
-    bool GuestPointers = false);
+    bool GuestPointers = false,
+    // From the room service: counts each change of the streaming role, so state from an earlier streamer is ignored.
+    long Epoch = 0,
+    // From the room service, for the room's creator: the people it removed, who can't come back until let in again.
+    AdmittedGuest[]? Removed = null);
+// What the room service tells someone holding a room's invitation before they enter.
+public record RoomPresenceInfo(string? Name, string[] People);
+public static class RoomProtocol
+{
+    // Version 2: rooms without a dedicated host. The service and every member must speak the same version.
+    public const int Version = 2;
+    public const int MaxPresent = 8, MaxMembers = 64;
+}
 
 public static class Wire
 {

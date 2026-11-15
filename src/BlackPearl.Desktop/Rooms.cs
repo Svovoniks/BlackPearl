@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using BlackPearl.Core;
 
 namespace BlackPearl.Desktop;
@@ -23,73 +24,137 @@ public partial class MainWindow
     {
         if (SavedRoomsList is null) return;
         CreateSavedRoomButton.IsEnabled = AddSavedInvitationButton.IsEnabled = !roomBusy;
+        RefreshRoomPresence();
         RoomsEmptyState.Visibility = savedRooms.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         CreateSavedRoomButton.Visibility = AddSavedInvitationButton.Visibility = savedRooms.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         SavedRoomsContent.Visibility = savedRooms.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         SavedRoomDetails.Visibility = SavedRoomsList.SelectedItem is SavedRoom ? Visibility.Visible : Visibility.Collapsed;
         ConnectSavedRoomButton.IsEnabled = !roomBusy && SavedRoomsList.SelectedItem is SavedRoom;
-        ForgetSavedRoomButton.IsEnabled = CopySavedInviteButton.IsEnabled = CopySavedCodeButton.IsEnabled = SavedRoomsList.SelectedItem is SavedRoom;
+        ForgetSavedRoomButton.IsEnabled = CopySavedCodeButton.IsEnabled = SavedRoomsList.SelectedItem is SavedRoom;
         RefreshRoomSettings(); RefreshRoomHero();
     }
-    private readonly Dictionary<string, string> savedGuestLists = [];
+    private readonly Dictionary<string, string> savedMemberLists = [];
     private string SavedRoomSetting(SavedRoom saved, string field) => "room:" + saved.Server + ":" + saved.Code.ToUpperInvariant() + ":" + field;
+    private bool ConnectedTo(SavedRoom? saved) => saved is not null && room?.IsConnected == true && room.ServerAddress == saved.Server && room.Identity?.Room == saved.Code;
+
+    // Who is in each saved room right now, asked of its room service while the Rooms page is open. A room the service
+    // doesn't answer for has no entry.
+    private readonly Dictionary<string, RoomPresenceInfo> roomPresence = [];
+    private readonly DispatcherTimer roomPresenceTimer = new() { Interval = TimeSpan.FromSeconds(20) };
+    private long roomPresenceAsked = -60000;
+    private bool roomPresencePending;
+    private static string PresenceKey(SavedRoom saved) => saved.Server + "#" + saved.Code.ToUpperInvariant();
+    private void InitializeRoomPresence() => roomPresenceTimer.Tick += (_, _) => RefreshRoomPresence(force: true);
+    private async void RefreshRoomPresence(bool force = false)
+    {
+        var visible = RoomsPage?.Visibility == Visibility.Visible && IsVisible && WindowState != WindowState.Minimized && savedRooms.Count > 0;
+        if (roomPresenceTimer.IsEnabled != visible) { if (visible) roomPresenceTimer.Start(); else roomPresenceTimer.Stop(); }
+        if (!visible || roomPresencePending || Environment.TickCount64 - roomPresenceAsked < (force ? 5000 : 15000)) return;
+        roomPresencePending = true; roomPresenceAsked = Environment.TickCount64;
+        try
+        {
+            var found = new Dictionary<string, RoomPresenceInfo>();
+            foreach (var group in savedRooms.GroupBy(saved => saved.Server).ToArray())
+            {
+                try
+                {
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
+                    foreach (var pair in await RoomClient.PresenceAsync(group.Key, group.Select(saved => saved.Code), timeout.Token)) found[group.Key + "#" + pair.Key] = pair.Value;
+                }
+                // An unreachable or older room service only means nothing is known about its rooms.
+                catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or IOException or OperationCanceledException or System.Text.Json.JsonException or ArgumentException) { }
+            }
+            if (closing) return;
+            var changed = found.Count != roomPresence.Count || found.Any(pair => !roomPresence.TryGetValue(pair.Key, out var before) || before.Name != pair.Value.Name || !before.People.SequenceEqual(pair.Value.People));
+            roomPresence.Clear(); foreach (var pair in found) roomPresence[pair.Key] = pair.Value;
+            // A room its creator renamed keeps its new name here too.
+            foreach (var saved in savedRooms.ToArray())
+                if (!ConnectedTo(saved) && roomPresence.GetValueOrDefault(PresenceKey(saved))?.Name is { Length: > 0 } name && name != saved.Name && saved.HostKey is null)
+                {
+                    var selected = SavedRoomsList.SelectedItem == (object)saved;
+                    var updated = saved with { Name = name };
+                    savedRooms[savedRooms.IndexOf(saved)] = updated; SaveRooms(); changed = true;
+                    if (selected) SavedRoomsList.SelectedItem = updated;
+                }
+            if (changed) { RefreshRoomSettings(); RefreshRoomHero(); }
+        }
+        finally { roomPresencePending = false; }
+    }
+    // The names of who is in a room the app isn't connected to, or null when the room service hasn't said.
+    private string[]? PeopleInRoom(SavedRoom saved) => roomPresence.GetValueOrDefault(PresenceKey(saved))?.People;
+
     private void RefreshRoomSettings()
     {
         if (SavedRoomSharedControls is null) return;
         var saved = SavedRoomsList.SelectedItem as SavedRoom;
-        var connected = saved is not null && room?.IsConnected == true && room.ServerAddress == saved.Server && room.Identity?.Room == saved.Code;
-        var host = saved is not null && (connected ? room!.Identity!.Host : saved.HostKey is not null);
-        SavedRoomHostControls.Visibility = host ? Visibility.Visible : Visibility.Collapsed;
-        // Guests have no permissions tile, so the room actions move to the top of the column.
-        Grid.SetRow(SavedRoomActions, host ? 2 : 0);
+        var connected = ConnectedTo(saved);
+        // The room's creator can rename it and remove people; nothing else sets them apart.
+        var owner = saved is not null && (connected ? room!.Identity!.Owner : saved.HostKey is not null);
+        var streaming = connected && room!.Identity!.Host;
+        SavedRoomHostControls.Visibility = saved is not null ? Visibility.Visible : Visibility.Collapsed;
         MarkLiveRoomPill();
-        RenameSavedRoomButton.Visibility = host ? Visibility.Visible : Visibility.Collapsed;
-        RenameSavedRoomButton.IsEnabled = host;
-        RenameSavedRoomButton.ToolTip = host ? "Change the room name for everyone" : "Only the host can change the room name";
+        RenameSavedRoomButton.Visibility = owner ? Visibility.Visible : Visibility.Collapsed;
+        RenameSavedRoomButton.IsEnabled = owner;
+        RenameSavedRoomButton.ToolTip = "Change the room name for everyone";
         SavedRoomHeading.Text = saved?.Name ?? "Choose a room";
-        SavedRoomStatus.Text = saved is null ? "Create a room or save an invitation to get started." : connected ? (host ? "Open · You are the host" : "Connected · Guest") : (host ? "Your room · Closed" : "Saved invitation · Offline");
-        SavedRoomStatusDot.Fill = (System.Windows.Media.Brush)FindResource(connected ? "Success" : "Muted");
+        var elsewhere = saved is null || connected ? null : PeopleInRoom(saved);
+        var playing = connected ? room!.Snapshot?.Media : null;
+        SavedRoomStatus.Text = saved is null ? "Create a room, or join one with an invitation."
+            : connected ? playing is null ? "You're in this room" : (streaming ? "You're playing " : StreamerName + " is playing ") + playing.Title
+            : elsewhere is { Length: > 0 } ? RoomSessions.Names(elsewhere) + (elsewhere.Length == 1 ? " is" : " are") + " here now"
+            : elsewhere is not null ? "Nobody is here right now" : "Not connected";
+        SavedRoomStatusDot.Fill = (System.Windows.Media.Brush)FindResource(connected || elsewhere is { Length: > 0 } ? "Success" : "Muted");
         SavedRoomCode.Text = saved is null ? "" : string.Join(" ", saved.Code.Chunk(6).Select(part => new string(part)));
-        SavedRoomInviteHint.Text = saved is null ? "" : (Uri.TryCreate(saved.Server, UriKind.Absolute, out var server) ? server.Host : saved.Server)
-            + (host ? " · People ask to join and you admit them" : " · The host admits new people");
-        ShowSavedRoomSession(saved, host);
-        ConnectSavedRoomButton.Content = connected ? "Open player" : "Connect";
+        SavedRoomInviteHint.Text = saved is null ? "" : (Uri.TryCreate(saved.Server, UriKind.Absolute, out var server) ? server.Host : saved.Server) + " · Anyone with the code can join";
+        ShowSavedRoomSession(saved);
+        ConnectSavedRoomButton.Content = connected ? "Open player" : "Join";
         DisconnectSavedRoomButton.Visibility = connected ? Visibility.Visible : Visibility.Collapsed;
         DisconnectSavedRoomButton.IsEnabled = connected && !roomBusy;
-        SavedRoomSharedControls.IsEnabled = host;
+        RefreshSavedRoomVoice();
+        // What others may do while this person plays a video here. It is their own choice, kept for the room.
+        SavedRoomSharedControls.IsEnabled = SavedRoomLibraryBrowsing.IsEnabled = saved is not null;
         updatingLibraryPermission = true;
-        SavedRoomLibraryBrowsing.IsEnabled = host;
-        SavedRoomLibraryBrowsing.IsChecked = connected ? room!.Snapshot?.LibraryBrowsing == true : saved is not null && library.Setting(SavedRoomSetting(saved, "libraryBrowsing")) == "true";
+        SavedRoomLibraryBrowsing.IsChecked = streaming ? room!.Snapshot?.LibraryBrowsing == true : saved is not null && library.Setting(SavedRoomSetting(saved, "libraryBrowsing")) == "true";
         updatingLibraryPermission = false;
-        SavedRoomSharedControls.IsChecked = connected ? room!.Snapshot?.SharedControls == true : saved is not null && library.Setting(SavedRoomSetting(saved, "sharedControls")) == "true";
-        AdmittedGuest[] remembered = [];
-        if (saved is not null && host)
+        SavedRoomSharedControls.IsChecked = streaming ? room!.Snapshot?.SharedControls == true : saved is not null && library.Setting(SavedRoomSetting(saved, "sharedControls")) != "false";
+        // Members are remembered for when the app isn't connected.
+        AdmittedGuest[] members = [];
+        if (saved is not null)
         {
+            var key = SavedRoomSetting(saved, "members");
             if (connected)
             {
-                remembered = room!.Snapshot?.AdmittedGuests ?? [];
-                // Snapshots arrive for every guest command; write the guest list only when it changes.
-                var key = SavedRoomSetting(saved, "guests"); var json = Wire.Serialize(remembered);
-                if (savedGuestLists.GetValueOrDefault(key) != json) { library.Setting(key, json); savedGuestLists[key] = json; }
+                members = room!.Members;
+                // Snapshots arrive often; write the list only when it changes.
+                var json = Wire.Serialize(members);
+                if (members.Length > 0 && savedMemberLists.GetValueOrDefault(key) != json) { library.Setting(key, json); savedMemberLists[key] = json; }
             }
-            else try { remembered = Wire.Read<AdmittedGuest[]>(library.Setting(SavedRoomSetting(saved, "guests")) ?? "[]"); } catch (System.Text.Json.JsonException) { }
+            else try { members = Wire.Read<AdmittedGuest[]>(library.Setting(key) ?? "[]"); } catch (System.Text.Json.JsonException) { }
         }
-        List<RoomGuestRow> rows;
-        if (host)
+        var rows = new List<RoomGuestRow>();
+        if (connected)
         {
-            var active = connected ? room!.Snapshot?.People.Where(p => !p.IsHost).ToArray() ?? [] : [];
-            rows = active.Select(p => new RoomGuestRow(p.Id, p.Name, p.Approved ? (room!.VoiceState(p.Id)?.Joined == true ? "In the room · In voice" : "In the room") : "Asking to join", !p.Approved, connected, pendingAdmissions.ContainsKey(p.Id), true, true)).ToList();
-            rows.AddRange(remembered.Where(p => !active.Any(a => a.GuestId == p.Id)).Select(p => new RoomGuestRow(p.Id, p.Name, "Admitted · Not here", false, connected, false, true, false)));
+            var client = room!; var me = client.Identity!.Peer;
+            // The room service lists who is here; until the streamer's state arrives, that is all there is.
+            var present = client.Roster.Length > 0 ? client.Roster : client.Snapshot?.People ?? [];
+            rows.AddRange(present.Select(p => new RoomGuestRow(p.Id, p.Id == me ? p.Name + " (you)" : p.Name,
+                string.Join(" · ", new[] { p.IsHost && playing is not null ? "Streaming" : "Here", client.VoiceState(p.Id)?.Joined == true ? "In voice" : null, p.Owner ? "Created the room" : null }.OfType<string>()),
+                owner && p.Id != me, true, false)));
+            rows.AddRange(members.Where(member => present.All(p => p.GuestId != member.Id)).Select(member => new RoomGuestRow(member.Id, member.Name, "Not here", owner, false, false)));
+            rows.AddRange(client.Removed.Select(removed => new RoomGuestRow(removed.Id, removed.Name, "Removed", false, false, true)));
         }
-        // Guests see who is in the room while connected.
-        else rows = connected ? (room!.Snapshot?.People ?? []).Where(p => p.IsHost || p.Approved)
-            .Select(p => new RoomGuestRow(p.Id, p.Id == room.Identity!.Peer ? p.Name + " (you)" : p.Name, (p.IsHost ? "Host" : "In the room") + (room.VoiceState(p.Id)?.Joined == true ? " · In voice" : ""), false, false, false, false, true)).ToList() : [];
+        else if (saved is not null)
+        {
+            // Names stand in for people the room service lists without ids. Someone listed twice is here twice.
+            var here = (elsewhere ?? []).ToList();
+            rows.AddRange(here.Select((name, index) => new RoomGuestRow("here:" + index, name, "Here now", false, true, false)));
+            foreach (var member in members)
+                if (!here.Remove(member.Name)) rows.Add(new(member.Id, member.Name, "Not here", false, false, false));
+        }
         if (SavedRoomGuests.ItemsSource is not IEnumerable<RoomGuestRow> shown || !shown.SequenceEqual(rows)) SavedRoomGuests.ItemsSource = rows;
-        SavedRoomGuestHeading.Text = host ? "Guests" : "People";
-        SavedRoomGuestCount.Text = host ? remembered.Length == 0 ? "" : remembered.Length + " admitted" : rows.Count == 0 ? "" : rows.Count + " here";
-        SavedRoomGuestHint.Text = !host ? connected ? "" : "Connect to see who's in the room."
-            : connected ? rows.Count == 0 ? "No guests yet. Share the invitation; new people ask to join here." : "Admitted guests can reconnect. Remove revokes access."
-            : rows.Count == 0 ? "No guests yet. Open the room and share the invitation." : "Open the room to admit or remove guests.";
+        var count = rows.Count(row => row.Here);
+        SavedRoomGuestCount.Text = saved is null ? "" : count == 0 ? "" : count + " here";
+        SavedRoomGuestHint.Text = saved is null ? "" : rows.Count == 0 ? "Nobody has joined yet. Copy the code and send it to your friends." : "";
         SavedRoomGuestHintPanel.Visibility = SavedRoomGuestHint.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         var empty = rows.Count == 0;
         SavedRoomGuestHintPanel.VerticalAlignment = empty ? VerticalAlignment.Center : VerticalAlignment.Top;
@@ -98,25 +163,24 @@ public partial class MainWindow
         SavedRoomGuestEmptyIcon.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         SavedRoomGuestHint.TextAlignment = empty ? TextAlignment.Center : TextAlignment.Left;
     }
-    private sealed record RoomGuestRow(string Id, string Name, string Status, bool Waiting, bool CanRemove, bool Pending, bool Manage, bool Here)
+    // Here: in the room now. CanRemove: the room's creator may remove them. Removed: only the creator sees these, and can let them back in.
+    private sealed record RoomGuestRow(string Id, string Name, string Status, bool CanRemove, bool Here, bool Removed)
     {
-        public Visibility AdmitVisibility => Waiting ? Visibility.Visible : Visibility.Collapsed;
-        public Visibility ManageVisibility => Manage ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility RemoveVisibility => CanRemove ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility RestoreVisibility => Removed ? Visibility.Visible : Visibility.Collapsed;
         public string Initial => Initials(Name, 1);
         public double Presence => Here ? 1 : 0.45;
         // Each person keeps a colour of their own, derived from the name.
         public System.Windows.Media.Brush Tint { get { var brush = new System.Windows.Media.SolidColorBrush(Hsl(TitleHue(Name), .65, .74)); brush.Freeze(); return brush; } }
-        public bool CanAdmit => CanRemove && !Pending;
-        public string AdmitLabel => Pending ? "Admitting…" : "Admit";
     }
     private void SavedRoomControlsChanged(object sender, RoutedEventArgs e)
     {
         if (SavedRoomsList.SelectedItem is not SavedRoom saved || !SavedRoomSharedControls.IsEnabled) return;
         var enabled = SavedRoomSharedControls.IsChecked == true;
         library.Setting(SavedRoomSetting(saved, "sharedControls"), enabled ? "true" : "false");
-        if (room?.IsConnected == true && room.Identity?.Host == true && room.ServerAddress == saved.Server && room.Identity.Room == saved.Code)
-            room.Send(new("controls", Number: enabled ? 1 : 0));
-        SetStatus("Room playback controls saved.");
+        // It applies at once when this person is the one playing; otherwise the next time they are.
+        if (ConnectedTo(saved) && room!.Identity?.Host == true) room.Send(new("controls", Number: enabled ? 1 : 0));
+        SetStatus(enabled ? "Others can play, pause and seek what you play in this room." : "Only you control what you play in this room.");
     }
     private void SaveRooms() => library.Setting("rooms", Wire.Serialize(savedRooms));
     private void SavedRoomSelectionChanged(object sender, SelectionChangedEventArgs e) => RefreshSavedRooms();
@@ -151,35 +215,37 @@ public partial class MainWindow
     {
         if (roomBusy) return;
         var name = Dialogs.Prompt(this, "Create room", "Room name", validate: ValidateRoomName, action: "Create room",
-            help: "Invite friends after creating the room. Choose a video from your library when you're ready."); if (name is null) return;
+            help: "The room stays open for whoever has its invitation, whether or not you're in it. Anyone in the room can play a video for the others."); if (name is null) return;
         pendingRoomName = name; roomBusy = true; RefreshSavedRooms();
         try
         {
             await Disconnect(); var client = NewRoom();
             try { await client.ConnectAsync(SavedServerAddress, SavedDisplayName, persistent: true, roomName: name); }
             catch { await Disconnect(); throw; }
-            RememberCurrentRoom(); RoomHeading.Text = name; RoomSubtitle.Text = "Share an invitation, then choose a video from the library.";
+            RememberCurrentRoom(); RoomHeading.Text = name; RoomSubtitle.Text = "Copy the room code to bring friends in.";
             ShowPage("Rooms");
         }
         finally { pendingRoomName = null; roomBusy = false; RefreshSavedRooms(); }
     });
-    private void SaveRoomInvitation(object sender, RoutedEventArgs e)
-    {
-        var invitation = Dialogs.Prompt(this, "Add room by invitation", "Invitation link or room code", validate: value =>
-        { try { RoomAddress.Parse(value, SavedServerAddress); return null; } catch (ArgumentException ex) { return ex.Message; } });
-        if (invitation is null) return;
-        var address = RoomAddress.Parse(invitation, SavedServerAddress);
-        var existing = savedRooms.FirstOrDefault(x => x.Server == address.Server && x.Code == address.Code);
-        if (existing is not null) { SavedRoomsList.SelectedItem = existing; SetStatus("This room is already saved."); return; }
-        var saved = new SavedRoom(Guid.NewGuid().ToString("N"), "Room " + address.Code[..6], address.Server, address.Code);
-        savedRooms.Add(saved); SaveRooms(); SavedRoomsList.SelectedItem = saved;
-    }
     private async void ConnectSavedRoom(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
         if (roomBusy || SavedRoomsList.SelectedItem is not SavedRoom saved) return;
-        if (room?.IsConnected == true && room.ServerAddress == saved.Server && room.Identity?.Room == saved.Code) { ShowPage("Room"); return; }
-        if (await ConnectToSavedRoom(saved)) ShowPage("Rooms");
+        if (ConnectedTo(saved)) { ShowPage("Room"); return; }
+        if (await ConnectToSavedRoom(saved)) await OpenPlayerIfPlaying(room);
     });
+    // Double-clicking a room's name joins it.
+    private void SavedRoomDoubleClicked(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (ItemsControl.ContainerFromElement(SavedRoomsList, (DependencyObject)e.OriginalSource) is ListBoxItem) ConnectSavedRoom(sender, e);
+    }
+    // Someone who joins while a video is playing goes to it; otherwise the Rooms page shows who is there.
+    private async Task OpenPlayerIfPlaying(RoomClient? client)
+    {
+        if (client is null) return;
+        try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(8), lifetime.Token); }
+        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException) { return; }
+        if (room == client && client.Snapshot?.Media is not null && currentPage == "Rooms") ShowPage("Room");
+    }
     private async Task<bool> ConnectToSavedRoom(SavedRoom saved)
     {
         if (roomBusy) return false;
@@ -187,12 +253,15 @@ public partial class MainWindow
         try
         {
             await Disconnect(); var client = NewRoom();
+            SetStatus("Joining " + saved.Name + "…");
+            // Only the room's creator names it; anyone else enters with the name it has.
             try { await client.ConnectAsync(saved.Server, SavedDisplayName, saved.Code, saved.HostKey, roomName: saved.HostKey is null ? null : saved.Name); }
             catch { await Disconnect(); throw; }
             RoomHeading.Text = client.Snapshot?.Name ?? saved.Name;
-            RoomSubtitle.Text = saved.HostKey is null ? "Waiting for host approval" : "Choose a video from the library.";
+            RoomSubtitle.Text = "Connecting to the room…";
             RememberCurrentRoom();
-            PublishRoomSession(client, saved); RestoreRoomSession(client, saved);
+            PublishRoomSession(client, saved);
+            SetStatus("You're in " + (client.Snapshot?.Name ?? saved.Name) + ".");
             return true;
         }
         finally { roomBusy = false; RefreshSavedRooms(); }
@@ -206,12 +275,12 @@ public partial class MainWindow
     });
     private void RenameHostRoom(SavedRoom saved, string name)
     {
-        var connected = room?.IsConnected == true && room.ServerAddress == saved.Server && room.Identity?.Room == saved.Code;
-        if (!(connected ? room!.Identity!.Host : saved.HostKey is not null)) return;
+        var connected = ConnectedTo(saved);
+        if (!(connected ? room!.Identity!.Owner : saved.HostKey is not null)) return;
         if (string.IsNullOrWhiteSpace(name) || ValidateRoomName(name.Trim()) is not null) return;
         name = name.Trim();
+        // Away from the room, the new name is sent the next time its creator enters.
         if (connected) room!.Send(new("room-name", Text: name));
-        library.Setting(SavedRoomSetting(saved, "name"), name);
         var updated = saved with { Name = name }; savedRooms[savedRooms.IndexOf(saved)] = updated;
         SaveRooms(); SavedRoomsList.SelectedItem = updated;
     }
@@ -227,27 +296,32 @@ public partial class MainWindow
         try { Clipboard.SetText(saved.Code); SetStatus("Room code copied."); }
         catch (System.Runtime.InteropServices.ExternalException) { SetStatus("Clipboard is busy."); }
     }
-    // The pill of the connected room shows a live dot.
+    // The pill of the connected room shows a live dot; a room other people are in shows a quieter one.
     private void MarkLiveRoomPill()
     {
         var live = ConnectedSavedRoom;
         foreach (var saved in savedRooms)
-            if (SavedRoomsList.ItemContainerGenerator.ContainerFromItem(saved) is ListBoxItem pill) pill.Tag = saved == live ? "live" : null;
+            if (SavedRoomsList.ItemContainerGenerator.ContainerFromItem(saved) is ListBoxItem pill)
+            {
+                var people = saved == live ? null : PeopleInRoom(saved);
+                pill.Tag = saved == live ? "live" : people is { Length: > 0 } ? "busy" : null;
+                pill.ToolTip = saved == live ? "You're in this room" : people is { Length: > 0 } ? RoomSessions.Names(people) + (people.Length == 1 ? " is" : " are") + " here · Double-click to join" : "Double-click to join";
+            }
     }
     // The selected room's last session: its picture when one is known, otherwise a card in the title's colour.
     private string? savedRoomSessionKey;
-    private void ShowSavedRoomSession(SavedRoom? saved, bool host)
+    private void ShowSavedRoomSession(SavedRoom? saved)
     {
         var session = saved is null ? null : LoadRoomSession(saved);
         SavedRoomSessionTitle.Text = session?.Title ?? "Nothing watched here yet";
         SavedRoomSessionTitle.Foreground = (System.Windows.Media.Brush)FindResource(session is null ? "Muted" : "Ink");
-        SavedRoomSessionDetail.Text = session is null ? host ? "Pick something from your library once the room is open." : "It appears here after the host plays something."
+        SavedRoomSessionDetail.Text = session is null ? "It appears here after someone plays a video."
             : (session.DurationMs > 0 && session.PositionMs >= session.DurationMs - 60000 ? "Finished" : "Stopped at " + FormatTime(session.PositionMs)) + " · " + Ago(session.UpdatedAt);
         SavedRoomSessionThumb.Visibility = session is null ? Visibility.Collapsed : Visibility.Visible;
         if (saved is null || session is null) { savedRoomSessionKey = null; SavedRoomSessionImage.Source = null; return; }
-        string? file = null;
-        if (host) file = session.LibraryId is { } id && items.FirstOrDefault(x => x.Id == id) is { } item ? HeroArtworkPath(item) : null;
-        else if (library.Setting(SavedRoomSetting(saved, "artwork")) == session.Title) file = HeroArtworkFile(saved);
+        // A video this app played comes with artwork from its own library; someone else's was saved from their app.
+        string? file = session.LibraryId is { } id && items.FirstOrDefault(x => x.Id == id) is { } item ? HeroArtworkPath(item) : null;
+        if (file is null && library.Setting(SavedRoomSetting(saved, "artwork")) == session.Title) file = HeroArtworkFile(saved);
         var key = session.Title + "|" + file + "|" + (file is not null && File.Exists(file) ? File.GetLastWriteTimeUtc(file).Ticks : 0);
         if (key == savedRoomSessionKey) return;
         savedRoomSessionKey = key;
@@ -267,11 +341,5 @@ public partial class MainWindow
             return image;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or InvalidOperationException) { return null; }
-    }
-    private void CopySavedInvitation(object sender, RoutedEventArgs e)
-    {
-        if (SavedRoomsList.SelectedItem is not SavedRoom saved) return;
-        try { Clipboard.SetText(saved.Server + "#" + saved.Code); SetStatus("Invitation copied."); }
-        catch (System.Runtime.InteropServices.ExternalException) { SetStatus("Clipboard is busy."); }
     }
 }

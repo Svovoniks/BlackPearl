@@ -78,7 +78,7 @@ public partial class MainWindow
         if (room is null) await PlayLocalItem(next);
         else
         {
-            StartHostedVideo(next);
+            await StartHostedVideo(next);
             if (!pictureInPicture) ShowPage("Room");
         }
     }

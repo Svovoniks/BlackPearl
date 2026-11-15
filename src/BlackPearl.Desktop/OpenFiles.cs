@@ -191,9 +191,9 @@ public partial class MainWindow
         if (!File.Exists(path)) throw new FileNotFoundException(Path.GetFileName(path) + " could not be found. It may have been moved or deleted.");
         if (room is not null)
         {
-            var host = room.Identity?.Host == true;
-            if (!Dialogs.Confirm(this, host ? "Close the watch room?" : "Leave the watch room?",
-                $"Playing {Path.GetFileName(path)} on this computer {(host ? "closes the room for your guests" : "leaves the room")}.",
+            var streaming = room.Identity?.Host == true && room.Snapshot?.Media is not null;
+            if (!Dialogs.Confirm(this, "Leave the watch room?",
+                $"Playing {Path.GetFileName(path)} on this computer leaves the room{(streaming ? " and ends your video for the others" : "")}.",
                 "Play here", "Stay in room")) return;
             await Disconnect(); RefreshSavedRooms();
         }

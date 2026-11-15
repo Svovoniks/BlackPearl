@@ -192,7 +192,7 @@ public partial class MainWindow
 
     private void RefreshQueuePill()
     {
-        if (room?.Identity?.Host == false) return; // Guests show the host's queue from the room snapshot.
+        if (room?.Identity?.Host == false) return; // Viewers show the streamer's queue from the room snapshot.
         if (ShowingEpisodeList)
         {
             var index = Array.FindIndex(listedEpisodes, item => item.Id == playingItem?.Id);
@@ -220,11 +220,11 @@ public partial class MainWindow
     private void RefreshSharedControlsChip()
     {
         var shared = SharedControls.IsChecked == true;
-        SharedControlsText.Text = shared ? "Everyone can control" : "Host controls";
+        SharedControlsText.Text = shared ? "Everyone can control" : room?.Identity?.Host == true ? "Only you control" : StreamerName + " controls";
         SharedControlsIcon.Text = shared ? "" : "";
         SharedControls.ToolTip = room?.Identity?.Host == true
-            ? shared ? "Guests can play, pause and seek. Click to keep control to yourself." : "Only you control playback. Click to let admitted guests play, pause and seek."
-            : shared ? "Everyone in the room can play, pause and seek." : "The host controls playback.";
+            ? shared ? "Everyone in the room can play, pause and seek what you play. Click to keep control to yourself." : "Only you control what you play. Click to let everyone play, pause and seek."
+            : shared ? "Everyone in the room can play, pause and seek." : StreamerName + " is playing the video and controls playback.";
     }
     private void RefreshRoomStatusDot() =>
         RoomStatusDot.Fill = room is null ? statusIdle : room.IsConnected && !room.IsPeerRecovering ? statusLive : statusWaiting;

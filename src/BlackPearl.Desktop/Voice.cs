@@ -176,11 +176,11 @@ public partial class MainWindow
         // The player covers the rooms page, so the reason appears where the button was clicked.
         if (!client.VoiceAvailable)
         {
-            // Waiting for the host: remember the click and join when they connect; a second click cancels.
+            // Still connecting: remember the click and join once the room's state arrives; a second click cancels.
             var waitable = client.Identity?.Host != true && !client.DirectControlsReady.IsCompletedSuccessfully && client.Identity?.Room is not null;
             var cancelling = waitable && voiceWaitingRoom == client.Identity!.Room;
             voiceWaitingRoom = waitable && !cancelling ? client.Identity!.Room : null;
-            VoiceToast(cancelling ? "You won't join voice when the host arrives." : VoiceUnavailableReason(client) + (waitable ? " You'll join automatically." : ""), 4);
+            VoiceToast(cancelling ? "You won't join voice once you're connected." : VoiceUnavailableReason(client) + (waitable ? " You'll join automatically." : ""), 4);
             RefreshVoice(); return;
         }
         voiceWaitingRoom = null;
@@ -318,12 +318,10 @@ public partial class MainWindow
 
     private static string VoiceUnavailableReason(RoomClient client) =>
         !client.IsConnected ? "Connect to a room to use voice chat."
+        // Who is in voice is part of the room's state, which arrives from whoever holds the streaming role.
         : client.Identity?.Host != true && !client.DirectControlsReady.IsCompletedSuccessfully ?
-            (!client.IsAdmitted ? "Voice chat opens once the host lets you in."
-            // Voice travels through the host, so it waits for them.
-            : !client.HostPresent ? "Voice chat starts when the host joins the room."
-            : client.IsPeerRecovering ? "Reconnecting to the host…" : "Connecting to the host…")
-        : "The host needs to update BlackPearl to use voice chat.";
+            (client.IsPeerRecovering ? "Reconnecting to the room…" : "Connecting to the room…")
+        : "Voice chat isn't available in this room right now.";
     private static string Names(IReadOnlyList<string> names) => names.Count switch
     {
         0 => "", 1 => names[0], 2 => names[0] + " and " + names[1],
@@ -344,7 +342,7 @@ public partial class MainWindow
 
         VoiceButton.Visibility = VoiceCard.Visibility = connected ? Visibility.Visible : Visibility.Collapsed;
         VoiceButtonText.Text = voiceJoining ? "Joining…" : inVoice ? "Leave voice" : "Voice";
-        var joiningStage = !voiceJoining ? "" : voice?.DevicesReady != true ? "Opening your microphone and speakers…" : "Waiting for the host to confirm…";
+        var joiningStage = !voiceJoining ? "" : voice?.DevicesReady != true ? "Opening your microphone and speakers…" : "Joining…";
         VoiceButtonIcon.Text = inVoice ? "" : "";
         var action = voiceJoining ? "Cancel joining voice chat" : inVoice ? "Leave voice chat" : "Join voice chat";
         // Still clickable while unavailable, so a click explains why instead of doing nothing.
@@ -397,7 +395,44 @@ public partial class MainWindow
             presence.Update(member?.Joined == true || mine && inVoice, mine && inVoice ? !microphoneOn : member?.Muted == true, mine, voiceLocallyMuted.Contains(id), inVoice, VoiceLevel(id));
         }
         ApplyVoiceGains();
+        RefreshSavedRoomVoice();
     }
+    // Voice on the Rooms page, for the room selected there. In that room it joins or leaves voice like the player's
+    // button; away from it, one click enters the room and joins voice.
+    private void RefreshSavedRoomVoice()
+    {
+        if (SavedRoomVoiceButton is null || VoiceCardStatus is null) return;
+        var saved = SavedRoomsList.SelectedItem as SavedRoom;
+        var here = ConnectedTo(saved);
+        var inVoice = here && voice is not null;
+        var joining = inVoice && voiceJoining || here && voice is null && voiceWaitingRoom is not null && voiceWaitingRoom == room!.Identity?.Room;
+        var me = here ? room!.Identity?.Peer : null;
+        var others = here ? (room!.Snapshot?.Voice ?? []).Count(member => member.Joined && member.Peer != me) : 0;
+        SavedRoomVoiceText.Text = joining ? "Joining voice…" : inVoice ? "Leave voice" : "Join voice";
+        SavedRoomVoiceButton.IsEnabled = saved is not null && (here || !roomBusy);
+        SavedRoomVoiceButton.ToolTip = here ? VoiceButton.ToolTip : saved is null ? null : "Join " + saved.Name + " with voice chat on";
+        System.Windows.Automation.AutomationProperties.SetName(SavedRoomVoiceButton, joining ? "Cancel joining voice chat" : inVoice ? "Leave voice chat" : here ? "Join voice chat" : "Join the room and voice chat");
+        SavedRoomVoiceMute.Visibility = inVoice ? Visibility.Visible : Visibility.Collapsed;
+        SavedRoomVoiceMute.Content = VoiceCardMute.Content; SavedRoomVoiceMute.ToolTip = VoiceCardMute.ToolTip;
+        System.Windows.Automation.AutomationProperties.SetName(SavedRoomVoiceMute, VoiceCardMute.ToolTip as string ?? "Mute microphone");
+        if (inVoice && (voiceMuted || !voice!.Audio.MicrophoneReady)) SavedRoomVoiceMute.Foreground = VoiceOff; else SavedRoomVoiceMute.ClearValue(ForegroundProperty);
+        // Said under the buttons while it matters: joining, in voice, a microphone problem, or others already talking.
+        var problem = inVoice ? voice!.Audio.Problem : null;
+        SavedRoomVoiceStatus.Text = !here || !(inVoice || joining || others > 0) ? "" : problem ?? VoiceCardStatus.Text;
+        SavedRoomVoiceStatus.Visibility = SavedRoomVoiceStatus.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+    private async void ToggleSavedRoomVoice(object sender, RoutedEventArgs e) => await Guard(async () =>
+    {
+        if (SavedRoomsList.SelectedItem is not SavedRoom saved) return;
+        if (ConnectedTo(saved)) { await (voice is null ? JoinVoiceAsync() : LeaveVoiceAsync()); return; }
+        if (roomBusy || !await ConnectToSavedRoom(saved) || room is not { } client) return;
+        // Who is in voice is part of the room's state, which can arrive a moment after entering: voice joins once it has.
+        var joining = Task.CompletedTask;
+        if (client.VoiceAvailable) joining = JoinVoiceAsync();
+        else if (voice is null) { voiceWaitingRoom = client.Identity?.Room; RefreshVoice(); }
+        await OpenPlayerIfPlaying(client);
+        await joining;
+    });
     private bool syncingVoiceVolume;
     // The slider in the participants panel: applied to the mixer at once, saved, and mirrored in Settings.
     private void VoiceCardVolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)

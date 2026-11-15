@@ -44,7 +44,7 @@ static class RoomPlaybackStatusFixture
         Command("guest", false);
         room.Depart("guest", 1900);
         check(Status() == "Paused by Sam", "actor name survives departure and wire snapshots");
-        check(RoomPlaybackStatus.Describe(room.Snapshot, reconnecting: true) == "Connection interrupted · Reconnecting to host…", "reconnecting explains the local playback interruption");
+        check(RoomPlaybackStatus.Describe(room.Snapshot, reconnecting: true) == "Connection interrupted · Reconnecting…", "reconnecting explains the local playback interruption");
         var legacy = room.Snapshot with { Playback = Wire.Read<PlaybackState>("{\"revision\":1,\"mediaId\":\"movie\",\"playing\":false,\"positionMs\":0,\"atUnixMs\":0}") };
         check(RoomPlaybackStatus.Describe(legacy) == "Playback paused", "older host snapshots show a safe pause fallback without invented attribution");
         check(RoomPlaybackStatus.Describe(null) is null && RoomPlaybackStatus.Describe(room.Snapshot with { Media = null }) is null,

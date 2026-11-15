@@ -13,16 +13,24 @@ public partial class MainWindow
 {
     // Starts a queue from the playing season; it appears at the end of the player's queue picker.
     private static readonly SavedQueue seasonQueueChoice = new("new-season", "+ New queue from this season", []);
+    // The player's queue: in a room it belongs to whoever is playing the video.
     private bool CanEditQueue()
     {
         if (room is not null && (!room.IsConnected || room.Identity?.Host != true))
-        { SetStatus("The host controls the queue. Rejoin the room if disconnected."); return false; }
+        { SetStatus(room.IsConnected ? StreamerName + " is playing the video and controls its queue." : "You're disconnected from the room. Rejoin it first."); return false; }
         return true;
     }
-    private bool QueueEditable => room is null || room.IsConnected && room.Identity?.Host == true;
-    // Guests change the host's queues through the host; only the host plays, renames or deletes them.
+    // This app's own saved queues: always its to change, and in a room, playing one takes over the stream.
+    private bool QueueEditable => room is null || room.IsConnected;
+    private bool CanEditSavedQueues()
+    {
+        if (!QueueEditable) { SetStatus("You're disconnected from the room. Rejoin it first."); return false; }
+        return true;
+    }
+    // Someone looking through the streamer's queues changes them through that person's app; only their owner plays,
+    // renames or deletes them.
     private bool QueueChangeable => QueueEditable || ShowingHostQueues;
-    private bool CanChangeQueue() => ShowingHostQueues || CanEditQueue();
+    private bool CanChangeQueue() => ShowingHostQueues || CanEditSavedQueues();
     private static bool QueueItemAvailable(MediaItem item) => item.Available && File.Exists(item.Path);
     // The playback tick enables Previous and Next by scanning for the nearest playable file. With a drive offline that
     // can mean hundreds of disk checks per tick, so the tick reuses answers for a few seconds; playing still checks the disk.
@@ -208,7 +216,7 @@ public partial class MainWindow
         PlayQueueFromStartButton.Visibility = canEdit && next is not null && (upNext > 0 || resume) ? Visibility.Visible : Visibility.Collapsed;
         var selectedEntry = SavedQueueItems.SelectedItem as QueueEntry;
         PlaySelectedSavedQueueButton.IsEnabled = canEdit && selectedEntry is { Media: { } selectedItem } && QueueItemAvailable(selectedItem);
-        // A guest editing the host's queues sees no play buttons: the host starts videos for the room.
+        // Someone editing the streamer's queues sees no play buttons: their owner starts videos from them.
         var guest = ShowingHostQueues;
         PlaySelectedSavedQueueButton.Visibility = !guest && hasEntries && selectedEntry is not null && selectedEntry.Index != upNext ? Visibility.Visible : Visibility.Collapsed;
         PlaySavedQueueButton.Visibility = !guest && hasEntries ? Visibility.Visible : Visibility.Collapsed;
@@ -219,7 +227,7 @@ public partial class MainWindow
         QueueMoreButton.IsEnabled = canEdit && saved is not null;
         SavedQueueFeedback.Text = guest && QueueNotice is { } notice ? notice
             : guest ? $"Changes are saved to {HostName}'s queue. To add videos, open a title in {HostName}'s library and choose Add to queue."
-            : !canEdit ? "The host controls the queue."
+            : !canEdit ? "Rejoin the room to use your queues."
             : saved?.MediaIds.Length is null or 0 ? ""
             : !playable ? "No available videos. Reconnect their drive or add videos from your library." : "";
     }
@@ -282,7 +290,7 @@ public partial class MainWindow
     }
     private void DeleteQueue(SavedQueue saved)
     {
-        if (!CanEditQueue() || !savedQueues.Remove(saved)) return;
+        if (!CanEditSavedQueues() || !savedQueues.Remove(saved)) return;
         if (activeQueueId == saved.Id) SelectNoQueue();
         SaveQueues(); RefreshQueuePickers();
         SetStatus($"Deleted {saved.Name}.");
@@ -322,9 +330,10 @@ public partial class MainWindow
     });
     private async Task PlaySavedQueueEntry(SavedQueue saved, int index)
     {
-        if (!CanEditQueue() || !savedQueues.Contains(saved) || index < 0 || index >= saved.MediaIds.Length) return;
+        if (!savedQueues.Contains(saved) || index < 0 || index >= saved.MediaIds.Length) return;
         var item = items.FirstOrDefault(x => x.Id == saved.MediaIds[index]);
         if (item is null || !QueueItemAvailable(item)) { SetStatus("This queue video is unavailable."); return; }
+        if (!await BecomeStreamer() || !CanEditQueue()) return;
         // Missing library references are omitted from the playback queue. Count
         // occurrences before the clicked row so duplicate videos keep their place.
         var playbackIndex = saved.MediaIds.Take(index).Count(id => items.Any(x => x.Id == id));
@@ -395,7 +404,7 @@ public partial class MainWindow
         var item = queue[index];
         if (!QueueItemAvailable(item)) { SetStatus("This queue video is unavailable."); return; }
         if (room is null) await PlayLocalItem(item);
-        else { StartHostedVideo(item); ShowPage("Room"); }
+        else { await StartHostedVideo(item); ShowPage("Room"); }
         queuePosition = index; selected = item;
         PublishQueue();
     }
@@ -450,13 +459,15 @@ public partial class MainWindow
         Item("Remove from queue", true, () => RemoveSavedEntry(saved, entry)).InputGestureText = "Delete";
         SavedQueueItems.ContextMenu = menu;
     }
-    private void StartQueue(SavedQueue? saved, object sender, RoutedEventArgs e)
+    private async void StartQueue(SavedQueue? saved, object sender, RoutedEventArgs e) => await Guard(async () =>
     {
-        if (saved is null || saved == seasonQueueChoice || !CanEditQueue()) return;
+        if (saved is null || saved == seasonQueueChoice) return;
         if (!ResolveQueue(saved).Any(x => x.Available && File.Exists(x.Path)))
         { UpdateSavedQueueActions(); SetStatus("This queue has no available videos."); return; }
-        SelectPlaybackQueue(saved); NextQueued(sender, e);
-    }
+        // In a room where someone else is playing, starting a queue takes over the stream.
+        if (!await BecomeStreamer() || !CanEditQueue()) return;
+        SelectPlaybackQueue(saved); await PlayQueueStep(1);
+    });
     private void ApplyQueueOrder(SavedQueue saved, int[] order)
     {
         if (ShowingHostQueues)
@@ -464,7 +475,7 @@ public partial class MainWindow
             if (QueueSource.Contains(saved) && order.Distinct().Count() == order.Length && order.All(i => i >= 0 && i < saved.MediaIds.Length)) SendQueueOrder(saved, order);
             return;
         }
-        if (!CanEditQueue() || !savedQueues.Contains(saved) || order.Distinct().Count() != order.Length || order.Any(i => i < 0 || i >= saved.MediaIds.Length)) return;
+        if (!CanEditSavedQueues() || !savedQueues.Contains(saved) || order.Distinct().Count() != order.Length || order.Any(i => i < 0 || i >= saved.MediaIds.Length)) return;
         var resolvedIndices = Enumerable.Range(0, saved.MediaIds.Length).Where(i => items.Any(x => x.Id == saved.MediaIds[i])).ToArray();
         var cursor = queuePosition >= 0 && queuePosition < resolvedIndices.Length ? resolvedIndices[queuePosition] : -1;
         var updated = saved with { MediaIds = order.Select(i => saved.MediaIds[i]).ToArray() };
@@ -568,11 +579,11 @@ public partial class MainWindow
         var insertion = QueueDropLocation(e).Index;
         MoveSavedEntry(drag.Queue, drag.Index, insertion > drag.Index ? insertion - 1 : insertion);
     }
-    // Returns how many videos were added; a guest's additions are counted once the host applies them.
+    // Returns how many videos were added; additions to someone else's queue are counted once their app applies them.
     private int AddToSavedQueue(SavedQueue saved, IEnumerable<MediaItem> source)
     {
         if (ShowingHostQueues) { var requested = source.ToArray(); SendQueueAdd(saved, requested); return 0; }
-        if (!CanEditQueue()) return 0;
+        if (!CanEditSavedQueues()) return 0;
         var added = source.Where(x => x.Available && File.Exists(x.Path)).ToArray();
         if (added.Length == 0) { SetStatus("No available videos to add."); return 0; }
         var index = savedQueues.FindIndex(x => x.Id == saved.Id);
@@ -607,7 +618,7 @@ public partial class MainWindow
             if (Dialogs.Prompt(this, "New queue", "Queue name", action: "Create and add") is { } hostQueueName) SendQueueCreate(hostQueueName, videos);
             return;
         }
-        if (!CanEditQueue()) return;
+        if (!CanEditSavedQueues()) return;
         if (!videos.Any(QueueItemAvailable)) { SetStatus("No available videos to add."); return; }
         var name = Dialogs.Prompt(this, "New queue", "Queue name", action: "Create and add"); if (name is null) return;
         var saved = new SavedQueue(Guid.NewGuid().ToString("N"), name, []); savedQueues.Add(saved); AddToSavedQueue(saved, videos);
@@ -626,7 +637,7 @@ public partial class MainWindow
     {
         if (GuestLibrary)
         {
-            // A guest can add the host's videos to the host's queues from a card.
+            // Someone looking through the streamer's library can add its videos to that person's queues from a card.
             if (!ShowingHostQueues || sender is not Button { Tag: LibraryCard guestCard } guestButton || guestCard.Level is "series" or "season") { e.Handled = true; return; }
             var guestMenu = new ContextMenu { PlacementTarget = guestButton };
             guestMenu.Items.Add(QueueMenu([guestCard.Media]));
@@ -642,7 +653,7 @@ public partial class MainWindow
         }
         var videos = LibraryCatalog.CardItems(items, card, displaySpecialsWithinSeasons, PreferredVersion(card.Media)).ToArray();
         var open = new MenuItem { Header = card.Level is "series" or "season" ? "Open" : "Details" }; open.Click += (_, _) => SelectMovie(button, new RoutedEventArgs()); menu.Items.Add(open);
-        var play = new MenuItem { Header = card.Level is "series" or "season" ? "Play all" : "Play", IsEnabled = room?.Identity?.Host != false && videos.Any(x => x.Available && File.Exists(x.Path)) };
+        var play = new MenuItem { Header = card.Level is "series" or "season" ? "Play all" : "Play", IsEnabled = videos.Any(x => x.Available && File.Exists(x.Path)) };
         play.Click += (_, _) => PlayCardVideos(videos, button);
         menu.Items.Add(play); menu.Items.Add(QueueMenu(videos));
         if (button.DataContext is LibraryCardView selectable && PosterGrid.ItemsSource == libraryCards)
