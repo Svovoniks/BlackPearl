@@ -15,24 +15,66 @@ public sealed class MediaBridge : IAsyncDisposable
     private readonly CancellationTokenSource shutdown = new();
     private int stopped;
     public Uri? Url { get; private set; }
+    private RemoteStream? stream;
     // With a cache file the video is buffered to the end of the movie; without one, in memory within a window.
     public async Task<Uri> StartAsync(IMediaSource media, StreamCache? cache = null)
     {
         source = new CachedMediaSource(media, disk: cache);
+        await Listen();
+        return Url = new Uri(app!.Urls.Single() + $"/{token}/media");
+    }
+    // A converted stream is served as a playlist of its pieces, which the player fetches one at a time.
+    public async Task<Uri> StartAsync(RemoteStream converted)
+    {
+        stream = converted;
+        await Listen();
+        return Url = new Uri(app!.Urls.Single() + $"/{token}/stream.m3u8");
+    }
+    private async Task Listen()
+    {
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(k => k.Listen(System.Net.IPAddress.Loopback, 0));
         app = builder.Build();
         app.MapMethods("/{secret}/media", ["GET", "HEAD"], Serve);
+        app.MapGet("/{secret}/stream.m3u8", ServePlaylist);
+        app.MapGet("/{secret}/piece/{index:int}.ts", ServePiece);
         await app.StartAsync();
-        Url = new Uri(app.Urls.Single() + $"/{token}/media");
-        return Url;
+    }
+    private bool Allowed(HttpContext context) => string.Equals(context.Request.RouteValues["secret"]?.ToString(), token, StringComparison.Ordinal);
+    private async Task ServePlaylist(HttpContext context)
+    {
+        if (!Allowed(context) || stream is null) { context.Response.StatusCode = 404; return; }
+        context.Response.ContentType = "application/vnd.apple.mpegurl";
+        context.Response.Headers.CacheControl = "no-store";
+        await context.Response.WriteAsync(stream.Playlist("piece/{0}.ts"), context.RequestAborted);
+    }
+    private async Task ServePiece(HttpContext context, int index)
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, shutdown.Token);
+        using var abort = shutdown.Token.Register(context.Abort);
+        if (!Allowed(context) || stream is null || index < 0 || index >= stream.Stream.Segments) { context.Response.StatusCode = 404; return; }
+        try
+        {
+            var start = Environment.TickCount64;
+            var piece = await stream.SegmentAsync(index, cancellation.Token);
+            if (PlaybackDiagnostics.Enabled && Environment.TickCount64 - start is >= 250 and var elapsedMs) PlaybackDiagnostics.Record("piece-read", new { index, bytes = piece.Length, elapsedMs });
+            context.Response.ContentType = "video/mp2t";
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.ContentLength = piece.Length;
+            await context.Response.Body.WriteAsync(piece, cancellation.Token);
+        }
+        catch (Exception ex)
+        {
+            if (ex is not OperationCanceledException) PlaybackDiagnostics.Record("piece-error", new { index, error = ex.GetType().Name });
+            context.Abort();
+        }
     }
     private async Task Serve(HttpContext context)
     {
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, shutdown.Token);
         using var abort = shutdown.Token.Register(context.Abort);
-        if (!string.Equals(context.Request.RouteValues["secret"]?.ToString(), token, StringComparison.Ordinal) || source is null)
+        if (!Allowed(context) || source is null)
         { context.Response.StatusCode = 404; return; }
         var length = source.Media.Length;
         if (!TryRange(context.Request.Headers.Range.ToString(), length, out var start, out var end))
@@ -102,16 +144,18 @@ public sealed class MediaBridge : IAsyncDisposable
     }
     // Background read-ahead past the playback position; it never delays the
     // first frames, which only wait for VLC's short network cache.
-    public void SetReadAhead(long bytes) => source?.SetReadAhead(bytes);
-    public long BufferedAheadBytes => source?.CachedAheadBytes ?? 0;
-    public bool BuffersWholeVideo => source?.Unbounded == true;
+    public void SetReadAhead(long bytes) { source?.SetReadAhead(bytes); stream?.StartReadAhead(); }
+    public long BufferedAheadBytes => source?.CachedAheadBytes ?? stream?.BufferedAheadBytes ?? 0;
+    public bool BuffersWholeVideo => source?.Unbounded == true || stream?.BuffersWholeVideo == true;
+    public bool PlaysConvertedStream => stream is not null;
     public void CancelPendingReads()
     {
-        if (Interlocked.Exchange(ref stopped, 1) == 0) { shutdown.Cancel(); source?.Stop(); }
+        if (Interlocked.Exchange(ref stopped, 1) == 0) { shutdown.Cancel(); source?.Stop(); stream?.Stop(); }
     }
     public async ValueTask DisposeAsync()
     {
         CancelPendingReads();
+        stream?.Dispose();
         var server = Interlocked.Exchange(ref app, null);
         if (server is null) return;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));

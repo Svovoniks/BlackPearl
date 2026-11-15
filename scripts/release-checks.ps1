@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 $desktopSuites = @(
     '--acquisition-layout', '--home', '--ui-findings', '--ui-experience', '--guest-library-layout', '--host-library-browse',
     '--player-layout', '--metadata-picker', '--room-playback-status', '--language-detection', '--voice-processing', '--video-frames', '--guest-recovery',
-    '--hostless-rooms', '--player-close', '--player-close-pip', '--player-close-fullscreen')
+    '--hostless-rooms', '--stream-quality', '--player-close', '--player-close-pip', '--player-close-fullscreen')
 
 function Invoke-Check {
     param([string]$Name, [string]$Command, [string[]]$Arguments)

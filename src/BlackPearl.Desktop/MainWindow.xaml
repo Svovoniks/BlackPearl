@@ -1360,6 +1360,14 @@
                <Button x:Name="LoadSubtitlesButton" Click="LoadSubtitles" Style="{StaticResource PlayerMenuButton}" AutomationProperties.Name="Load subtitles from file"><StackPanel Orientation="Horizontal"><TextBlock Text="&#xE8E5;" FontFamily="{StaticResource IconFont}" FontSize="12" Foreground="{DynamicResource PlayerAccent}" Width="24" VerticalAlignment="Center"/><TextBlock Text="Load from file…"/></StackPanel></Button>
               </StackPanel></ContentControl></local:MenuSizer>
              </local:PlayerMenuPopup>
+             <ToggleButton x:Name="QualityPill" local:PillStrip.Shown="False" Style="{StaticResource PlayerMenuPill}" ToolTip="Stream quality" AutomationProperties.Name="Stream quality"><StackPanel Orientation="Horizontal"><TextBlock x:Name="QualityPillIcon" Text="&#xE7F4;" Style="{StaticResource PlayerPillIcon}"/><TextBlock x:Name="QualityPillText" Text="Quality" Style="{StaticResource PlayerPillText}"/><TextBlock x:Name="QualityPillDetail" Style="{StaticResource PlayerPillDetail}"/><TextBlock Text="&#xE70E;" Style="{StaticResource PlayerPillChevron}"/></StackPanel></ToggleButton>
+             <local:PlayerMenuPopup x:Name="QualityMenu" Style="{StaticResource PlayerMenuPopup}" Opened="PlayerMenuOpened"><local:MenuSizer>
+              <ContentControl Style="{StaticResource PlayerMenu}" PreviewKeyDown="PlayerMenuKeyDown"><StackPanel>
+               <TextBlock Text="Stream quality" Style="{StaticResource PlayerMenuCaption}"/>
+               <ListBox x:Name="QualityChoices" Style="{StaticResource PlayerMenuList}" ItemTemplate="{StaticResource PlayerTrackRow}" SelectionChanged="QualityChanged" PreviewMouseLeftButtonUp="TrackMenuClicked" AutomationProperties.Name="Stream quality"/>
+               <TextBlock x:Name="QualityHint" Foreground="#7D7F8C" FontSize="11" TextWrapping="Wrap" MaxWidth="300" HorizontalAlignment="Left" Margin="10,6,10,4"/>
+              </StackPanel></ContentControl></local:MenuSizer>
+             </local:PlayerMenuPopup>
              <ToggleButton x:Name="QueuePill" Style="{StaticResource PlayerMenuPill}" ToolTip="Queue" AutomationProperties.Name="Queue"><StackPanel Orientation="Horizontal"><TextBlock x:Name="QueuePillIcon" Text="&#xE8FD;" Style="{StaticResource PlayerPillIcon}"/><TextBlock x:Name="QueuePillText" Text="Queue" Style="{StaticResource PlayerPillText}"/><TextBlock x:Name="QueuePillDetail" Style="{StaticResource PlayerPillDetail}" Typography.NumeralAlignment="Tabular"/><TextBlock Text="&#xE70E;" Style="{StaticResource PlayerPillChevron}"/></StackPanel></ToggleButton>
              <local:PlayerMenuPopup x:Name="PlayerQueueMenu" Style="{StaticResource PlayerMenuPopup}" Opened="PlayerMenuOpened"><local:MenuSizer>
               <ContentControl Style="{StaticResource PlayerMenu}" Width="380" PreviewKeyDown="PlayerMenuKeyDown"><StackPanel Margin="6,2,6,2">

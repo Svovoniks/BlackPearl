@@ -41,6 +41,7 @@ public partial class MainWindow
         PlayerBottomChrome.SizeChanged += (_, _) => PlaceUpNextCard();
         PlayerOverlay.SizeChanged += (_, _) => RefreshPlayerCorners();
         InitializeSubtitleLift();
+        InitializeStreamQuality();
         PlayerPills.Overflow = OverflowPill;
         PlayerPills.FoldedChanged += (_, _) => RefreshOverflowMenu();
         // The player's controls and menus sit in LibVLC's overlay window, outside the player page that maps the app palette, and
@@ -50,7 +51,7 @@ public partial class MainWindow
         PlayerUpdateHost.Resources.MergedDictionaries.Add(Application.Current.Resources);
         VolumeFlyout.PlacementTarget = MuteButton;
         MuteButton.GotKeyboardFocus += (_, _) => { if (InputManager.Current.MostRecentInputDevice is KeyboardDevice) ShowVolumeFlyout(); };
-        foreach (var (pill, menu) in new[] { (AudioPill, AudioMenu), (SubtitlePill, SubtitleMenu), (QueuePill, PlayerQueueMenu), (ParticipantsPill, ParticipantsMenu), (OverflowPill, OverflowMenu) })
+        foreach (var (pill, menu) in new[] { (AudioPill, AudioMenu), (SubtitlePill, SubtitleMenu), (QualityPill, QualityMenu), (QueuePill, PlayerQueueMenu), (ParticipantsPill, ParticipantsMenu), (OverflowPill, OverflowMenu) })
         {
             menu.PlacementTarget = pill;
             // A folded pill's menu opens from the overflow pill, so a click there only closes it.
@@ -86,7 +87,7 @@ public partial class MainWindow
     private void OpenPillUnderPointer(System.Windows.Controls.Primitives.ToggleButton closing)
     {
         if (Mouse.LeftButton != MouseButtonState.Pressed) return;
-        var pill = new[] { AudioPill, SubtitlePill, QueuePill, ParticipantsPill, OverflowPill }.FirstOrDefault(candidate =>
+        var pill = new[] { AudioPill, SubtitlePill, QualityPill, QueuePill, ParticipantsPill, OverflowPill }.FirstOrDefault(candidate =>
             candidate != closing && candidate.IsVisible && candidate.IsEnabled && new Rect(candidate.RenderSize).Contains(Mouse.GetPosition(candidate)));
         if (pill is null) return;
         pillReleaseWatch?.Stop();
@@ -314,9 +315,9 @@ public partial class MainWindow
         var density = width >= 900 ? 6 : width >= 640 ? 5 : width >= 580 ? 4 : width >= 540 ? 3 : width >= 520 ? 2 : width >= 440 ? 1 : 0;
         if (density == controlsDensity) return;
         controlsDensity = density;
-        foreach (var detail in new[] { AudioPillDetail, SubtitlePillDetail, QueuePillDetail, ParticipantsPillDetail })
+        foreach (var detail in new[] { AudioPillDetail, SubtitlePillDetail, QualityPillDetail, QueuePillDetail, ParticipantsPillDetail })
         { detail.MaxWidth = width >= 900 ? 96 : 0; detail.Margin = new Thickness(width >= 900 ? 6 : 0, 0, 0, 0); }
-        foreach (var text in new[] { AudioPillText, SubtitlePillText, QueuePillText, ParticipantsPillText }) text.MaxWidth = width >= 640 ? 130 : 72;
+        foreach (var text in new[] { AudioPillText, SubtitlePillText, QualityPillText, QueuePillText, ParticipantsPillText }) text.MaxWidth = width >= 640 ? 130 : 72;
         LoopButton.Visibility = width >= 580 ? Visibility.Visible : Visibility.Collapsed;
         StopButton.Visibility = width >= 540 ? Visibility.Visible : Visibility.Collapsed;
         PictureInPictureButton.Visibility = width >= 520 ? Visibility.Visible : Visibility.Collapsed;
@@ -326,6 +327,7 @@ public partial class MainWindow
 
     private (System.Windows.Controls.Primitives.ToggleButton Pill, PlayerMenuPopup Menu, TextBlock Icon, TextBlock Text, TextBlock Detail)[] PillMenus =>
         [(AudioPill, AudioMenu, AudioPillIcon, AudioPillText, AudioPillDetail), (SubtitlePill, SubtitleMenu, SubtitlePillIcon, SubtitlePillText, SubtitlePillDetail),
+         (QualityPill, QualityMenu, QualityPillIcon, QualityPillText, QualityPillDetail),
          (QueuePill, PlayerQueueMenu, QueuePillIcon, QueuePillText, QueuePillDetail), (ParticipantsPill, ParticipantsMenu, ParticipantsPillIcon, ParticipantsPillText, ParticipantsPillDetail)];
 
     // The … menu lists the folded pills, each opening its own menu from the … pill, then any bar buttons hidden for width.

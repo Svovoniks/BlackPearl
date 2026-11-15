@@ -1374,7 +1374,9 @@ public partial class MainWindow : Window
                 SharedControls.IsEnabled = room.Identity?.Host == true; SharedControls.IsChecked = snapshot.SharedControls; RefreshSharedControlsChip();
                 if (room.Identity?.Host != true && !snapshot.SharedControls) { playbackPause.Clear(); playbackIntent.Clear(); }
                 if (snapshot.Playback is not null) AcceptState(snapshot.Playback);
-                if (snapshot.Media is not null && snapshot.Media.Id != loadedMedia) { streamEndTimer.Stop(); await LoadRoomMedia(snapshot.Media); }
+                // The same video offered as another stream, or as the file again, is opened anew; playback continues from the room's position.
+                if (snapshot.Media is not null && (snapshot.Media.Id != loadedMedia || room.Identity?.Host != true && (snapshot.Stream?.MediaId == snapshot.Media.Id ? snapshot.Stream.Id : null) != loadedStream))
+                { streamEndTimer.Stop(); await LoadRoomMedia(snapshot.Media); }
                 else if (snapshot.Media is null) RoomVideoEnded();
                 if (ready) RefreshTracks();
                 UpdateSessionControls();
@@ -1505,6 +1507,9 @@ public partial class MainWindow : Window
         PlaybackDiagnostics.Record("media-load-start", new { media.Extension, bytes = media.Length });
         var client = room; if (client is null) return;
         var generation = ++loadGeneration; loadedMedia = media.Id;
+        // Whoever plays the video plays its file; everyone else plays the converted stream when one is offered.
+        var converted = client.Identity?.Host != true && client.Snapshot?.Stream is { } offered && offered.MediaId == media.Id ? offered : null;
+        loadedStream = converted?.Id;
         ResetRoomTracks();
         mediaLoadCancellation?.Cancel();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -1522,7 +1527,14 @@ public partial class MainWindow : Window
             var source = await client.GetSourceAsync(media, cancellation.Token);
             if (client != room || generation != loadGeneration) return;
             Uri? streamUri = null;
-            if (source is not ILocalMediaSource)
+            if (source is not ILocalMediaSource && converted is not null)
+            {
+                CloseStreamCache();
+                var remote = new RemoteStream(converted, (resource, offset, count, token) => client.ReadStreamAsync(converted, resource, offset, count, token),
+                    SegmentStore.TryCreate(StreamCacheDirectory, converted.Segments));
+                bridge = new(); streamUri = await bridge.StartAsync(remote);
+            }
+            else if (source is not ILocalMediaSource)
             {
                 bridge = new(); streamUri = await bridge.StartAsync(source, StreamCacheFor(media));
             }
@@ -1536,12 +1548,12 @@ public partial class MainWindow : Window
             // as read-ahead after playback starts and never gates readiness.
             var networkCacheMs = MediaStreaming.NetworkCacheForRtt(client.RecentRttMs);
             if (streamUri is not null) { vlcMedia.AddOption($":network-caching={networkCacheMs}"); readAheadMediaBytes = media.Length; }
-            if (PlaybackDiagnostics.Enabled) PlaybackDiagnostics.Record("media-input", new { local = source is ILocalMediaSource, media.Extension,
+            if (PlaybackDiagnostics.Enabled) PlaybackDiagnostics.Record("media-input", new { local = source is ILocalMediaSource, media.Extension, converted = converted?.Quality,
                 networkCacheMs = streamUri is not null ? networkCacheMs : (int?)null, diskCache = streamUri is not null ? bridge?.BuffersWholeVideo : null });
             // VLC's AVI demuxer reads slow-seekable HTTP inputs in 1.5-second
             // steps, exposing read-ahead time to the synchronization controller.
             // The avformat demuxer provides a regularly advancing timeline.
-            if (media.Extension.Equals(".avi", StringComparison.OrdinalIgnoreCase)) vlcMedia.AddOption(":demux=avformat");
+            if (converted is null && media.Extension.Equals(".avi", StringComparison.OrdinalIgnoreCase)) vlcMedia.AddOption(":demux=avformat");
             vlcMedia.AddOption(":sub-autodetect-file=0");
             if (client != room || generation != loadGeneration) return;
             RoomHeading.Text = client.Snapshot?.Name ?? media.Title; RoomSubtitle.Text = media.Title + " · " + StreamCaption(client);
@@ -2027,6 +2039,7 @@ public partial class MainWindow : Window
         pendingSeek = null; seeking = false; playbackPause.Clear(); playbackIntent.Clear(); appliedGeneration = readyGeneration = -1; ++loadGeneration; var old = room; room = null; target = null; loadedMedia = null; ready = false;
         mediaLoadCancellation?.Cancel();
         bridge?.CancelPendingReads();
+        StopConversion();
         ResetRoomTracks();
         var disconnect = old is null ? Task.CompletedTask : Task.Run(async () => await old.DisposeAsync());
         playingItem = null;
@@ -2083,6 +2096,7 @@ public partial class MainWindow : Window
         var canControl = room is null || connectedRoom && !room!.IsPeerRecovering && (room.Identity?.Host == true || room.Snapshot?.SharedControls == true);
         InviteButton.Visibility = connectedRoom ? Visibility.Visible : Visibility.Collapsed;
         PillStrip.SetShown(ParticipantsPill, connectedRoom);
+        RefreshStreamQuality();
         RefreshLeaveButton();
         PlayButton.IsEnabled = StopButton.IsEnabled = canControl && (ready || playingItem is not null && player?.State is VLCState.Stopped or VLCState.Ended);
         Timeline.IsEnabled = canControl && player?.Length > 0;
@@ -2203,7 +2217,7 @@ public partial class MainWindow : Window
         // Arrow keys select tracks as they move; Enter confirms. The queue list handles Enter itself.
         var trackConfirmed = e.Key == Key.Enter && e.OriginalSource is ListBoxItem && !PlayerQueueMenu.IsOpen;
         if (e.Key != Key.Escape && !trackConfirmed) return;
-        var pill = OverflowMenu.IsOpen ? OverflowPill : ParticipantsMenu.IsOpen ? ParticipantsPill : AudioMenu.IsOpen ? AudioPill : SubtitleMenu.IsOpen ? SubtitlePill : QueuePill;
+        var pill = OverflowMenu.IsOpen ? OverflowPill : ParticipantsMenu.IsOpen ? ParticipantsPill : AudioMenu.IsOpen ? AudioPill : SubtitleMenu.IsOpen ? SubtitlePill : QualityMenu.IsOpen ? QualityPill : QueuePill;
         ClosePlayerMenus(); (pill.IsVisible ? pill : OverflowPill).Focus(); e.Handled = true;
     }
     private void TrackMenuClicked(object sender, MouseButtonEventArgs e)

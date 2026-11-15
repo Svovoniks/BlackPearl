@@ -89,6 +89,10 @@ public sealed partial class RoomClient : IAsyncDisposable
     // Why the room service ended this connection for good: removed from the room, or entered from another window.
     public string? ClosedReason { get; private set; }
     public IMediaSource? HostedMedia { get; set; }
+    // The converted copy of the hosted video that viewers are offered instead of the file, if any.
+    public StreamConverter? HostedStream { get; set; }
+    // The file behind a subtitle shared with the room, for drawing it into a converted stream.
+    public string? HostedAssetPath(string id) => (assets.GetValueOrDefault(id) as ILocalMediaSource)?.LocalPath;
     public void ShareSubtitle(string path)
     {
         if (!IsConnected || Identity?.Host != true || Snapshot?.Media is not { } media) throw new IOException("Only whoever is streaming can load room subtitles.");
@@ -261,7 +265,7 @@ public sealed partial class RoomClient : IAsyncDisposable
             QueueDiscovery(message.Type == "room-name" ? new("rename", Text: message.Text) : message);
             return;
         }
-        if (message.Type is "tracks" or "catalog-follow" or "catalog-pointer" or "catalog-artwork" or "catalog-watch" or "catalog-view" or "catalog-browse" or "catalog-release" or "catalog-renew" or "catalog-permission" or "media" or "controls" or "last-session" or "session-artwork" or "artwork-ack" or "queue" or "playback" or "ready" or "buffering")
+        if (message.Type is "tracks" or "catalog-follow" or "catalog-pointer" or "catalog-artwork" or "catalog-watch" or "catalog-view" or "catalog-browse" or "catalog-release" or "catalog-renew" or "catalog-permission" or "media" or "stream" or "controls" or "last-session" or "session-artwork" or "artwork-ack" or "queue" or "playback" or "ready" or "buffering")
         {
             if (Identity?.Host != true && !directConnected.Task.IsCompletedSuccessfully)
                 throw new IOException("Still connecting to whoever is streaming. Try again in a moment.");
@@ -909,7 +913,8 @@ public sealed partial class RoomClient : IAsyncDisposable
         PlaybackDiagnostics.Record("peer-created", new { room = diagnosticId, transport = peer.DiagnosticId, offer });
         // Only whoever is streaming serves its video, and only to people in the room.
         peer.ResolveMedia = media => Identity?.Host == true && negotiated.ContainsKey(id) && roster.Any(p => p.Id == id)
-            ? HostedMedia?.Media.Id == media ? HostedMedia : assets.GetValueOrDefault(media) : null;
+            ? media.StartsWith("stream/", StringComparison.Ordinal) ? HostedStream?.Resolve(media)
+            : HostedMedia?.Media.Id == media ? HostedMedia : assets.GetValueOrDefault(media) : null;
         peer.Signal += (type, data) => TryQueueDiscovery(new("signal", Target: id, Text: type, Data: data, Number: generation));
         // With a connection to everyone, only the streamer's says how the video arrives.
         peer.Status += text => { if (Identity?.Host == true || id == hostPeer) Status?.Invoke(text); };
@@ -996,6 +1001,39 @@ public sealed partial class RoomClient : IAsyncDisposable
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && !lifetime.IsCancellationRequested)
         { throw new IOException("The connection to whoever is playing the video did not recover within 45 seconds.", ex); }
+    }
+    // Reads part of the room's converted stream from whoever converts it. A piece that is not converted yet is asked
+    // for again until it is, or until the caller gives up.
+    public async Task<byte[]> ReadStreamAsync(RoomStream stream, string resource, long offset, int count, CancellationToken ct)
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.Token);
+        PeerTransport? failed = null;
+        var interruptedAt = 0L;
+        while (true)
+        {
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (Snapshot?.Stream?.Id != stream.Id) throw new IOException("This stream is no longer playing in the room.");
+            var hostId = hostPeer;
+            if (hostId is null || !directConnected.Task.IsCompletedSuccessfully || !peers.TryGetValue(hostId, out var peer) || peer == failed || !negotiated.ContainsKey(hostId))
+            {
+                if (interruptedAt == 0) interruptedAt = Environment.TickCount64;
+                if (Environment.TickCount64 - interruptedAt > 45000) throw new IOException("The connection to whoever is playing the video did not recover within 45 seconds.");
+                await Task.Delay(50, cancellation.Token); continue;
+            }
+            interruptedAt = 0;
+            try
+            {
+                await peer.Ready.WaitAsync(cancellation.Token);
+                return await peer.ReadAsync(resource, offset, count, cancellation.Token);
+            }
+            catch (PeerBusyException) when (!cancellation.IsCancellationRequested) { await Task.Delay(100, cancellation.Token); }
+            catch (Exception ex) when (!cancellation.IsCancellationRequested && (peer.IsInterrupted || ex is TimeoutException))
+            {
+                PlaybackDiagnostics.Record("media-range-retry", new { room = diagnosticId, transport = peer.DiagnosticId, error = ex.GetType().Name });
+                failed = peer;
+                Post(new("closed", hostId, Transport: peer));
+            }
+        }
     }
     private static string DiagnosticReason(string reason)
     {

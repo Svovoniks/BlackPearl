@@ -278,6 +278,27 @@ static class PlayerLayoutChecks
         Check(pills.Folded.Contains(participantsPill) && participantsMenu.PlacementTarget == overflowPill &&
             overflowItems.Children.OfType<Button>().Any(row => System.Windows.Automation.AutomationProperties.GetName(row) == "Participants"),
             "a narrow bar folds the participants pill into the … menu");
+        // A room's video adds the stream quality pill the same way.
+        var qualityPill = (System.Windows.Controls.Primitives.ToggleButton)window.FindName("QualityPill");
+        var qualityMenu = (System.Windows.Controls.Primitives.Popup)window.FindName("QualityMenu");
+        Settle(1280, 810);
+        Check(qualityPill.Visibility == Visibility.Collapsed && !pills.Folded.Contains(qualityPill), "outside a room the bar has no stream quality pill");
+        PillStrip.SetShown(qualityPill, true); Settle(1280, 810);
+        Check(qualityPill.Visibility == Visibility.Visible && InBar(qualityPill) && InBar(participantsPill) && qualityMenu.PlacementTarget == qualityPill && pills.Folded.Count == 0,
+            "with a room's video the stream quality pill sits in the bar beside the others");
+        Save(bar, "player-bar-quality.png");
+        foreach (var width in new[] { 700, 560, 400 })
+        {
+            Settle(width, 360);
+            var visible = new[] { qualityPill, participantsPill, (FrameworkElement)window.FindName("AudioPill"), (FrameworkElement)window.FindName("SubtitlePill"), (FrameworkElement)window.FindName("QueuePill"), overflowPill }
+                .Where(element => element.Visibility == Visibility.Visible).ToList();
+            Check(visible.All(InBar), $"every pill shown with the stream quality pill fits a {width}px bar");
+        }
+        Check(pills.Folded.Contains(qualityPill) && qualityMenu.PlacementTarget == overflowPill &&
+            overflowItems.Children.OfType<Button>().Any(row => System.Windows.Automation.AutomationProperties.GetName(row) == "Stream quality"),
+            "a narrow bar folds the stream quality pill into the … menu");
+        Save(bar, "player-bar-quality-narrow.png");
+        PillStrip.SetShown(qualityPill, false);
         PillStrip.SetShown(participantsPill, false); Settle(900, 600);
         var invite = (Button)window.FindName("InviteButton"); invite.Visibility = Visibility.Visible;
         Layout(900, 600);

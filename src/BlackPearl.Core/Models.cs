@@ -71,6 +71,10 @@ public record PlaybackReadiness(string MediaId, long Generation);
 public record SharedTrack(int Index, string? AssetId = null);
 public record RoomTracks(string MediaId, SharedTrack? Audio = null, SharedTrack? Subtitles = null, long Revision = 0);
 public record SubtitleAttachment(string MediaId, SharedMedia Subtitle);
+// A copy of the room's video converted while it plays, which viewers play instead of the file itself: H.264 at Height
+// and about VideoKbps, the room's audio track, its subtitles drawn into the picture. It arrives in pieces of SegmentMs;
+// piece k holds the video from k * SegmentMs. A new Id replaces the stream, as when the quality or a track changes.
+public record RoomStream(string Id, string MediaId, string Quality, int Height, int VideoKbps, long DurationMs, int SegmentMs, int Segments);
 public record WireMessage(string Type, string? Target = null, string? Sender = null,
     string? Text = null, string? Data = null, long Number = 0);
 // The first message a client sends the room service. Room is the invitation's code, or null to create a room. Key is
@@ -89,7 +93,10 @@ public record RoomSnapshot(Participant[] People, SharedMedia? Media, PlaybackSta
     // From the room service: counts each change of the streaming role, so state from an earlier streamer is ignored.
     long Epoch = 0,
     // From the room service, for the room's creator: the people it removed, who can't come back until let in again.
-    AdmittedGuest[]? Removed = null);
+    AdmittedGuest[]? Removed = null,
+    // Null while the room's video is streamed as the file it is. Apps from before converted streams ignore it and
+    // play the file.
+    RoomStream? Stream = null);
 // What the room service tells someone holding a room's invitation before they enter.
 public record RoomPresenceInfo(string? Name, string[] People);
 public static class RoomProtocol
