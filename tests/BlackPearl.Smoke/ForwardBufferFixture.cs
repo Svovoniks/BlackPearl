@@ -35,7 +35,7 @@ static class ForwardBufferFixture
         using var media = new Media(vlc, url);
         // Start from the short RTT cache; the bridge holds the ten-second buffer.
         media.AddOption($":network-caching={MediaStreaming.NetworkCacheForRtt(50)}");
-        bridge.SetReadAhead(StreamingBufferOptions.ReadAheadBytes(10, source.Media.Length, seconds * 1000L));
+        bridge.SetReadAhead(StreamingBufferOptions.ReadAheadBytes(source.Media.Length, seconds * 1000L, 10));
         async Task Wait(Func<bool> condition)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));

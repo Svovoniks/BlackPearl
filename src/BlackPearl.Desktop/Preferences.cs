@@ -44,7 +44,6 @@ public partial class MainWindow
     private string SavedServerAddress => library.Setting("server") is { Length: > 0 } saved && !RetiredServerAddresses.Contains(saved) ? saved : DefaultServerAddress;
     private string SavedDisplayName => library.Setting("name") ?? Environment.UserName;
     private bool SavedAutoArtwork => library.Setting("artwork") != "false";
-    private int SavedStreamingBufferSeconds => StreamingBufferOptions.Load(library);
 
     // Listing every culture takes tens of milliseconds, so it runs in the background while the window is built.
     private static readonly Task<(LocaleChoice[] Languages, LocaleChoice[] Countries)> localeChoices = Task.Run(() =>
@@ -69,7 +68,7 @@ public partial class MainWindow
         MetadataProviders.ItemsSource = providerChoices;
         SubtitleLanguageRules.ItemsSource = subtitleRuleDrafts;
         LoadPreferences();
-        foreach (var box in new[] { DisplayNameBox, ServerBox, MetadataRefreshDays, StreamingBufferSeconds }) box.TextChanged += PreferencesChanged;
+        foreach (var box in new[] { DisplayNameBox, ServerBox, MetadataRefreshDays }) box.TextChanged += PreferencesChanged;
         PreferredAudioLanguages.TextChanged += PreferencesChanged;
         PreferredSubtitleLanguages.TextChanged += PreferencesChanged;
         foreach (var box in new[] { AutoArtwork, ImportMissing, ImportUpcoming, SaveNfo, DisplaySpecials, GroupShows, NeverRefresh })
@@ -97,7 +96,6 @@ public partial class MainWindow
         {
             DisplayNameBox.Text = SavedDisplayName; ServerBox.Text = SavedServerAddress;
             AutoArtwork.IsChecked = SavedAutoArtwork;
-            StreamingBufferSeconds.Text = SavedStreamingBufferSeconds.ToString(CultureInfo.InvariantCulture);
             MetadataToken.Password = savedMetadataToken;
             LoadTrackPreferences();
             LoadVoicePreferenceControls();
@@ -130,7 +128,7 @@ public partial class MainWindow
     }
     private string PreferenceSnapshot() => Wire.Serialize(new
     {
-        bufferSeconds = StreamingBufferSeconds.Text, audio = PreferredAudioLanguages.Text, subtitles = PreferredSubtitleLanguages.Text,
+        audio = PreferredAudioLanguages.Text, subtitles = PreferredSubtitleLanguages.Text,
         subtitleRules = subtitleRuleDrafts.Select(rule => new { rule.AudioLanguage, rule.SubtitleLanguages }).ToArray(),
         name = DisplayNameBox.Text, server = ServerBox.Text, artwork = AutoArtwork.IsChecked,
         providers = providerChoices.Select(p => new { p.Id, p.Enabled }).ToArray(), language = MetadataLanguage.SelectedValue,
@@ -144,18 +142,11 @@ public partial class MainWindow
         MetadataRefreshDays.IsEnabled = RefreshLess.IsEnabled = RefreshMore.IsEnabled = NeverRefresh.IsChecked != true;
         ClearPreferenceErrors();
         ValidateRefreshDays();
-        ValidateStreamingBuffer();
         // Switches, pickers and buttons apply at once; typed text and slider moves apply after a pause.
         preferencesAutoSave.Stop();
         if (sender is ButtonBase or Selector) ApplyPreferences(); else if (HasUnsavedPreferences) preferencesAutoSave.Start();
         // The microphone test follows the chosen microphone and processing before they are saved.
         if (sender == VoiceInputPicker || sender == VoiceProcessingPicker) _ = Guard(RestartVoiceTest);
-    }
-    private bool ValidateStreamingBuffer()
-    {
-        var valid = StreamingBufferOptions.TryParse(StreamingBufferSeconds.Text, out _);
-        StreamingBufferError.Text = valid ? "" : "Enter a whole number from 2 to 60 seconds.";
-        return valid;
     }
     private bool ValidateRefreshDays()
     {
@@ -220,7 +211,7 @@ public partial class MainWindow
     }
     private void ClearPreferenceErrors()
     {
-        DisplayNameError.Text = ServerError.Text = RefreshDaysError.Text = LocaleError.Text = TrackPreferencesError.Text = StreamingBufferError.Text = "";
+        DisplayNameError.Text = ServerError.Text = RefreshDaysError.Text = LocaleError.Text = TrackPreferencesError.Text = "";
         MetadataKeyStatus.Text = "";
     }
     private bool TrySavePreferences() => SavePreferences(reveal: true);
@@ -241,12 +232,9 @@ public partial class MainWindow
         { LocaleError.Text = "Choose a language and country."; ShowPreferenceSection("Metadata"); Focus(MetadataLanguage); return false; }
         if (!TryReadTrackPreferences(out var audio, out var subtitles, out var subtitleRules))
         { ShowPreferenceSection("Playback"); Focus(PreferredAudioLanguages); return false; }
-        if (!ValidateStreamingBuffer())
-        { ShowPreferenceSection("Playback"); Focus(StreamingBufferSeconds); return false; }
         if (!SaveMetadataToken())
         { ShowPreferenceSection("Metadata"); Focus(MetadataToken); return false; }
         PersistTrackPreferences(audio, subtitles, subtitleRules);
-        library.Setting(StreamingBufferOptions.SettingKey, int.Parse(StreamingBufferSeconds.Text, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture));
         var days = NeverRefresh.IsChecked == true ? 0 : int.Parse(MetadataRefreshDays.Text, CultureInfo.InvariantCulture);
         var before = MetadataOptions.Load(library);
         new MetadataOptions(providerChoices.Where(p => p.Enabled).Select(p => p.Id).ToArray(), language, country, days,

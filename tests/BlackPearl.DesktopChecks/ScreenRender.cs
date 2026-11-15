@@ -26,7 +26,7 @@ static class ScreenRender
         protected override Size ArrangeOverride(Size finalSize) { ring.Arrange(new Rect(AdornedElement.RenderSize)); return finalSize; }
     }
 
-    public static async Task Run(MainWindow window, string output, int width, int height)
+    public static async Task Run(MainWindow window, string output, int width, int height, bool settingsOnly = false)
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         object? Field(string name) => typeof(MainWindow).GetField(name, flags)!.GetValue(window);
@@ -284,6 +284,25 @@ static class ScreenRender
             }
             adorners.Remove(ring);
         }
+        // Each Settings section, and the end of the ones longer than the window: Playback's Streaming buffer card is below
+        // its first screen.
+        async Task CaptureSettings(string theme, bool everyEnd)
+        {
+            Call("ShowPage", "Settings");
+            foreach (var section in new[] { "Plugins", "Downloads", "Profile", "Metadata", "Playback", "Appearance", "Updates" })
+            {
+                Call("ShowPreferenceSection", section); await Capture($"{theme}-settings-{section.ToLowerInvariant()}");
+                var pane = Descendants((DependencyObject)window.Content).OfType<ScrollViewer>().FirstOrDefault(x => x.IsVisible && x.Tag as string == section && x.ScrollableHeight > 0);
+                if (pane is null || !everyEnd && section != "Playback") continue;
+                pane.ScrollToEnd(); await Capture($"{theme}-settings-{section.ToLowerInvariant()}-end", 600); pane.ScrollToHome();
+            }
+        }
+        // --settings draws only the Settings sections, in both themes.
+        if (settingsOnly)
+        {
+            foreach (var theme in new[] { "dark", "light" }) { Set("light", theme == "light"); Call("ApplyTheme"); await CaptureSettings(theme, everyEnd: true); }
+            return;
+        }
         foreach (var theme in new[] { "dark", "light" })
         {
             Set("light", theme == "light"); Call("ApplyTheme");
@@ -335,9 +354,7 @@ static class ScreenRender
             if (wanted.FirstOrDefault(x => x.IsMovie) is { } wantedFilm && store.Get(wantedFilm.Id) is { } placeholder) { Call("Select", placeholder); await Capture($"{theme}-wanted-film"); }
             Call("NavigateLibrary", 0, null, null, null); Call("OpenSearch", false); await Capture($"{theme}-search");
             foreach (var page in new[] { "Queues", "Rooms", "Folders", "Room" }) { Call("ShowPage", page); await Capture($"{theme}-{page.ToLowerInvariant()}"); }
-            Call("ShowPage", "Settings");
-            foreach (var section in new[] { "Plugins", "Downloads", "Profile", "Metadata", "Playback", "Appearance", "Updates" })
-            { Call("ShowPreferenceSection", section); await Capture($"{theme}-settings-{section.ToLowerInvariant()}"); }
+            await CaptureSettings(theme, everyEnd: false);
             await CaptureDialogs(store, wanted, movie);
         }
         // Surfaces outside the main window (the player's overlay, its menus, dropdowns and dialogs), audited and saved in both

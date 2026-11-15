@@ -1,28 +1,25 @@
 namespace BlackPearl.Core;
 
-// Continue only playback that was already running. Recovery never starts a
-// paused video, and expiration stays latched until the peer reconnects.
+// Continue only playback that was already running, for as long as buffered video
+// lasts. Recovery never starts a paused video, and a pause stays latched until the
+// peer reconnects.
 public sealed class PlaybackRecovery
 {
-    private long? started;
-    private int graceMs;
-    private bool held;
+    private bool started, held;
 
-    public bool Begin(bool playing, int bufferSeconds, long monotonicMs)
+    public bool Begin(bool playing)
     {
-        if (started is not null) return held;
-        started = monotonicMs;
-        graceMs = StreamingBufferOptions.CacheMs(bufferSeconds);
-        held = !playing;
+        if (started) return held;
+        started = true; held = !playing;
         return held;
     }
 
-    public bool ShouldPause(bool playbackAllowed, bool starved, long monotonicMs)
+    public bool ShouldPause(bool playbackAllowed, bool starved)
     {
-        if (started is not { } since) return false;
-        held |= !playbackAllowed || starved || monotonicMs - since >= graceMs;
+        if (!started) return false;
+        held |= !playbackAllowed || starved;
         return held;
     }
 
-    public void Clear() { started = null; held = false; }
+    public void Clear() => started = held = false;
 }

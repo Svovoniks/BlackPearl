@@ -58,7 +58,8 @@ show on screen. Before you report a UI change as done:
 
 - Render the affected screens and look at them, zoomed in where detail matters.
   `tests/BlackPearl.DesktopChecks` renders the main screens with
-  `-- --render-screens <output folder> <width> <height> [--scale 1.25]`. Point
+  `-- --render-screens <output folder> <width> <height> [--scale 1.25]`
+  (`--settings` draws only the Settings sections). Point
   `BLACKPEARL_DATA` at a copy from `scripts/scratch-library.ps1`, which has the
   user's real posters and titles. Fixtures without artwork hid a header stretched
   thousands of pixels tall and an empty band under every Home row. Look at its

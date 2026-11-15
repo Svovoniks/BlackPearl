@@ -413,6 +413,7 @@ if (args.FirstOrDefault() == "--read-ahead")
     await ReadAheadFixture.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); });
     return;
 }
+if (args.FirstOrDefault() == "--buffer-run") { await BufferRunFixture.Run(args); return; }
 if (args.FirstOrDefault() == "--forward-buffer")
 {
     await ForwardBufferFixture.Run(args[1], (condition, name) =>

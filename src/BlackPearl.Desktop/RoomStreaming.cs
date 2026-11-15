@@ -103,6 +103,7 @@ public partial class MainWindow
             oldBridge?.CancelPendingReads();
             await Task.WhenAll(StopNativePlayback(), oldBridge is null ? Task.CompletedTask : oldBridge.DisposeAsync().AsTask());
             if (room != client || client.Snapshot?.Media is not null) return;
+            CloseStreamCache();
             ResetRoomTracks();
             if (pictureInPicture) SetPictureInPicture(false, openPlayer: false);
             SetAudioPlayback(false);

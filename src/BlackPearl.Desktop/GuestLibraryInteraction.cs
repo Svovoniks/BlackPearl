@@ -206,7 +206,7 @@ public partial class MainWindow
         if (room?.IsConnected != true || Environment.TickCount64 < fullArtworkDeclinedUntil || !artworkBandwidth.AllowsFullHd()) return false;
         if (bridge is not { } stream || target?.WantsPlayback != true) return true;
         if (room.Snapshot?.Media is not { } media || player is not { Length: > 0 } native) return false;
-        var wanted = StreamingBufferOptions.ReadAheadBytes(activeStreamingBufferSeconds, media.Length, native.Length);
+        var wanted = StreamingBufferOptions.ReadAheadBytes(media.Length, native.Length);
         return stream.BufferedAheadBytes >= wanted / 2;
     }
     private void AcknowledgeArtwork(long number)

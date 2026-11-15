@@ -1,13 +1,19 @@
 namespace BlackPearl.Core;
 
-// A per-movie LRU cache reuses nearby seeks without retaining the entire movie.
-// Shared reads are canceled only after their last HTTP consumer leaves.
-// Optional read-ahead fills the cache past the playback position in the
-// background, so starting playback never waits for the configured buffer.
-internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes = 16 * 1024 * 1024) : IMediaSource
+// Everything fetched for a movie is kept so nearby seeks and the buffer ahead are reused.
+// With a disk cache the video is kept in its temporary file and read-ahead runs to the end
+// of the movie; without one, a memory cache holds a bounded window past the playback
+// position. Shared reads are canceled only after their last HTTP consumer leaves.
+// Read-ahead fills the cache in the background, so starting playback never waits for it.
+internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes = 16 * 1024 * 1024, StreamCache? disk = null) : IMediaSource
 {
-    private const int PrefetchReads = 4;
+    // Half of a peer's request window, so read-ahead takes what the connection gives. It
+    // starts no read while the player is itself waiting for video, which keeps the whole
+    // connection for the frames needed next.
+    private const int PrefetchReads = MediaStreaming.Window / 2;
     private const long JumpSlackBytes = 2L * 1024 * 1024;
+    // A seek makes several requests (index, then video); read-ahead follows the last one.
+    private const int SeekHoldMs = 1000;
     private readonly object gate = new();
     private readonly Dictionary<long, LinkedListNode<(long Offset, byte[] Bytes)>> cache = [];
     private readonly LinkedList<(long Offset, byte[] Bytes)> recent = [];
@@ -16,12 +22,18 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
     private readonly SemaphoreSlim wake = new(0, 1);
     private CancellationTokenSource epoch = new();
     private Task? prefetch;
-    private long readAhead, anchor = -1, cursor = -1, retryAt;
+    private long readAhead, anchor = -1, cursor = -1, retryAt, resumeFrom = -1, resumeAt;
+    private int playerWaits, prefetching;
+    private bool faulted, stopped;
+    // A run of blocks known to be on disk, which never loses one, so measuring the buffer does not rescan it.
+    private long diskRunFrom = -1, diskRunTo = -1;
     private readonly int baseCapacity = capacityBytes;
     private int capacity = capacityBytes;
     private int bytes;
     public SharedMedia Media => source.Media;
     public long ReadAheadBytes { get { lock (gate) return readAhead; } }
+    // True while read-ahead has no window and continues to the end of the movie.
+    public bool Unbounded => disk?.Accepting == true;
     public long CachedAheadBytes
     {
         get
@@ -29,8 +41,15 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
             lock (gate)
             {
                 if (anchor < 0) return 0;
-                var block = anchor / MediaStreaming.ChunkBytes * MediaStreaming.ChunkBytes;
-                while (block < Media.Length && cache.ContainsKey(block)) block += MediaStreaming.ChunkBytes;
+                var block = Align(anchor);
+                if (disk is not null)
+                {
+                    var start = block;
+                    if (start >= diskRunFrom && start <= diskRunTo) block = diskRunTo; else diskRunFrom = start;
+                    while (block < Media.Length && disk.Contains(block)) block += MediaStreaming.ChunkBytes;
+                    diskRunTo = block;
+                }
+                while (block < Media.Length && Has(block)) block += MediaStreaming.ChunkBytes;
                 return Math.Max(0, Math.Min(block, Media.Length) - anchor);
             }
         }
@@ -42,54 +61,73 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
         while (written < count)
         {
             ct.ThrowIfCancellationRequested();
-            var position = offset + written; var blockOffset = position / MediaStreaming.ChunkBytes * MediaStreaming.ChunkBytes;
-            var block = await Block(blockOffset, ct);
+            var position = offset + written; var blockOffset = Align(position);
+            var block = await Block(blockOffset, ct, player: true);
             var within = (int)(position - blockOffset); var copy = Math.Min(count - written, block.Length - within);
             if (copy <= 0) throw new EndOfStreamException("Incomplete media range");
             block.AsSpan(within, copy).CopyTo(result.AsSpan(written)); written += copy;
         }
         return result;
     }
+    // Starts read-ahead. The window applies while there is no disk cache to hold more.
     public void SetReadAhead(long aheadBytes)
     {
         lock (gate)
         {
-            if (lifetime.IsCancellationRequested) return;
+            if (stopped) return;
             readAhead = Math.Clamp(aheadBytes, 0, StreamingBufferOptions.MaximumReadAheadBytes);
             capacity = (int)Math.Max(baseCapacity, readAhead + baseCapacity);
             if (readAhead > 0) prefetch ??= Task.Run(Prefetch);
         }
         Wake();
     }
-    // A new HTTP range far from the playback position (a seek or an index
-    // probe) pauses read-ahead until a playback stream advances again.
+    // A new HTTP range outside what is buffered (a seek or an index probe) stops the reads
+    // read-ahead has under way. It continues from there once a playback stream advances, or
+    // after a moment when the video is paused and the player has what it asked for.
     public void Requested(long offset)
     {
+        CancellationTokenSource? stale = null;
         lock (gate)
         {
-            if (anchor < 0 || offset >= anchor - JumpSlackBytes && offset <= anchor + readAhead + JumpSlackBytes) return;
-            Reposition(-1);
+            if (anchor >= 0)
+            {
+                var block = Align(offset);
+                if (Has(block)) return;
+                if (offset >= anchor - JumpSlackBytes && offset <= Math.Max(cursor, anchor) + JumpSlackBytes)
+                {
+                    // A gap left by an abandoned read inside the buffer is filled again.
+                    if (block >= Align(anchor) && block < cursor) cursor = block;
+                    return;
+                }
+                stale = epoch; epoch = new();
+                anchor = cursor = -1;
+            }
+            resumeFrom = offset; resumeAt = Environment.TickCount64 + SeekHoldMs;
         }
+        // Canceling runs the canceled reads' continuations, read-ahead's own loop among them, so the
+        // new state is in place first and the lock is released.
+        stale?.Cancel();
+        Wake();
     }
     public void Played(long position)
     {
         lock (gate)
         {
-            if (anchor < 0 || position < anchor || position > anchor + readAhead + JumpSlackBytes) Reposition(position);
-            else anchor = position;
+            resumeFrom = -1;
+            if (anchor < 0 || position < anchor || position > Math.Max(cursor, anchor) + JumpSlackBytes) cursor = Align(position);
+            anchor = position;
         }
         Wake();
     }
     public void Stop()
     {
-        lock (gate) { if (lifetime.IsCancellationRequested) return; lifetime.Cancel(); epoch.Cancel(); }
+        CancellationTokenSource stale;
+        lock (gate) { if (stopped) return; stopped = true; stale = epoch; }
+        lifetime.Cancel(); stale.Cancel();
         _ = prefetch?.ContinueWith(t => _ = t.Exception, TaskScheduler.Default);
     }
-    private void Reposition(long position)
-    {
-        epoch.Cancel(); epoch = new();
-        anchor = position; cursor = position < 0 ? -1 : position / MediaStreaming.ChunkBytes * MediaStreaming.ChunkBytes;
-    }
+    private static long Align(long position) => position / MediaStreaming.ChunkBytes * MediaStreaming.ChunkBytes;
+    private bool Has(long block) => cache.ContainsKey(block) || disk?.Contains(block) == true;
     private void Wake()
     {
         try { if (wake.CurrentCount == 0) wake.Release(); }
@@ -101,58 +139,78 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
         while (!lifetime.IsCancellationRequested)
         {
             reads.RemoveAll(read => read.IsCompleted);
-            if (reads.Count < PrefetchReads && NextBlock() is { } next) { reads.Add(Warm(next.Offset, next.Token)); continue; }
+            var wait = 0L;
+            if (reads.Count < PrefetchReads && NextBlock(out wait) is { } next) { reads.Add(Warm(next.Offset, next.Token)); continue; }
             signal ??= wake.WaitAsync(lifetime.Token);
-            // Retry after a failed read, even when nothing else wakes the loop.
-            var wait = Interlocked.Read(ref retryAt) - Environment.TickCount64;
+            // Retry after a failed read and resume after a seek, even when nothing else wakes the loop.
             await Task.WhenAny(wait > 0 ? [.. reads, signal, Task.Delay((int)Math.Min(wait, 1000), lifetime.Token)] : [.. reads, signal]);
             if (signal.IsCompleted) { if (signal.IsCanceled) return; signal = null; }
         }
     }
-    private (long Offset, CancellationToken Token)? NextBlock()
+    private (long Offset, CancellationToken Token)? NextBlock(out long waitMs)
     {
         lock (gate)
         {
-            if (anchor < 0 || cursor < 0 || readAhead <= 0 || Environment.TickCount64 < retryAt) return null;
-            var limit = Math.Min(Media.Length, anchor + readAhead);
-            cursor = Math.Max(cursor, anchor / MediaStreaming.ChunkBytes * MediaStreaming.ChunkBytes);
-            while (cursor < limit && (cache.ContainsKey(cursor) || pending.ContainsKey(cursor))) cursor += MediaStreaming.ChunkBytes;
+            waitMs = 0;
+            // After a failed read one probe at a time finds out when the streamer is back.
+            if (readAhead <= 0 || playerWaits > 0 || faulted && prefetching > 0) return null;
+            var now = Environment.TickCount64;
+            if (now < retryAt) { waitMs = retryAt - now; return null; }
+            if (anchor < 0)
+            {
+                if (resumeFrom < 0) return null;
+                if (now < resumeAt) { waitMs = resumeAt - now; return null; }
+                anchor = resumeFrom; cursor = Align(resumeFrom); resumeFrom = -1;
+            }
+            var limit = Unbounded ? Media.Length : Math.Min(Media.Length, anchor + readAhead);
+            cursor = Math.Max(cursor, Align(anchor));
+            while (cursor < limit && (Has(cursor) || pending.ContainsKey(cursor))) cursor += MediaStreaming.ChunkBytes;
             if (cursor >= limit) return null;
-            var offset = cursor; cursor += MediaStreaming.ChunkBytes;
+            var offset = cursor; cursor += MediaStreaming.ChunkBytes; prefetching++;
             return (offset, epoch.Token);
         }
     }
     private async Task Warm(long offset, CancellationToken ct)
     {
-        try { await Block(offset, ct); }
+        try { await Block(offset, ct, player: false); lock (gate) faulted = false; }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception)
         {
             // An unavailable host must not turn read-ahead into a retry storm.
-            lock (gate) { retryAt = Environment.TickCount64 + 1000; if (cursor > offset) cursor = offset; }
+            lock (gate) { faulted = true; retryAt = Environment.TickCount64 + 1000; if (cursor > offset) cursor = offset; }
         }
+        finally { lock (gate) prefetching--; }
     }
-    private async Task<byte[]> Block(long offset, CancellationToken ct)
+    private async Task<byte[]> Block(long offset, CancellationToken ct, bool player)
     {
         Pending read;
-        lock (gate)
+        for (var again = false; ; again = true)
         {
-            if (cache.TryGetValue(offset, out var hit))
+            if (disk?.TryRead(offset) is { } stored) return stored;
+            lock (gate)
             {
-                recent.Remove(hit); recent.AddLast(hit); return hit.Value.Bytes;
+                if (cache.TryGetValue(offset, out var hit))
+                {
+                    recent.Remove(hit); recent.AddLast(hit); return hit.Value.Bytes;
+                }
+                if (!pending.TryGetValue(offset, out read!))
+                {
+                    // Stored between the look at the file above and here: read it rather than download it again.
+                    if (!again && disk?.Contains(offset) == true) continue;
+                    read = new Pending(); pending.Add(offset, read);
+                    read.Task = Fetch(offset, read);
+                }
+                read.Users++; if (player) playerWaits++;
             }
-            if (!pending.TryGetValue(offset, out read!))
-            {
-                read = new Pending(); pending.Add(offset, read);
-                read.Task = Fetch(offset, read);
-            }
-            read.Users++;
+            break;
         }
         try { return await read.Task.WaitAsync(ct); }
         finally
         {
+            var resume = false;
             lock (gate)
             {
+                if (player) resume = --playerWaits == 0;
                 if (--read.Users == 0)
                 {
                     if (!read.Task.IsCompleted)
@@ -163,6 +221,7 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
                     _ = read.Task.ContinueWith(t => { _ = t.Exception; read.Cancellation.Dispose(); }, TaskScheduler.Default);
                 }
             }
+            if (resume) Wake();
         }
     }
     private async Task<byte[]> Fetch(long offset, Pending read)
@@ -174,13 +233,14 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
             var count = (int)Math.Min(MediaStreaming.ChunkBytes, Media.Length - offset);
             var data = await source.ReadAsync(offset, count, read.Cancellation.Token);
             if (data.Length != count) throw new EndOfStreamException("Incomplete media range");
+            if (disk?.TryStore(offset, data) == true) return data;
             lock (gate)
             {
                 if (!read.Cancellation.IsCancellationRequested && !cache.ContainsKey(offset) && data.Length <= capacity)
                 {
                     cache.Add(offset, recent.AddLast((offset, data))); bytes += data.Length;
-                    while (bytes > capacity && recent.First is { } oldest)
-                    { bytes -= oldest.Value.Bytes.Length; cache.Remove(oldest.Value.Offset); recent.RemoveFirst(); }
+                    while (bytes > capacity && Oldest() is { } oldest)
+                    { bytes -= oldest.Value.Bytes.Length; cache.Remove(oldest.Value.Offset); recent.Remove(oldest); }
                 }
             }
             return data;
@@ -189,6 +249,17 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
         {
             lock (gate) { if (pending.GetValueOrDefault(offset) == read) pending.Remove(offset); }
         }
+    }
+    // The least recently used block that is not buffered ahead of playback. Video waiting to
+    // be played was fetched before the video behind it was last read, so by age alone it
+    // would be dropped first and downloaded again.
+    private LinkedListNode<(long Offset, byte[] Bytes)>? Oldest()
+    {
+        if (anchor < 0 || readAhead <= 0) return recent.First;
+        var from = Align(anchor); var to = anchor + readAhead;
+        for (var node = recent.First; node is not null; node = node.Next)
+            if (node.Value.Offset < from || node.Value.Offset >= to) return node;
+        return recent.First;
     }
     private sealed class Pending
     {
