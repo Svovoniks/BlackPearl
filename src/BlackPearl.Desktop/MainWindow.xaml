@@ -959,9 +959,7 @@
       </StackPanel></local:Stone>
       <local:Stone Style="{StaticResource Card}"><StackPanel>
        <TextBlock Text="Streaming buffer" Style="{StaticResource CardTitle}"/>
-       <TextBlock Text="Video to buffer ahead (seconds)" Style="{StaticResource FieldLabel}"/><TextBox x:Name="StreamingBufferSeconds" MaxLength="3" Width="120" HorizontalAlignment="Left" AutomationProperties.Name="Video buffer ahead in seconds" ToolTip="Choose from 2 to 60 seconds"/>
-       <TextBlock x:Name="StreamingBufferError" Style="{StaticResource FieldError}" AutomationProperties.LiveSetting="Polite"/>
-       <TextBlock Text="Default: 30 seconds. Playback starts as soon as a few seconds are ready; BlackPearl then keeps downloading up to this much video ahead while you watch. Applies to the next streamed video. Larger buffers use more memory but do not delay starting or seeking. During a brief connection interruption, playback continues from buffered video for up to this time, then pauses if recovery has not finished. Actual coverage depends on available bandwidth." Style="{StaticResource Hint}"/>
+       <TextBlock Text="Playback starts as soon as a few seconds are ready. BlackPearl then keeps downloading the rest of the video ahead of where you are, also while it is paused, so an uneven connection has time to catch up. During a connection interruption, playback continues for as long as buffered video lasts. The video is kept in a temporary file that is deleted when the video ends or you leave the room. Downloading waits while the disk has less than 4 GB free." Style="{StaticResource Hint}"/>
       </StackPanel></local:Stone>
       <local:Stone Style="{StaticResource Card}"><DockPanel>
        <Button DockPanel.Dock="Right" Content="Open default apps" Click="OpenDefaultAppsSettings" VerticalAlignment="Center" Margin="16,0,0,0" AutomationProperties.HelpText="Opens Windows Settings, where you can choose BlackPearl for video files"/>

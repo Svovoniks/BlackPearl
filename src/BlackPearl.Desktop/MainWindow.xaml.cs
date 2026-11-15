@@ -1515,7 +1515,7 @@ public partial class MainWindow : Window
             await loading.WaitAsync(cancellation.Token); locked = true;
             if (!await EnsurePlayer() || client != room || generation != loadGeneration) return;
             ready = false; buffering = new(); appliedGeneration = readyGeneration = -1; bridge?.CancelPendingReads(); await StopNativePlayback();
-            playbackRecovery.Clear(); activeStreamingBufferSeconds = SavedStreamingBufferSeconds; readAheadMediaBytes = null;
+            playbackRecovery.Clear(); readAheadMediaBytes = null;
             cancellation.Token.ThrowIfCancellationRequested();
             if (target?.Playing == true) SendReadiness("buffering");
             if (bridge is not null) await bridge.DisposeAsync(); bridge = null;
@@ -1524,19 +1524,20 @@ public partial class MainWindow : Window
             Uri? streamUri = null;
             if (source is not ILocalMediaSource)
             {
-                bridge = new(); streamUri = await bridge.StartAsync(source);
+                bridge = new(); streamUri = await bridge.StartAsync(source, StreamCacheFor(media));
             }
+            else CloseStreamCache();
             // The host owns the file already. Feeding it back through HTTP adds
             // network buffering and slow-seek behavior to otherwise local playback.
             using var vlcMedia = source is ILocalMediaSource local
                 ? new Media(vlc!, local.LocalPath, FromType.FromPath)
                 : new Media(vlc!, streamUri!);
-            // Start from a short RTT-based cache. The configured buffer is filled
+            // Start from a short RTT-based cache. The rest of the video downloads
             // as read-ahead after playback starts and never gates readiness.
             var networkCacheMs = MediaStreaming.NetworkCacheForRtt(client.RecentRttMs);
             if (streamUri is not null) { vlcMedia.AddOption($":network-caching={networkCacheMs}"); readAheadMediaBytes = media.Length; }
             if (PlaybackDiagnostics.Enabled) PlaybackDiagnostics.Record("media-input", new { local = source is ILocalMediaSource, media.Extension,
-                networkCacheMs = streamUri is not null ? networkCacheMs : (int?)null, bufferSeconds = streamUri is not null ? activeStreamingBufferSeconds : (int?)null });
+                networkCacheMs = streamUri is not null ? networkCacheMs : (int?)null, diskCache = streamUri is not null ? bridge?.BuffersWholeVideo : null });
             // VLC's AVI demuxer reads slow-seekable HTTP inputs in 1.5-second
             // steps, exposing read-ahead time to the synchronization controller.
             // The avformat demuxer provides a regularly advancing timeline.
@@ -1627,7 +1628,8 @@ public partial class MainWindow : Window
             PlaybackDiagnostics.Record("sample", new { serverMs, position = player.Time,
                 estimated = playbackPosition.Estimate(player.Time, player.IsPlaying, player.Rate, Environment.TickCount64), rate = player.Rate, policy = SyncMath.UseTunedPolicy ? "experimental" : "stable",
                 state = player.State.ToString(), playing = player.IsPlaying, ready, revision = target?.Revision, targetPlaying = target?.Playing,
-                desired = target is null ? (long?)null : SyncMath.TargetPosition(target, serverMs), connected = room?.IsConnected ?? false });
+                desired = target is null ? (long?)null : SyncMath.TargetPosition(target, serverMs), connected = room?.IsConnected ?? false,
+                bufferedBytes = bridge?.BufferedAheadBytes, cachedBytes = streamCache?.StoredBytes });
         }
         ApplyRoomPlayback();
     }
@@ -2035,6 +2037,8 @@ public partial class MainWindow : Window
             oldBridge?.CancelPendingReads();
             var stopBridge = oldBridge is null ? Task.CompletedTask : oldBridge.DisposeAsync().AsTask();
             await Task.WhenAll(StopNativePlayback(), stopBridge, disconnect);
+            // A reconnect usually returns to the same video, which then continues from what is already buffered.
+            if (!reconnecting) CloseStreamCache();
         }
         finally { loading.Release(); }
         PeopleList.ItemsSource = null; ParticipantsPillDetail.Text = ""; RoomFeedback.Text = ""; RoomFeedback.Visibility = Visibility.Collapsed;

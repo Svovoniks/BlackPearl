@@ -44,12 +44,12 @@ static class Program
             var renderWindow = new MainWindow { Left = -20000, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual };
             // --scale draws as a display at that scaling would (1.5 is the user's); without it, the window's own display.
             var scaleAt = Array.IndexOf(args, "--scale");
-            var size = args.Skip(2).Where((_, i) => scaleAt < 0 || (i + 2 != scaleAt && i + 2 != scaleAt + 1)).ToArray();
+            var size = args.Skip(2).Where((value, i) => value != "--settings" && (scaleAt < 0 || (i + 2 != scaleAt && i + 2 != scaleAt + 1))).ToArray();
             renderWindow.Loaded += async (_, _) =>
             {
                 // Set once the window exists: before that, creating its window takes the display's scaling instead.
                 if (scaleAt > 0) Rescale(renderWindow, double.Parse(args[scaleAt + 1], System.Globalization.CultureInfo.InvariantCulture));
-                try { await ScreenRender.Run(renderWindow, args[1], size.Length > 1 ? int.Parse(size[0]) : 1280, size.Length > 1 ? int.Parse(size[1]) : 810); }
+                try { await ScreenRender.Run(renderWindow, args[1], size.Length > 1 ? int.Parse(size[0]) : 1280, size.Length > 1 ? int.Parse(size[1]) : 810, args.Contains("--settings")); }
                 catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
                 finally { renderWindow.Close(); renderApp.Shutdown(); }
             };
@@ -379,7 +379,6 @@ static class Program
                 await CheckLibraryNavigation(window, activeStore, cards, directory, posterPath, Check);
                 CheckRoomSettings(window, activeStore, Check);
                 CheckQueueEditing(window, activeStore, Check);
-                StreamingBufferChecks.Run(window, activeStore, directory, Check);
                 PreferenceNavigationChecks.Run(window, activeStore, Check);
                 await QueuePlaybackChecks.Run(window, activeStore, directory, Check);
                 await EpisodeEndChecks.Run(window, Check);

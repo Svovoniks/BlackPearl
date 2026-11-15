@@ -15,9 +15,10 @@ public sealed class MediaBridge : IAsyncDisposable
     private readonly CancellationTokenSource shutdown = new();
     private int stopped;
     public Uri? Url { get; private set; }
-    public async Task<Uri> StartAsync(IMediaSource media)
+    // With a cache file the video is buffered to the end of the movie; without one, in memory within a window.
+    public async Task<Uri> StartAsync(IMediaSource media, StreamCache? cache = null)
     {
-        source = new CachedMediaSource(media);
+        source = new CachedMediaSource(media, disk: cache);
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(k => k.Listen(System.Net.IPAddress.Loopback, 0));
@@ -103,6 +104,7 @@ public sealed class MediaBridge : IAsyncDisposable
     // first frames, which only wait for VLC's short network cache.
     public void SetReadAhead(long bytes) => source?.SetReadAhead(bytes);
     public long BufferedAheadBytes => source?.CachedAheadBytes ?? 0;
+    public bool BuffersWholeVideo => source?.Unbounded == true;
     public void CancelPendingReads()
     {
         if (Interlocked.Exchange(ref stopped, 1) == 0) { shutdown.Cancel(); source?.Stop(); }
