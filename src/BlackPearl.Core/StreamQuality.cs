@@ -17,9 +17,23 @@ public sealed record StreamQuality(string Id, string Name, int Height, int Video
     ];
     public const int AudioKbps = 160;
     public static StreamQuality? Find(string? id) => Converted.FirstOrDefault(q => q.Id == id);
-    // A video is never enlarged: a 720p video offers 720p and 480p.
-    public static StreamQuality[] For(int sourceHeight) => Converted.Where(q => q.Height <= Math.Max(sourceHeight, Converted[^1].Height) + 8).ToArray();
+    // A video is never enlarged: a 720p video offers 720p and 480p. The height is the video's class (VideoProbe.ClassHeight).
+    public static StreamQuality[] For(int classHeight) => Converted.Where(q => q.Height <= Math.Max(classHeight, Converted[^1].Height) + 8).ToArray();
     public double TotalMbps => (VideoKbps + AudioKbps) / 1000.0;
+    // What a video becomes for a chosen quality: the largest quality it is big enough for, at or below the chosen one,
+    // and its picture shrunk by as much as a full frame of its class would be. A 1920x800 film at 720p is 1280x532.
+    public static StreamPlan Plan(VideoProbe probe, long fileBytes, StreamQuality chosen)
+    {
+        var quality = For(probe.ClassHeight).FirstOrDefault(q => q.Height <= chosen.Height) ?? Converted[^1];
+        var height = (int)Math.Round((double)probe.Height * quality.Height / Math.Max(probe.ClassHeight, quality.Height));
+        return new(quality, Math.Min(probe.Height, height) / 2 * 2, fileBytes * 8 / Math.Max(1, probe.DurationMs));
+    }
+}
+
+public sealed record StreamPlan(StreamQuality Quality, int Height, long FileKbps)
+{
+    // A file whose bitrate is already this low would take as long to send converted, and look worse, whatever its size.
+    public bool Smaller => FileKbps > Quality.VideoKbps + StreamQuality.AudioKbps;
 }
 
 // What ffmpeg says a video file holds: enough to choose a quality and to draw its subtitles into the picture.
@@ -30,6 +44,9 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
     private static readonly Regex Size = new(@"[, ](\d{2,5})x(\d{2,5})(?:[, \[]|$)", RegexOptions.Compiled);
     private static readonly string[] ImageSubtitles = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"];
     private static readonly string[] Fonts = ["ttf", "otf"];
+    // The height of the full 16:9 frame this picture is cut from: a film is as wide as its class and often shorter, so
+    // 1920x800 and 1920x1034 are 1080p films.
+    public int ClassHeight => Math.Max(Height, (Width * 9 + 8) / 16);
 
     public static VideoProbe? Parse(string output)
     {
@@ -187,15 +204,19 @@ public static class Ffmpeg
             // Picture subtitles are made for the video's own size and are centered on it, as players do when a film is cropped.
             var factor = Number((double)target / input.Probe.Height);
             return video + "[v];[0:s:" + track.ToString(CultureInfo.InvariantCulture) + "]scale=iw*" + factor + ":ih*" + factor + ":flags=bicubic[s];" +
-                "[v][s]overlay=(W-w)/2:(H-h)/2:eof_action=pass,format=yuv420p[out]";
+                "[v][s]overlay=(W-w)/2:(H-h)/2:eof_action=pass" + SquarePixels + ",format=yuv420p[out]";
         }
         if (input.Subtitle is { File: { } file })
         {
             video.Append(",subtitles=filename=" + FilterValue(file));
             if (input.Subtitle.FontsDirectory is { } fonts) video.Append(":fontsdir=" + FilterValue(fonts));
         }
-        return video + ",format=yuv420p[out]";
+        return video + SquarePixels + ",format=yuv420p[out]";
     }
+    // The picture is sent with square pixels. Scaling leaves a pixel shape such as 3301888:3302933, which Intel's
+    // encoder writes cut to 16 bits: a 1920x1034 film at 720p arrived half as wide as it should be. A video whose
+    // pixels are not square (a DVD) is resized to its shown width here; for any other this changes no pixel.
+    private const string SquarePixels = ",scale=trunc(ih*dar/2+0.5)*2:ih:flags=bicubic,setsar=1";
 
     // Every converted timestamp is the video's own plus this, so the first frames never need a negative decoding time,
     // which ffmpeg would otherwise fix by shifting one run against the others.

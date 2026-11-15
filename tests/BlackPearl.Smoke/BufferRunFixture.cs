@@ -68,9 +68,9 @@ static class BufferRunFixture
                 var probe = await VideoProbe.ReadAsync(ffmpeg, path, timeout.Token) ?? throw new IOException("The video could not be read.");
                 var prepare = Stopwatch.StartNew();
                 var subtitle = int.TryParse(Option("--subtitle"), out var track) ? await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), Directory.CreateDirectory(Path.Combine(directory, "convert")).FullName, timeout.Token) : null;
-                var chosen = StreamQuality.For(probe.Height).FirstOrDefault(q => q.Height <= quality.Height) ?? StreamQuality.Converted[^1];
+                var plan = StreamQuality.Plan(probe, file.Media.Length, quality); var chosen = plan.Quality;
                 var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
-                stream = new RoomStream(Guid.NewGuid().ToString("N"), file.Media.Id, chosen.Id, Math.Min(chosen.Height, probe.Height) / 2 * 2, chosen.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+                stream = new RoomStream(Guid.NewGuid().ToString("N"), file.Media.Id, chosen.Id, plan.Height, chosen.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
                 converted = SegmentStore.TryCreate(Path.Combine(directory, "convert"), segments) ?? throw new IOException("No room for the converted video.");
                 converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, converted);
                 converter.Failed += message => Console.WriteLine("CONVERSION FAILED: " + message);
@@ -85,7 +85,7 @@ static class BufferRunFixture
                     }
                 }, kept);
                 url = await bridge.StartAsync(remote);
-                Console.WriteLine($"source {probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")}, {probe.AudioTracks} audio, {probe.Subtitles.Length} subtitle tracks; converting to {stream.Height}p at about {chosen.TotalMbps:0.#} Mbps" +
+                Console.WriteLine($"source {probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")}, {probe.AudioTracks} audio, {probe.Subtitles.Length} subtitle tracks; converting to {chosen.Name}, {stream.Height} high, at about {chosen.TotalMbps:0.#} Mbps (file {plan.FileKbps / 1000.0:0.0} Mbps{(plan.Smaller ? "" : ", which the app would stream as it is")})" +
                     (subtitle is null ? "" : $"; subtitles {(subtitle.ImageTrack is null ? "text" : "picture")}, prepared in {prepare.Elapsed.TotalSeconds:F1} s"));
             }
             Core.Initialize();

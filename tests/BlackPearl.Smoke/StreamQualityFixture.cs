@@ -68,6 +68,24 @@ static class StreamQualityFixture
             converter.Resolve("stream/another/5") is null && converter.Resolve(StreamConverter.Resource(stream.Id, 99)) is null && converter.Resolve("stream/" + stream.Id + "/x") is null,
             "viewers read a piece's size and ranges by name, and nothing outside the stream");
 
+        // A DVD's pixels are not square, and scaling leaves pixel shapes one encoder writes wrongly. The picture is sent
+        // with square pixels, at the width it is shown.
+        var dvd = Path.Combine(directory, "dvd.mkv");
+        await Ffmpeg.RunAsync(ffmpeg!, ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:size=720x480:rate=24,format=yuv420p,setsar=32/27",
+            "-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-g", "48", dvd], null, TimeSpan.FromMinutes(2), default);
+        var dvdProbe = await VideoProbe.ReadAsync(ffmpeg!, dvd, default);
+        var dvdPlan = StreamQuality.Plan(dvdProbe!, new FileInfo(dvd).Length, quality);
+        var dvdWork = Path.Combine(directory, "dvd"); Directory.CreateDirectory(dvdWork);
+        using (var dvdStore = SegmentStore.TryCreate(dvdWork, 2, reserveBytes: 0)!)
+        using (var dvdConverter = new StreamConverter(ffmpeg!, new StreamInput(dvd, dvdProbe!, null, null), new RoomStream("dvd", "dvd", quality.Id, dvdPlan.Height, quality.VideoKbps, dvdProbe!.DurationMs, StreamConverter.SegmentMs, 2), dvdStore))
+        {
+            var file = Path.Combine(dvdWork, "piece.ts");
+            await File.WriteAllBytesAsync(file, dvdConverter.Read(0, 0, await dvdConverter.LengthAsync(0, limit.Token))!);
+            var (_, described) = await Ffmpeg.RunAsync(ffmpeg!, ["-hide_banner", "-i", file], null, TimeSpan.FromMinutes(1), default);
+            var size = described.Split('\n').FirstOrDefault(line => line.Contains("Video:"))?.Trim() ?? described;
+            check(dvdPlan.Height == 480 && size.Contains("854x480 [SAR 1:1 "), "a video whose pixels are not square is sent with square ones, at the width it is shown: " + size);
+        }
+
         // Subtitles drawn into the picture, from the video's own track and from a file beside it.
         var plain = await LowerBrightness(ffmpeg!, converter.Read(1, 0, store.Length(1))!, work);
         foreach (var (name, choice) in new[] { ("track", new BurnedSubtitle(Track: 0)), ("file", new BurnedSubtitle(File: captions)) })
@@ -147,7 +165,7 @@ static class StreamQualityFixture
         var ffmpeg = FindFfmpeg() ?? throw new IOException("ffmpeg was not found.");
         var probe = await VideoProbe.ReadAsync(ffmpeg, path, default) ?? throw new IOException("The video could not be read.");
         var chosen = StreamQuality.Find(args[3]) ?? throw new ArgumentException("Unknown quality");
-        var quality = StreamQuality.For(probe.Height).FirstOrDefault(q => q.Height <= chosen.Height) ?? StreamQuality.Converted[^1];
+        var plan = StreamQuality.Plan(probe, new FileInfo(path).Length, chosen); var quality = plan.Quality;
         var directory = Path.Combine(Path.GetTempPath(), "BlackPearl-checks", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
         try
         {
@@ -155,7 +173,7 @@ static class StreamQualityFixture
             var subtitle = int.TryParse(Option("--subtitle"), out var track) ? await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), directory, default) : null;
             var prepared = clock.Elapsed.TotalSeconds;
             var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
-            var stream = new RoomStream("frame", "video", quality.Id, Math.Min(quality.Height, probe.Height) / 2 * 2, quality.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+            var stream = new RoomStream("frame", "video", quality.Id, plan.Height, quality.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
             using var store = SegmentStore.TryCreate(directory, segments, reserveBytes: 0)!;
             using var converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, store);
             var index = (int)(seconds * 1000 / StreamConverter.SegmentMs);
@@ -164,7 +182,7 @@ static class StreamQualityFixture
             var piece = Path.Combine(directory, "piece.ts"); await File.WriteAllBytesAsync(piece, converter.Read(index, 0, length)!);
             var within = seconds - index * StreamConverter.SegmentMs / 1000.0;
             var (exit, errors) = await Ffmpeg.RunAsync(ffmpeg, ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-i", piece, "-vf", "select=gte(t\\," + Ffmpeg.Number(within) + ")", "-frames:v", "1", args[4]], null, TimeSpan.FromMinutes(1), default);
-            Console.WriteLine($"{probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")} to {stream.Height}p with {converter.Encoder}; subtitles {(subtitle is null ? "none" : subtitle.ImageTrack is null ? $"text, {(subtitle.FontsDirectory is null ? "no" : Directory.GetFiles(subtitle.FontsDirectory).Length.ToString())} fonts" : "picture")} prepared in {prepared:F1} s; piece {index} ({length / 1000} KB) ready {clock.Elapsed.TotalSeconds:F1} s after asking; frame {(exit == 0 && File.Exists(args[4]) ? "saved" : "failed: " + errors)}");
+            Console.WriteLine($"{probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")} to {quality.Name}, {stream.Height} high, with {converter.Encoder}; subtitles {(subtitle is null ? "none" : subtitle.ImageTrack is null ? $"text, {(subtitle.FontsDirectory is null ? "no" : Directory.GetFiles(subtitle.FontsDirectory).Length.ToString())} fonts" : "picture")} prepared in {prepared:F1} s; piece {index} ({length / 1000} KB) ready {clock.Elapsed.TotalSeconds:F1} s after asking; frame {(exit == 0 && File.Exists(args[4]) ? "saved" : "failed: " + errors)}");
         }
         finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
     }
@@ -224,10 +242,23 @@ static class StreamQualityFixture
         check(VideoProbe.Parse("sample.mkv: No such file or directory") is null && VideoProbe.Parse("  Duration: 00:03:00.00, start: 0.000000\n  Stream #0:0: Audio: flac, 44100 Hz, stereo") is null,
             "something that is not a video is not described");
         var graph = Ffmpeg.FilterGraph(new("film.mkv", film!, 0, new(@"C:\Users\Jo'e, [x]\sub;s.ass", @"C:\fonts", null)), 720);
-        check(graph == @"[0:v:0]scale=-2:720:flags=bicubic,subtitles=filename=C\\:/Users/Jo\\\'e\, \[x\]/sub\;s.ass:fontsdir=C\\:/fonts,format=yuv420p[out]",
+        check(graph == @"[0:v:0]scale=-2:720:flags=bicubic,subtitles=filename=C\\:/Users/Jo\\\'e\, \[x\]/sub\;s.ass:fontsdir=C\\:/fonts,scale=trunc(ih*dar/2+0.5)*2:ih:flags=bicubic,setsar=1,format=yuv420p[out]",
             "a subtitle file's path is written so the filter reads it as a path: " + graph);
         check(Ffmpeg.FilterGraph(new("film.mkv", film!, 0, new(null, null, 0)), 1080).StartsWith("[0:v:0]scale=-2:1040:") && Ffmpeg.FilterGraph(new("x", phone!, 0, null), 720).Contains("tonemap"),
             "a video is never enlarged, and HDR is tone mapped");
+        // A film's picture is as wide as its class and often shorter. Judged by height alone, 1920x1040 lost its 1080p.
+        VideoProbe Sized(int width, int height) => film! with { Width = width, Height = height };
+        long Bytes(int kbps) => (film!.DurationMs * kbps + 7) / 8;
+        StreamPlan Plan(VideoProbe video, int kbps, string quality) => StreamQuality.Plan(video, Bytes(kbps), StreamQuality.Find(quality)!);
+        check(film!.ClassHeight == 1080 && Sized(1920, 800).ClassHeight == 1080 && Sized(1280, 536).ClassHeight == 720 && Sized(1440, 1080).ClassHeight == 1080 &&
+            Sized(1080, 1920).ClassHeight == 1920 && StreamQuality.For(Sized(1920, 800).ClassHeight).Length == 3 && StreamQuality.For(Sized(1280, 536).ClassHeight).Select(q => q.Id).SequenceEqual(["720p", "480p"]),
+            "a wide film is offered the qualities of the frame it is cut from");
+        check(Plan(film, 6813, "1080p") is { Quality.Id: "1080p", Height: 1040, FileKbps: 6813, Smaller: true } && Plan(film, 6813, "720p") is { Quality.Id: "720p", Height: 692 } &&
+            Plan(Sized(1920, 800), 6813, "720p").Height == 532 && Plan(Sized(3840, 2160), 6813, "480p").Height == 480 && Plan(Sized(640, 360), 6813, "1080p") is { Quality.Id: "480p", Height: 360 } &&
+            Plan(Sized(1280, 720), 6813, "1080p") is { Quality.Id: "720p", Height: 720 },
+            "a wide film shrinks by as much as its full frame would, and a small video keeps its size");
+        check(!Plan(film, 2761, "1080p").Smaller && !Plan(film, 2761, "720p").Smaller && Plan(film, 2761, "480p").Smaller && !Plan(Sized(3840, 2160), 1500, "480p").Smaller && Plan(Sized(640, 360), 6813, "480p").Smaller,
+            "a file whose bitrate is already below the quality's is not converted, whatever its size");
     }
 
     private static int Pid(byte[] stream, int packet) => (stream[packet * 188 + 1] & 0x1F) << 8 | stream[packet * 188 + 2];

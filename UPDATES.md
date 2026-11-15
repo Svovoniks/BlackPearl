@@ -270,8 +270,10 @@ pinned in `BlackPearl.Desktop.csproj` and it is cached under
 `.tools\models\ffmpeg-<version>`). The choice is saved in the `streamQuality`
 setting and applies to the next video. The converted stream is H.264 with the
 selected audio track as stereo AAC and the selected subtitles drawn into the
-picture; HDR is tone mapped. A video already smaller than the chosen quality is
-streamed as its file, and the menu says so. The first encoder that works is used,
+picture; HDR is tone mapped. A video is offered the qualities of the 16:9 frame
+it is cut from, so a 1920x800 film is offered 1080p, and it is never enlarged. A
+file whose bitrate is already at or below the chosen quality's is streamed as its
+file, whatever its size, and the menu says so. The first encoder that works is used,
 in this order: NVIDIA, Intel Quick Sync, AMD, x264, Windows' own.
 The stream is offered in the room state (`RoomSnapshot.Stream`, sent with the
 `stream` command) as four-second pieces. Viewers read

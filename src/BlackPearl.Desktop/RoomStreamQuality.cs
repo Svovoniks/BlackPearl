@@ -59,7 +59,7 @@ public partial class MainWindow
         var hostedPath = streaming ? (room!.HostedMedia as ILocalMediaSource)?.LocalPath : null;
         // The video's size decides which qualities are offered, so it is read as soon as the video is this app's to stream.
         if (hostedPath is not null && probedVideo.Path != hostedPath && probingVideo != hostedPath && Ffmpeg.Find() is { } converter) _ = Guard(() => ProbeHostedVideo(converter, hostedPath));
-        var height = probedVideo.Probe is { } probe && probedVideo.Path == hostedPath ? probe.Height : int.MaxValue;
+        var height = probedVideo.Probe is { } probe && probedVideo.Path == hostedPath ? probe.ClassHeight : int.MaxValue;
         var choices = new List<QualityChoice> { new(StreamQuality.OriginalId, "Original", "The file as it is") };
         if (streaming) choices.AddRange(StreamQuality.For(height).Select(q => new QualityChoice(q.Id, q.Name, $"about {q.TotalMbps:0.#} Mbps")));
         else if (stream is not null) choices.Add(new(stream.Quality, stream.Quality, $"about {(StreamQuality.Find(stream.Quality)?.TotalMbps ?? (stream.VideoKbps + StreamQuality.AudioKbps) / 1000.0):0.#} Mbps"));
@@ -149,13 +149,11 @@ public partial class MainWindow
             if (probedVideo.Path != local.LocalPath || probedVideo.Probe is null) probedVideo = (local.LocalPath, await VideoProbe.ReadAsync(ffmpeg, local.LocalPath, token));
             if (!Current()) return;
             if (probedVideo.Probe is not { } probe) { Decline(media, "This video cannot be converted, so the file is streamed as it is.", failed: true); return; }
-            var chosen = StreamQuality.Find(wanted.Quality)!;
-            var quality = StreamQuality.For(probe.Height).FirstOrDefault(q => q.Height <= chosen.Height) ?? StreamQuality.Converted[^1];
-            // Converting a video that is already this small would only make it larger.
-            var fileKbps = media.Length * 8 / Math.Max(1, probe.DurationMs);
-            if (probe.Height <= quality.Height + 8 && fileKbps <= quality.VideoKbps + StreamQuality.AudioKbps)
+            var plan = StreamQuality.Plan(probe, media.Length, StreamQuality.Find(wanted.Quality)!);
+            var quality = plan.Quality;
+            if (!plan.Smaller)
             {
-                Decline(media, $"This video is already smaller than {quality.Name} ({fileKbps / 1000.0:0.#} Mbps), so the file is streamed as it is.", failed: false);
+                Decline(media, $"This file is already smaller than {quality.Name} would be ({plan.FileKbps / 1000.0:0.0} Mbps, against about {quality.TotalMbps:0.0}), so it is streamed as it is.", failed: false);
                 return;
             }
             directory = Path.Combine(StreamCacheDirectory, "convert-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
@@ -165,7 +163,7 @@ public partial class MainWindow
             store = SegmentStore.TryCreate(directory, segments);
             if (store is null) { Decline(media, "There is no room on the disk to convert the video, so the file is streamed as it is.", failed: true); return; }
             var audio = probe.AudioTracks == 0 || wanted.Audio is null ? (int?)null : Math.Min(wanted.Audio.Value, probe.AudioTracks - 1);
-            var stream = new RoomStream(Guid.NewGuid().ToString("N"), media.Id, quality.Id, Math.Min(quality.Height, probe.Height) / 2 * 2, quality.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+            var stream = new RoomStream(Guid.NewGuid().ToString("N"), media.Id, quality.Id, plan.Height, quality.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
             converter = new StreamConverter(ffmpeg, new StreamInput(local.LocalPath, probe, audio, subtitle), stream, store);
             var started = converter;
             converter.Failed += message => Dispatcher.BeginInvoke(() =>
