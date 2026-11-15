@@ -147,6 +147,8 @@ public sealed class PeerTransport : IDisposable
     internal bool IsInterrupted => Volatile.Read(ref disposed) != 0 || Volatile.Read(ref controlClosed) != 0 || Volatile.Read(ref mediaInterrupted) != 0;
     private int disposed;
     public Func<string, IMediaSource?>? ResolveMedia { get; set; }
+    // How fast what this app reads from the other member arrives.
+    public TransferMeter Received { get; } = new();
     public event Action<string, string>? Signal;
     public event Action<string>? Status;
     public event Action<WireMessage>? ControlMessage;
@@ -466,7 +468,7 @@ public sealed class PeerTransport : IDisposable
         await window.WaitAsync(ct);
         var id = Guid.NewGuid().ToString("N");
         var range = new PendingRange(count);
-        pending[id] = range;
+        pending[id] = range; Received.Started();
         try
         {
             // Old hosts ignore this optional field and return their JSON reply.
@@ -483,6 +485,7 @@ public sealed class PeerTransport : IDisposable
         finally
         {
             pending.TryRemove(id, out _); window.Release();
+            Received.Finished(range.Completion.Task.IsCompletedSuccessfully ? count : 0);
             if (!range.Completion.Task.IsCompleted && channel?.IsOpen == true)
                 try { channel.Send(Wire.Serialize(new WireMessage("cancel-read", Data: id))); } catch { }
         }

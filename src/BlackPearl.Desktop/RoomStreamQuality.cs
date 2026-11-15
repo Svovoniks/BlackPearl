@@ -53,14 +53,18 @@ public partial class MainWindow
         // pills that were there keep their place; where it has none, this pill is the first to fold.
         var dockWidth = PlaybackDockWidth + (PillStrip.GetShown(QualityPill) ? QualityPill.DesiredSize.Width > 0 ? Math.Ceiling(QualityPill.DesiredSize.Width) : 100 : 0);
         if (PlaybackDock.MaxWidth != dockWidth) PlaybackDock.MaxWidth = dockWidth;
-        if (media is null) { if (convertedFrom is not null || streamPreparation is not null) StopConversion(); return; }
+        if (media is null) { if (convertedFrom is not null || streamPreparation is not null) StopConversion(); RefreshQualityOffer(null, null); return; }
         var notice = qualityNotice is { } said && said.MediaId == media.Id ? said : ((string, string Text, bool Failed)?)null;
 
         var hostedPath = streaming ? (room!.HostedMedia as ILocalMediaSource)?.LocalPath : null;
         // The video's size decides which qualities are offered, so it is read as soon as the video is this app's to stream.
         if (hostedPath is not null && probedVideo.Path != hostedPath && probingVideo != hostedPath && Ffmpeg.Find() is { } converter) _ = Guard(() => ProbeHostedVideo(converter, hostedPath));
-        var height = probedVideo.Probe is { } probe && probedVideo.Path == hostedPath ? probe.ClassHeight : int.MaxValue;
-        var choices = new List<QualityChoice> { new(StreamQuality.OriginalId, "Original", "The file as it is") };
+        var probe = probedVideo.Probe is { } read && probedVideo.Path == hostedPath ? read : null;
+        var height = probe?.ClassHeight ?? int.MaxValue;
+        // What sending the file takes: its size over its length.
+        var durationMs = probe?.DurationMs ?? (stream is { DurationMs: > 0 } ? stream.DurationMs : loadedMedia == media.Id && loadedStream is null && player is { Length: > 0 } ? player.Length : 0);
+        var fileKbps = durationMs > 0 ? media.Length * 8 / durationMs : 0;
+        var choices = new List<QualityChoice> { new(StreamQuality.OriginalId, "Original", fileKbps > 0 ? $"The file, about {Mbps(fileKbps)} Mbps" : "The file as it is") };
         if (streaming) choices.AddRange(StreamQuality.For(height).Select(q => new QualityChoice(q.Id, q.Name, $"about {q.TotalMbps:0.#} Mbps")));
         else if (stream is not null) choices.Add(new(stream.Quality, stream.Quality, $"about {(StreamQuality.Find(stream.Quality)?.TotalMbps ?? (stream.VideoKbps + StreamQuality.AudioKbps) / 1000.0):0.#} Mbps"));
         var selected = streaming ? notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality : stream?.Quality ?? StreamQuality.OriginalId;
@@ -74,9 +78,24 @@ public partial class MainWindow
         }
         finally { qualityUpdating = false; }
         QualityChoices.IsEnabled = streaming;
-        QualityHint.Text = !streaming ? stream is { Preparing: true } ? $"{StreamerName} is preparing the video in {stream.Quality}." : $"{StreamerName} chooses the quality for the room."
-            : notice?.Text ?? (streamPreparing ? "Preparing the converted video… " : "") +
-                "A lower quality is converted on this PC while the video plays. Everyone else receives the picture with the selected audio track, and the selected subtitles drawn into it.";
+        // How fast the video reaches the slowest viewer, against what is being sent. An old measurement still says
+        // what the connection carries; only a recent one means the viewer is still short of video.
+        QualityAdvice? Advise(long maximumAgeMs)
+        {
+            if (!streaming || room!.SlowestReceiveRate(maximumAgeMs) is not { } slowest) return null;
+            var sent = notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality;
+            var better = probe is not null && notice is not { Failed: true } ? StreamQuality.Suggest(probe, media.Length, sent, slowest.Kbps) : null;
+            return new(slowest.Name, slowest.Kbps, slowest.Others, probe is null ? fileKbps : StreamQuality.NeededKbps(probe, media.Length, sent), better,
+                better is not null && StreamQuality.Fits(better.VideoKbps + StreamQuality.AudioKbps, slowest.Kbps));
+        }
+        var known = Advise(60000);
+        var speed = known is null ? "" : $" {known.Name} is receiving about {Mbps(known.Kbps)} Mbps{(known.Others ? ", the slowest connection in the room" : "")}." +
+            (known.Suggestion is { } better ? $" What is sent now needs about {Mbps(known.NeededKbps)}; {better.Name} {(known.SuggestionFits ? "would keep up" : "is the smallest there is")}." : "");
+        QualityHint.Text = !streaming ? (stream is { Preparing: true } ? $"{StreamerName} is preparing the video in {stream.Quality}." : $"{StreamerName} chooses the quality for the room.") +
+                (room!.ReceiveRate is { AgeMs: < 60000 } own ? $" You are receiving about {Mbps(own.Kbps)} Mbps." : "")
+            : (notice?.Text ?? (streamPreparing ? "Preparing the converted video… " : "") +
+                "A lower quality is converted on this PC while the video plays. Everyone else receives the picture with the selected audio track, and the selected subtitles drawn into it.") + speed;
+        RefreshQualityOffer(media, Advise(10000));
 
         if (!streaming) { if (convertedFrom is not null || streamPreparation is not null) StopConversion(); return; }
         var now = Environment.TickCount64;
@@ -96,6 +115,66 @@ public partial class MainWindow
         if (wanted != convertedWanted) { convertedWanted = wanted; convertedWantedSince = now; }
         if (now - convertedWantedSince < 800 || wanted is not null && (TrackLanguagesPending(LibVLCSharp.Shared.TrackType.Audio) || TrackLanguagesPending())) return;
         _ = Guard(() => ConvertRoomVideo(room!, media, wanted));
+    }
+
+    private static string Mbps(long kbps) => (kbps / 1000.0).ToString("0.#");
+
+    // The slowest viewer's connection against what the room is sent, and the quality that would suit it better.
+    private sealed record QualityAdvice(string Name, int Kbps, bool Others, long NeededKbps, StreamQuality? Suggestion, bool SuggestionFits);
+    // The quality being offered in the player, for which video.
+    private (string MediaId, string Quality)? qualityOffered;
+    // The video whose offer was answered or left alone: it is not offered twice. The menu goes on saying what would fit.
+    private string? qualityOfferAnswered;
+    private long qualitySlowSince, qualityOfferSince, qualityFineSince;
+    private const int OfferAfterMs = 10000, OfferForMs = 45000, OfferGraceMs = 5000;
+
+    // Offers whoever plays the video a lower quality once the slowest viewer has been receiving less than is sent
+    // for a while. The measurement moves, so the card neither appears nor leaves on a single reading.
+    private void RefreshQualityOffer(SharedMedia? media, QualityAdvice? advice)
+    {
+        var now = Environment.TickCount64;
+        var better = media is not null && qualityOfferAnswered != media.Id && !pictureInPicture ? advice?.Suggestion : null;
+        if (better is null) qualitySlowSince = 0; else if (qualitySlowSince == 0) qualitySlowSince = now;
+        var shown = qualityOffered is { } offer && offer.MediaId == media?.Id && qualityOfferAnswered != media.Id && !pictureInPicture;
+        if (better is not null) qualityFineSince = 0; else if (qualityFineSince == 0) qualityFineSince = now;
+        if (shown && better is null && now - qualityFineSince < OfferGraceMs) { PlaceUpNextCard(); return; }
+        var show = better is not null && (shown || now - qualitySlowSince >= OfferAfterMs);
+        if (show && !shown)
+        {
+            qualityOfferSince = now;
+            PlaybackDiagnostics.Record("stream-quality-offer", new { receivedKbps = advice!.Kbps, neededKbps = advice.NeededKbps, offered = better!.Id, fits = advice.SuggestionFits });
+        }
+        if (show && now - qualityOfferSince > OfferForMs) { qualityOfferAnswered = media!.Id; show = false; }
+        qualityOffered = show ? (media!.Id, better!.Id) : null;
+        if (show)
+        {
+            QualityOfferText.Text = $"{advice!.Name} is receiving about {Mbps(advice.Kbps)} Mbps, and what is sent now needs about {Mbps(advice.NeededKbps)}. " +
+                $"{better!.Name} (about {better.TotalMbps:0.#} Mbps) {(advice.SuggestionFits ? "would keep up." : "is the smallest there is.")}";
+            QualityOfferSwitchText.Text = "Switch to " + better.Name;
+        }
+        var visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (QualityOffer.Visibility != visibility) QualityOffer.Visibility = visibility;
+        PlaceUpNextCard();
+    }
+
+    private void QualityOfferAccepted(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (qualityOffered is not { } offer || !StreamsRoomVideo || room?.Snapshot?.Media?.Id != offer.MediaId) return;
+        qualityOfferAnswered = offer.MediaId;
+        PlaybackDiagnostics.Record("stream-quality-offer-answer", new { accepted = true, quality = offer.Quality });
+        library.Setting(StreamQuality.SettingKey, offer.Quality);
+        qualityNotice = null;
+        RefreshStreamQuality();
+    }
+
+    private void QualityOfferDeclined(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (qualityOffered is not { } offer) return;
+        qualityOfferAnswered = offer.MediaId;
+        PlaybackDiagnostics.Record("stream-quality-offer-answer", new { accepted = false, quality = offer.Quality });
+        RefreshStreamQuality();
     }
 
     // The video this app streams to the room, when it was first seen, and whether its converted stream was announced.

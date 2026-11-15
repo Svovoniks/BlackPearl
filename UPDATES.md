@@ -285,8 +285,21 @@ the furthest request. Changing the quality, audio track or subtitles makes a new
 stream, which viewers reopen at the room's position. Apps from before converted
 streams ignore the offer and are served the file. Viewers of a converted stream
 cannot change tracks, and a room reconnect downloads its pieces again.
-The diagnostics log records `stream-quality` and `stream-convert` events on the
-streaming side and `piece-read` on the viewer's.
+The menu shows what sending the file takes (its size over its length) beside
+Original. Each viewer's app measures **how fast the video reaches it**: the bytes
+that arrive over the time it has at least eight reads under way (`TransferMeter`),
+which is when the connection, not the video's bitrate, sets the pace. It needs
+four such seconds within the last twenty. Every two seconds it sends a fresh
+measurement to whoever plays the video as `receive-rate`, only if that app said it
+takes it (`HostRoomState.Features`); the report changes nothing in the room. The
+streamer's menu names the slowest viewer measured in the last minute. When a
+measurement from the last ten seconds stays below what is sent plus 20% for ten
+seconds, the player offers the best quality that fits (`StreamQuality.Suggest`),
+or the smallest when none does, once per video; the card leaves after 45 seconds.
+Nothing is measured while nobody else is in the room, or once a viewer has the
+whole video buffered.
+The diagnostics log records `stream-quality`, `stream-convert` and
+`stream-quality-offer` events on the streaming side and `piece-read` on the viewer's.
 `dotnet run --project tests/BlackPearl.Smoke -c Release -- --buffer-run <video> --quality 720p`
 measures it on a real video, and `-- --stream-frame <video> <seconds> <quality> <picture.png>`
 saves the frame viewers get.

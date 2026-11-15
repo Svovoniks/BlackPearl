@@ -28,6 +28,21 @@ public sealed record StreamQuality(string Id, string Name, int Height, int Video
         var height = (int)Math.Round((double)probe.Height * quality.Height / Math.Max(probe.ClassHeight, quality.Height));
         return new(quality, Math.Min(probe.Height, height) / 2 * 2, fileBytes * 8 / Math.Max(1, probe.DurationMs));
     }
+    // A stream needs this much more than its average bitrate for the connection to keep up through its busier scenes.
+    public const double Headroom = 1.2;
+    public static bool Fits(long neededKbps, int receivedKbps) => neededKbps * Headroom <= receivedKbps;
+    // What the room is sent for a choice: the quality's bitrate when the file is converted to it, otherwise the file's own.
+    public static long NeededKbps(VideoProbe probe, long fileBytes, string? chosenId) =>
+        Find(chosenId) is { } chosen && Plan(probe, fileBytes, chosen) is { Smaller: true } plan ? plan.Quality.VideoKbps + AudioKbps : fileBytes * 8 / Math.Max(1, probe.DurationMs);
+    // For a connection that carries this much: null while the choice fits it or nothing smaller exists; otherwise
+    // the best quality that fits, or the smallest there is when none does.
+    public static StreamQuality? Suggest(VideoProbe probe, long fileBytes, string? chosenId, int receivedKbps)
+    {
+        var needed = NeededKbps(probe, fileBytes, chosenId);
+        if (Fits(needed, receivedKbps)) return null;
+        var smaller = For(probe.ClassHeight).Where(q => q.VideoKbps + AudioKbps < needed && Plan(probe, fileBytes, q).Smaller).ToArray();
+        return smaller.FirstOrDefault(q => Fits(q.VideoKbps + AudioKbps, receivedKbps)) ?? smaller.LastOrDefault();
+    }
 }
 
 public sealed record StreamPlan(StreamQuality Quality, int Height, long FileKbps)

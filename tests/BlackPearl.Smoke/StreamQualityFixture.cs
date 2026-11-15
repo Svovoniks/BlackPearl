@@ -259,6 +259,41 @@ static class StreamQualityFixture
             "a wide film shrinks by as much as its full frame would, and a small video keeps its size");
         check(!Plan(film, 2761, "1080p").Smaller && !Plan(film, 2761, "720p").Smaller && Plan(film, 2761, "480p").Smaller && !Plan(Sized(3840, 2160), 1500, "480p").Smaller && Plan(Sized(640, 360), 6813, "480p").Smaller,
             "a file whose bitrate is already below the quality's is not converted, whatever its size");
+
+        // What a connection carries against what is sent: the best quality that fits it is suggested.
+        StreamQuality? Suggest(int fileKbps, string chosen, int received) => StreamQuality.Suggest(film, Bytes(fileKbps), chosen, received);
+        check(StreamQuality.NeededKbps(film, Bytes(6813), StreamQuality.OriginalId) == 6813 && StreamQuality.NeededKbps(film, Bytes(6813), "720p") == 2960 && StreamQuality.NeededKbps(film, Bytes(2761), "720p") == 2761,
+            "a choice needs its quality's bitrate when the file is converted to it, and the file's own otherwise");
+        check(Suggest(6813, StreamQuality.OriginalId, 20000) is null && Suggest(6813, StreamQuality.OriginalId, 8200) is null && Suggest(6813, StreamQuality.OriginalId, 8000)?.Id == "1080p",
+            "nothing is suggested while the connection carries the video with room to spare");
+        check(Suggest(6813, StreamQuality.OriginalId, 6000)?.Id == "720p" && Suggest(6813, "1080p", 3000)?.Id == "480p" && Suggest(6813, "1080p", 3600)?.Id == "720p",
+            "the best quality the connection carries is suggested");
+        check(Suggest(6813, StreamQuality.OriginalId, 900)?.Id == "480p" && Suggest(6813, "480p", 900) is null, "a connection slower than every quality is offered the smallest, and nothing once that is chosen");
+        check(Suggest(2761, StreamQuality.OriginalId, 2500)?.Id == "480p" && Suggest(2761, "720p", 2500)?.Id == "480p" && Suggest(1500, StreamQuality.OriginalId, 1000) is null,
+            "only qualities that would make the file smaller are suggested");
+
+        // The speed of a connection is measured only while many reads are under way.
+        var time = 0L; var meter = new TransferMeter(() => time);
+        void Reads(int count) { for (var i = 0; i < count; i++) meter.Started(); }
+        Reads(4);
+        for (var second = 0; second < 10; second++) { time += 1000; meter.Finished(125000); meter.Started(); }
+        check(meter.Rate is null, "a few reads at a time say nothing about the connection");
+        Reads(12);
+        for (var tick = 0; tick < 30; tick++) { time += 100; meter.Finished(25000); meter.Started(); }
+        check(meter.Rate is null, "three seconds are too few to measure");
+        for (var tick = 0; tick < 30; tick++) { time += 100; meter.Finished(25000); meter.Started(); }
+        check(meter.Rate is { Kbps: 2000, AgeMs: 0 }, $"the speed is what arrived over the time many reads were under way ({meter.Rate?.Kbps} kbps)");
+        for (var i = 0; i < 12; i++) meter.Finished(0);
+        for (var second = 0; second < 8; second++) { time += 1000; meter.Finished(1000); meter.Started(); }
+        check(meter.Rate is { Kbps: 2000, AgeMs: 8000 }, "time spent playing from the buffer is left out, and the measurement ages");
+        Reads(12);
+        time += 6000; meter.Finished(0); meter.Started();
+        check(meter.Rate is { Kbps: < 1100 and > 900, AgeMs: 0 }, $"a connection that stalls while video is wanted measures slower ({meter.Rate?.Kbps} kbps)");
+        for (var i = 0; i < 12; i++) meter.Finished(0);
+        time += 30000;
+        Reads(12);
+        for (var tick = 0; tick < 50; tick++) { time += 100; meter.Finished(100000); meter.Started(); }
+        check(meter.Rate is { Kbps: 8000 }, $"measurements older than twenty seconds are forgotten ({meter.Rate?.Kbps} kbps)");
     }
 
     private static int Pid(byte[] stream, int packet) => (stream[packet * 188 + 1] & 0x1F) << 8 | stream[packet * 188 + 2];

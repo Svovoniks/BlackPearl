@@ -242,6 +242,9 @@ public partial class MainWindow
         var padding = PlaybackControls.Padding;
         var margin = new Thickness(0, 0, 0, PlaybackControls.IsVisible ? 10 - padding.Top : padding.Bottom);
         if (UpNextCard.Margin != margin) UpNextCard.Margin = margin;
+        // The quality offer has that place while there is no up-next card, and sits above the card when there is one.
+        var offer = UpNextCard.Visibility == Visibility.Visible ? new Thickness(0, 0, 0, 8) : margin;
+        if (QualityOffer.Margin != offer) QualityOffer.Margin = offer;
     }
 
     // Windows rounds the window but not LibVLC's overlay window above the video, so the overlay rounds itself to match,
@@ -310,7 +313,7 @@ public partial class MainWindow
     {
         var width = e.NewSize.Width;
         FitPlayerEmptyContent();
-        UpNextCard.Width = Math.Clamp(width - 16, 240, 340);
+        UpNextCard.Width = QualityOffer.Width = Math.Clamp(width - 16, 240, 340);
         // Resizing fires this continuously; only re-lay out the bar when it crosses a density step.
         var density = width >= 900 ? 6 : width >= 640 ? 5 : width >= 580 ? 4 : width >= 540 ? 3 : width >= 520 ? 2 : width >= 440 ? 1 : 0;
         if (density == controlsDensity) return;

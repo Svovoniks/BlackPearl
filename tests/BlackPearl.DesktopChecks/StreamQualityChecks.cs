@@ -153,6 +153,64 @@ static class StreamQualityChecks
             await Wait(() => own.Snapshot is { Stream: null, Media: not null } && own.HostedStream is null && Field("streamConverter") is null, "Original streams the file itself and stops converting");
             check(Text("QualityPillText") == "Original" && store.Setting(StreamQuality.SettingKey) == StreamQuality.OriginalId, "the pill and the saved choice go back to Original");
 
+            // Original says what sending the file takes, and the menu what the viewer's connection carries.
+            string Detail(int row) { var item = Control<ListBox>("QualityChoices").Items[row]!; return (string)item.GetType().GetProperty("Detail")!.GetValue(item)!; }
+            await Wait(() => System.Text.RegularExpressions.Regex.IsMatch(Detail(0), @"^The file, about \d+(\.\d)? Mbps$"), "Original says what sending the file takes", 10);
+            Console.WriteLine("Original: " + Detail(0));
+            var offerCard = Control<Border>("QualityOffer");
+            // Riley's app reports its speed every second, as a viewer's does every two while it pulls video.
+            var reported = 50000;
+            using var reporting = new Timer(_ => { if (Volatile.Read(ref reported) is > 0 and var kbps) typeof(RoomClient).GetMethod("ReportReceiveRate", flags)!.Invoke(riley, [kbps]); }, null, 0, 1000);
+            await Wait(() => Text("QualityHint").Contains("Riley is receiving about 50 Mbps"), "the menu says how fast the video reaches the viewer", 10);
+            await Task.Delay(1000);
+            check(offerCard.Visibility != Visibility.Visible && !Text("QualityHint").Contains("would keep up"), "a connection that carries the video gets no offer");
+
+            // Riley's connection carries 2 Mbps of a film that takes 8. Once that has lasted, a quality that fits is offered.
+            Volatile.Write(ref reported, 2000);
+            await Wait(() => Text("QualityHint").Contains("about 2 Mbps"), "the menu follows the measurement", 10);
+            var slow = Stopwatch.StartNew();
+            check(offerCard.Visibility != Visibility.Visible && Text("QualityHint").Contains("480p would keep up"), "the menu says at once which quality would keep up: " + Text("QualityHint"));
+            await Wait(() => offerCard.Visibility == Visibility.Visible, "a lower quality is offered when the viewer receives less than is sent", 30);
+            check(slow.ElapsedMilliseconds >= 8500, $"the offer waits for the slow connection to last ({slow.ElapsedMilliseconds} ms)");
+            Console.WriteLine("Offer: " + Text("QualityOfferText") + " [" + Text("QualityOfferSwitchText") + "]");
+            check(Text("QualityOfferText").Contains("Riley is receiving about 2 Mbps") && Text("QualityOfferText").Contains("480p (about 1.6 Mbps) would keep up") && Text("QualityOfferSwitchText") == "Switch to 480p",
+                "the offer names the viewer, the speeds and the best quality that fits");
+            Call("ShowPlayerControls"); window.UpdateLayout(); await Task.Delay(400); window.UpdateLayout();
+            var dock = Control<FrameworkElement>("PlaybackDock"); var offerText = Control<TextBlock>("QualityOfferText");
+            var offerRoot = (FrameworkElement)PresentationSource.FromVisual(offerCard)!.RootVisual;
+            var cardBox = offerCard.TransformToAncestor(offerRoot).TransformBounds(new Rect(0, 0, offerCard.ActualWidth, offerCard.ActualHeight));
+            var dockBox = dock.TransformToAncestor(offerRoot).TransformBounds(new Rect(0, 0, dock.ActualWidth, dock.ActualHeight));
+            Console.WriteLine($"Offer card {cardBox}; dock {dockBox}; surface {offerRoot.ActualWidth:F0} by {offerRoot.ActualHeight:F0}");
+            check(cardBox.Bottom <= dockBox.Top && cardBox.Left >= 0 && cardBox.Right <= offerRoot.ActualWidth && cardBox.Top >= 0 && offerText.ActualHeight >= offerText.DesiredSize.Height - 0.5 && offerText.ActualWidth <= offerCard.ActualWidth,
+                "the offer sits above the bar, inside the player, with its whole text shown");
+            await Shot("4-quality-offer");
+            Control<ToggleButton>("QualityPill").IsChecked = true;
+            await Wait(() => Control<Popup>("QualityMenu").IsOpen, "the quality menu opens beside the offer", 5);
+            await Shot("5-menu-with-speed");
+            Call("ClosePlayerMenus");
+            var buttons = ((Panel)((FrameworkElement)Control<TextBlock>("QualityOfferSwitchText").Parent).Parent).Children.OfType<Button>().ToArray();
+            // The checks' window is kept off the screen, where the mouse cannot reach: the buttons' clicks are raised.
+            buttons[1].RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            await Wait(() => own.Snapshot?.Stream is { Quality: "480p", Preparing: false } && offerCard.Visibility != Visibility.Visible && store.Setting(StreamQuality.SettingKey) == "480p" && Text("QualityPillText") == "480p",
+                "accepting switches the room's stream to the offered quality and puts the offer away");
+            await Task.Delay(1500);
+            check(offerCard.Visibility != Visibility.Visible && !Text("QualityHint").Contains("would keep up"), "nothing more is offered once what is sent fits the connection");
+
+            // Back on the file, the offer comes again only because the check clears its memory of the answer; "Not now" keeps the quality.
+            Choose("Original");
+            await Wait(() => own.Snapshot is { Stream: null } && Text("QualityHint").Contains("480p would keep up"), "back on the file, the menu says again what would keep up", 15);
+            await Task.Delay(1200);
+            check(offerCard.Visibility != Visibility.Visible, "a video whose offer was answered is not offered again");
+            typeof(MainWindow).GetField("qualityOfferAnswered", flags)!.SetValue(window, null);
+            typeof(MainWindow).GetField("qualitySlowSince", flags)!.SetValue(window, Environment.TickCount64 - 20000);
+            await Wait(() => offerCard.Visibility == Visibility.Visible, "the offer is shown again for the check", 10);
+            buttons[0].RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            await Wait(() => offerCard.Visibility != Visibility.Visible, "Not now puts the offer away", 5);
+            await Task.Delay(1500);
+            check(offerCard.Visibility != Visibility.Visible && store.Setting(StreamQuality.SettingKey) == StreamQuality.OriginalId && own.Snapshot is { Stream: null } && Text("QualityHint").Contains("480p would keep up"),
+                "the quality stays as it was, the offer stays away, and the menu still says what would keep up");
+            Volatile.Write(ref reported, 0);
+
             // A video that is already small is not made larger; the menu says so.
             Choose("480p");
             await Wait(() => own.Snapshot?.Stream is { Quality: "480p" }, "a lower quality converts again");

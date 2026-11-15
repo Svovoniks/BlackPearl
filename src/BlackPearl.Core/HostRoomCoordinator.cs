@@ -1,7 +1,8 @@
 namespace BlackPearl.Core;
 
 // Epoch is the room service's count of streaming-role changes when this state was published.
-internal sealed record HostRoomState(long Sequence, long HostNowMs, RoomSnapshot Snapshot, long Epoch = 0);
+// Features says what whoever plays the video accepts beyond the first protocol 2 apps; see RoomClient.HostFeatures.
+internal sealed record HostRoomState(long Sequence, long HostNowMs, RoomSnapshot Snapshot, long Epoch = 0, int Features = 0);
 
 // Accessed by RoomClient's single control event loop. The room service supplies who is in the room and who holds the
 // streaming role; that member, called the host here, owns all playback, readiness and queue state while it holds it.
