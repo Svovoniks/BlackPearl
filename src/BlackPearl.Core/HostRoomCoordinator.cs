@@ -39,9 +39,9 @@ internal sealed class HostRoomCoordinator(string host)
         voice.Values.Where(v => people.ContainsKey(v.Peer)).OrderBy(v => v.Slot).ToArray(), GuestPointers: true, Stream: Stream);
     // The converted copy of the video on offer, if any; see RoomStream.
     public RoomStream? Stream { get; private set; }
-    internal static bool ValidStream(RoomStream s) => s.Id is { Length: > 0 and <= 64 } && s.Quality is { Length: > 0 and <= 16 } &&
+    internal static bool ValidStream(RoomStream s) => s.Id is { Length: > 0 and <= 64 } && s.Quality is { Length: > 0 and <= 16 } && (s.Preparing ||
         s.Height is >= 144 and <= 4320 && s.VideoKbps is >= 100 and <= 100000 && s.DurationMs is > 0 and <= 604800000 &&
-        s.SegmentMs is >= 1000 and <= 30000 && s.Segments is > 0 and <= 700000 && s.Segments == (int)((s.DurationMs + s.SegmentMs - 1) / s.SegmentMs);
+        s.SegmentMs is >= 1000 and <= 30000 && s.Segments is > 0 and <= 700000 && s.Segments == (int)((s.DurationMs + s.SegmentMs - 1) / s.SegmentMs));
     // Everyone whose app supports voice reports its state once connected; each keeps a small slot that
     // labels its relayed audio frames, so listeners can tell speakers apart without per-frame names.
     private readonly Dictionary<string, VoiceMember> voice = [];

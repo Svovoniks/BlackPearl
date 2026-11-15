@@ -1524,6 +1524,13 @@ public partial class MainWindow : Window
             cancellation.Token.ThrowIfCancellationRequested();
             if (target?.Playing == true) SendReadiness("buffering");
             if (bridge is not null) await bridge.DisposeAsync(); bridge = null;
+            // The converted stream is on its way: opening the file now would only be replaced a moment later.
+            if (converted is { Preparing: true })
+            {
+                RoomHeading.Text = client.Snapshot?.Name ?? media.Title; RoomSubtitle.Text = media.Title + " · " + StreamCaption(client);
+                PlaybackDiagnostics.Record("media-input", new { waitingFor = converted.Quality });
+                return;
+            }
             var source = await client.GetSourceAsync(media, cancellation.Token);
             if (client != room || generation != loadGeneration) return;
             Uri? streamUri = null;

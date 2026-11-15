@@ -294,6 +294,9 @@ static class PlayerLayoutChecks
                 .Where(element => element.Visibility == Visibility.Visible).ToList();
             Check(visible.All(InBar), $"every pill shown with the stream quality pill fits a {width}px bar");
         }
+        Settle(700, 360);
+        Check(!pills.Folded.Contains(participantsPill) || pills.Folded.Contains(qualityPill), "the stream quality pill is the first to fold, before the pills that were there already");
+        Settle(400, 360);
         Check(pills.Folded.Contains(qualityPill) && qualityMenu.PlacementTarget == overflowPill &&
             overflowItems.Children.OfType<Button>().Any(row => System.Windows.Automation.AutomationProperties.GetName(row) == "Stream quality"),
             "a narrow bar folds the stream quality pill into the … menu");

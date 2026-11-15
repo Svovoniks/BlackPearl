@@ -101,16 +101,30 @@ static class StreamQualityChecks
             await own.ConnectAsync(url, "Sam", persistent: false, roomName: "Quality");
             await own.StartStreamAsync(RoomClient.PrepareHostedFile(film, "Quality film"), true);
             Call("ShowPage", "Room");
-            await Wait(() => (bool)Field("ready")! && own.Snapshot?.Stream is { Quality: "480p", Height: 480 }, "the saved quality is applied to the video played for the room");
+            await Wait(() => own.Snapshot?.Stream is { Quality: "480p" }, "as the video starts, the room is told a converted stream is coming", 5);
+            await Wait(() => (bool)Field("ready")! && own.Snapshot?.Stream is { Quality: "480p", Height: 480, Preparing: false }, "the saved quality is applied to the video played for the room");
             var first = own.Snapshot!.Stream!;
             check(first.Segments == (int)Math.Ceiling(first.DurationMs / 4000.0) && Math.Abs(first.DurationMs - 60000) < 300 && own.HostedStream?.Stream == first, "the converted stream covers the whole film in four-second pieces");
             Call("ShowPlayerControls"); Call("PlaybackTickCore");
             check(PillStrip.GetShown(Control<ToggleButton>("QualityPill")) && Text("QualityPillText") == "480p", "the player's quality pill shows the chosen quality (" + Text("QualityPillText") + ")");
+            Call("PlaybackTickCore"); window.UpdateLayout(); await Task.Delay(300); Call("PlaybackTickCore"); window.UpdateLayout();
+            var strip = Control<PillStrip>("PlayerPills");
+            Console.WriteLine("Pills: " + string.Join(", ", new[] { "AudioPill", "SubtitlePill", "QueuePill", "ParticipantsPill", "QualityPill", "OverflowPill" }.Select(name => $"{name} {Control<ToggleButton>(name).DesiredSize.Width:F0}{(strip.Folded.Contains(Control<ToggleButton>(name)) ? " folded" : "")}")) + $"; strip {strip.ActualWidth:F0} of {((FrameworkElement)strip.Parent).ActualWidth:F0}");
+            check(strip.Folded.Count == 0, "the bar grows by the quality pill's width, so no other pill is pushed out of it");
             check(Choices().SequenceEqual(["Original", "1080p", "720p", "480p"]) && Control<ListBox>("QualityChoices").IsEnabled, "whoever plays the video chooses among the qualities it is large enough for");
             await Shot("1-streamer-pill");
-            Control<Popup>("QualityMenu").IsOpen = true;
+            // The pill opens its menu like the others: above the pill, and gone when another pill's menu opens.
+            var qualityPill = Control<ToggleButton>("QualityPill"); var qualityMenu = Control<Popup>("QualityMenu");
+            qualityPill.IsChecked = true;
+            await Wait(() => qualityMenu.IsOpen && qualityMenu.Child is FrameworkElement { ActualHeight: > 100 }, "the quality pill opens its menu", 5);
             await Shot("2-streamer-menu");
-            Control<Popup>("QualityMenu").IsOpen = false;
+            var card = (FrameworkElement)qualityMenu.Child;
+            var above = card.PointToScreen(new Point(0, card.ActualHeight)).Y <= qualityPill.PointToScreen(new Point(0, qualityPill.ActualHeight)).Y + 1;
+            check(above && card.ActualHeight < 400 && card.ActualWidth < 500 && qualityMenu.PlacementTarget == qualityPill, $"the menu is a compact card above its pill ({card.ActualWidth:F0} by {card.ActualHeight:F0})");
+            Control<ToggleButton>("AudioPill").IsChecked = true;
+            await Wait(() => Control<Popup>("AudioMenu").IsOpen && !qualityMenu.IsOpen && qualityPill.IsChecked == false, "opening another pill's menu closes the quality menu", 5);
+            Call("ClosePlayerMenus");
+            await Wait(() => !Control<Popup>("AudioMenu").IsOpen, "the menus close", 5);
 
             // Someone else in the room receives the converted video over a real connection.
             var riley = new RoomClient(); others.Add(riley);
@@ -162,7 +176,8 @@ static class StreamQualityChecks
             var offered = new RoomStream(Guid.NewGuid().ToString("N"), host.Snapshot!.Media!.Id, quality.Id, 480, quality.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs));
             using var hostStore = SegmentStore.TryCreate(Path.Combine(directory, "host-converted"), offered.Segments)!;
             using var converter = new StreamConverter(ffmpeg!, new StreamInput(film, probe, 0, null), offered, hostStore);
-            host.HostedStream = converter; host.Send(new("stream", Data: Wire.Serialize(offered)));
+            // The stream is announced first; a viewer who arrives now waits for it rather than opening the file.
+            host.Send(new("stream", Data: Wire.Serialize(new RoomStream("preparing", offered.MediaId, quality.Id, 0, 0, 0, 0, 0, Preparing: true))));
             void HostReady()
             {
                 if (host.Snapshot is { Media: { } media, Playback: { } playback })
@@ -172,6 +187,10 @@ static class StreamQualityChecks
             var me = (RoomClient)Call("NewRoom")!;
             await me.ConnectAsync(url, "Sam", host.Identity!.Room);
             Call("ShowPage", "Room");
+            await Wait(() => (string?)Field("loadedStream") == "preparing", "a viewer told a stream is coming waits for it");
+            await Task.Delay(1500); Call("PlaybackTickCore");
+            check(Field("bridge") is null && !(bool)Field("ready")! && Text("QualityPillText") == "480p" && Text("QualityHint").Contains("Riley is preparing"), "while it waits it opens nothing, and the quality menu says the video is being prepared");
+            host.HostedStream = converter; host.Send(new("stream", Data: Wire.Serialize(offered)));
             await Wait(() => Field("bridge") is MediaBridge { PlaysConvertedStream: true } && (bool)Field("ready")! && (string?)Field("loadedStream") == offered.Id, "a viewer opens the converted stream instead of the file");
             var player = (MediaPlayer)Field("player")!;
             HostReady();
@@ -197,7 +216,8 @@ static class StreamQualityChecks
             await Wait(() => Field("bridge") is MediaBridge { PlaysConvertedStream: false } && (bool)Field("ready")! && Field("loadedStream") is null, "when the stream is withdrawn the viewer opens the file");
             HostReady();
             await Wait(() => player.IsPlaying && player.Time is > 40000 and < 59000, "and playback continues from where the room is");
-            check(Text("QualityPillText") == "Original", "the viewer's pill follows the room back to Original");
+            Call("PlaybackTickCore");
+            check(!PillStrip.GetShown(Control<ToggleButton>("QualityPill")), "with the file itself arriving, a viewer has no quality pill");
         }
         finally
         {

@@ -185,6 +185,9 @@ static class StreamQualityFixture
             !room.Apply("host", new("stream", Data: Wire.Serialize(stream with { SegmentMs = 10 })), 1000, out _) && room.Snapshot.Stream == stream,
             "a stream for another video, or one whose pieces do not add up, is refused");
         check(room.Apply("host", new("stream"), 1000, out _) && room.Snapshot.Stream is null, "the stream is withdrawn to go back to the file");
+        var coming = new RoomStream("preparing", "movie", "720p", 0, 0, 0, 0, 0, Preparing: true);
+        check(room.Apply("host", new("stream", Data: Wire.Serialize(coming)), 1000, out _) && room.Snapshot.Stream == coming && !HostRoomCoordinator.ValidStream(coming with { Preparing = false }),
+            "a stream can be announced before it is ready");
         room.Apply("host", new("stream", Data: Wire.Serialize(stream)), 1000, out _);
         room.Apply("host", new("media", Data: Wire.Serialize(new SharedMedia("next", "Next", 1024, ".mkv"))), 1000, out _);
         check(room.Snapshot.Stream is null, "the next video starts as its file");

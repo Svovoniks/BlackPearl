@@ -51,7 +51,7 @@ public partial class MainWindow
         PlayerUpdateHost.Resources.MergedDictionaries.Add(Application.Current.Resources);
         VolumeFlyout.PlacementTarget = MuteButton;
         MuteButton.GotKeyboardFocus += (_, _) => { if (InputManager.Current.MostRecentInputDevice is KeyboardDevice) ShowVolumeFlyout(); };
-        foreach (var (pill, menu) in new[] { (AudioPill, AudioMenu), (SubtitlePill, SubtitleMenu), (QualityPill, QualityMenu), (QueuePill, PlayerQueueMenu), (ParticipantsPill, ParticipantsMenu), (OverflowPill, OverflowMenu) })
+        foreach (var (pill, menu) in new[] { (AudioPill, AudioMenu), (SubtitlePill, SubtitleMenu), (QueuePill, PlayerQueueMenu), (ParticipantsPill, ParticipantsMenu), (QualityPill, QualityMenu), (OverflowPill, OverflowMenu) })
         {
             menu.PlacementTarget = pill;
             // A folded pill's menu opens from the overflow pill, so a click there only closes it.
@@ -87,7 +87,7 @@ public partial class MainWindow
     private void OpenPillUnderPointer(System.Windows.Controls.Primitives.ToggleButton closing)
     {
         if (Mouse.LeftButton != MouseButtonState.Pressed) return;
-        var pill = new[] { AudioPill, SubtitlePill, QualityPill, QueuePill, ParticipantsPill, OverflowPill }.FirstOrDefault(candidate =>
+        var pill = new[] { AudioPill, SubtitlePill, QueuePill, ParticipantsPill, QualityPill, OverflowPill }.FirstOrDefault(candidate =>
             candidate != closing && candidate.IsVisible && candidate.IsEnabled && new Rect(candidate.RenderSize).Contains(Mouse.GetPosition(candidate)));
         if (pill is null) return;
         pillReleaseWatch?.Stop();
@@ -327,8 +327,8 @@ public partial class MainWindow
 
     private (System.Windows.Controls.Primitives.ToggleButton Pill, PlayerMenuPopup Menu, TextBlock Icon, TextBlock Text, TextBlock Detail)[] PillMenus =>
         [(AudioPill, AudioMenu, AudioPillIcon, AudioPillText, AudioPillDetail), (SubtitlePill, SubtitleMenu, SubtitlePillIcon, SubtitlePillText, SubtitlePillDetail),
-         (QualityPill, QualityMenu, QualityPillIcon, QualityPillText, QualityPillDetail),
-         (QueuePill, PlayerQueueMenu, QueuePillIcon, QueuePillText, QueuePillDetail), (ParticipantsPill, ParticipantsMenu, ParticipantsPillIcon, ParticipantsPillText, ParticipantsPillDetail)];
+         (QueuePill, PlayerQueueMenu, QueuePillIcon, QueuePillText, QueuePillDetail), (ParticipantsPill, ParticipantsMenu, ParticipantsPillIcon, ParticipantsPillText, ParticipantsPillDetail),
+         (QualityPill, QualityMenu, QualityPillIcon, QualityPillText, QualityPillDetail)];
 
     // The … menu lists the folded pills, each opening its own menu from the … pill, then any bar buttons hidden for width.
     private void RefreshOverflowMenu()

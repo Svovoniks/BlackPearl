@@ -74,7 +74,8 @@ public record SubtitleAttachment(string MediaId, SharedMedia Subtitle);
 // A copy of the room's video converted while it plays, which viewers play instead of the file itself: H.264 at Height
 // and about VideoKbps, the room's audio track, its subtitles drawn into the picture. It arrives in pieces of SegmentMs;
 // piece k holds the video from k * SegmentMs. A new Id replaces the stream, as when the quality or a track changes.
-public record RoomStream(string Id, string MediaId, string Quality, int Height, int VideoKbps, long DurationMs, int SegmentMs, int Segments);
+// Preparing announces a stream that is not ready yet: viewers wait for it rather than start on the file and switch.
+public record RoomStream(string Id, string MediaId, string Quality, int Height, int VideoKbps, long DurationMs, int SegmentMs, int Segments, bool Preparing = false);
 public record WireMessage(string Type, string? Target = null, string? Sender = null,
     string? Text = null, string? Data = null, long Number = 0);
 // The first message a client sends the room service. Room is the invitation's code, or null to create a room. Key is

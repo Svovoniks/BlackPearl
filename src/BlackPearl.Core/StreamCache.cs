@@ -22,7 +22,7 @@ public sealed class StreamCache : IDisposable
     private int stored;
     private long fullUntil = long.MinValue;
     private bool recheck, reported;
-    private volatile bool disposed;
+    private volatile bool disposed, broken;
 
     private StreamCache(SafeFileHandle file, string path, SharedMedia media, long reserve, int fullRetryMs)
     {
@@ -73,7 +73,7 @@ public sealed class StreamCache : IDisposable
     {
         get
         {
-            if (disposed) return false;
+            if (disposed || broken) return false;
             var until = Volatile.Read(ref fullUntil);
             if (until == long.MinValue) return true;
             var now = Environment.TickCount64;
@@ -89,12 +89,13 @@ public sealed class StreamCache : IDisposable
     {
         lock (gate)
         {
-            if (disposed) return false;
+            if (disposed || broken) return false;
             var index = offset / MediaStreaming.ChunkBytes;
             if (slots[index] != 0) return true;
             if (!HasSpace()) return false;
             try { RandomAccess.Write(file, data, (long)stored * MediaStreaming.ChunkBytes); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException) { Full(ex.GetType().Name); return false; }
+            // A file that cannot be written, as with a quota or a failing disk, is not tried again for this video.
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException) { Full(ex.GetType().Name); broken = true; return false; }
             Volatile.Write(ref slots[index], ++stored);
             return true;
         }

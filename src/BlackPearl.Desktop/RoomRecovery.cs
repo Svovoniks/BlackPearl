@@ -41,7 +41,9 @@ public partial class MainWindow
     private async Task CloseUnusedStreamCache(RoomClient client)
     {
         try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30), lifetime.Token); }
-        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException) { }
+        catch (TimeoutException) { }
+        // The connection failed again before anyone said what the room plays: the next reconnect decides.
+        catch (Exception ex) when (ex is IOException or OperationCanceledException) { return; }
         if (room == client && streamCache is { } kept && (client.Identity?.Host == true || client.Snapshot?.Media is not { } media || !kept.Matches(media))) CloseStreamCache();
     }
     // Begin read-ahead once the first frames are playing, so it never competes with startup for the streamer's

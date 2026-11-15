@@ -31,6 +31,7 @@ public partial class MainWindow
     // Why the chosen quality is not what the room gets, such as a video that is already smaller.
     private (string MediaId, string Text, bool Failed)? qualityNotice;
 
+    private const double PlaybackDockWidth = 980;
     private string SavedStreamQuality => library.Setting(StreamQuality.SettingKey) is { } saved && StreamQuality.Find(saved) is not null ? saved : StreamQuality.OriginalId;
     private bool StreamsRoomVideo => room is { IsConnected: true, Identity.Host: true, HostedMedia: ILocalMediaSource } client && client.Snapshot?.Media is not null;
 
@@ -44,19 +45,24 @@ public partial class MainWindow
     private void RefreshStreamQuality()
     {
         var media = room?.IsConnected == true ? room.Snapshot?.Media : null;
-        PillStrip.SetShown(QualityPill, media is not null);
+        var streaming = media is not null && StreamsRoomVideo;
+        var stream = media is not null && room!.Snapshot!.Stream is { } offered && offered.MediaId == media.Id ? offered : null;
+        // Whoever plays the video always has the choice. A viewer sees the pill while what arrives is not the file itself.
+        PillStrip.SetShown(QualityPill, streaming || stream is not null);
+        // The bar is as wide as its other pills need. Where the window has room it grows by this pill's width, so the
+        // pills that were there keep their place; where it has none, this pill is the first to fold.
+        var dockWidth = PlaybackDockWidth + (PillStrip.GetShown(QualityPill) ? QualityPill.DesiredSize.Width > 0 ? Math.Ceiling(QualityPill.DesiredSize.Width) : 100 : 0);
+        if (PlaybackDock.MaxWidth != dockWidth) PlaybackDock.MaxWidth = dockWidth;
         if (media is null) { if (convertedFrom is not null || streamPreparation is not null) StopConversion(); return; }
-        var streaming = StreamsRoomVideo;
-        var stream = room!.Snapshot!.Stream is { } offered && offered.MediaId == media.Id ? offered : null;
         var notice = qualityNotice is { } said && said.MediaId == media.Id ? said : ((string, string Text, bool Failed)?)null;
 
-        var hostedPath = streaming ? (room.HostedMedia as ILocalMediaSource)?.LocalPath : null;
+        var hostedPath = streaming ? (room!.HostedMedia as ILocalMediaSource)?.LocalPath : null;
         // The video's size decides which qualities are offered, so it is read as soon as the video is this app's to stream.
         if (hostedPath is not null && probedVideo.Path != hostedPath && probingVideo != hostedPath && Ffmpeg.Find() is { } converter) _ = Guard(() => ProbeHostedVideo(converter, hostedPath));
         var height = probedVideo.Probe is { } probe && probedVideo.Path == hostedPath ? probe.Height : int.MaxValue;
         var choices = new List<QualityChoice> { new(StreamQuality.OriginalId, "Original", "The file as it is") };
         if (streaming) choices.AddRange(StreamQuality.For(height).Select(q => new QualityChoice(q.Id, q.Name, $"about {q.TotalMbps:0.#} Mbps")));
-        else if (stream is not null) choices.Add(new(stream.Quality, stream.Quality, $"about {(stream.VideoKbps + StreamQuality.AudioKbps) / 1000.0:0.#} Mbps"));
+        else if (stream is not null) choices.Add(new(stream.Quality, stream.Quality, $"about {(StreamQuality.Find(stream.Quality)?.TotalMbps ?? (stream.VideoKbps + StreamQuality.AudioKbps) / 1000.0):0.#} Mbps"));
         var selected = streaming ? notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality : stream?.Quality ?? StreamQuality.OriginalId;
         qualityUpdating = true;
         try
@@ -68,19 +74,36 @@ public partial class MainWindow
         }
         finally { qualityUpdating = false; }
         QualityChoices.IsEnabled = streaming;
-        QualityPillDetail.Text = streamPreparing ? "Preparing…" : streaming && convertedFrom is not null && stream is not null ? "Converting" : "";
-        QualityHint.Text = !streaming ? $"{StreamerName} chooses the quality for the room."
-            : notice?.Text ?? "A lower quality is converted on this PC while the video plays. Everyone else receives the picture with the selected audio track, and the selected subtitles drawn into it.";
+        QualityHint.Text = !streaming ? stream is { Preparing: true } ? $"{StreamerName} is preparing the video in {stream.Quality}." : $"{StreamerName} chooses the quality for the room."
+            : notice?.Text ?? (streamPreparing ? "Preparing the converted video… " : "") +
+                "A lower quality is converted on this PC while the video plays. Everyone else receives the picture with the selected audio track, and the selected subtitles drawn into it.";
 
         if (!streaming) { if (convertedFrom is not null || streamPreparation is not null) StopConversion(); return; }
+        var now = Environment.TickCount64;
+        if (streamedVideo.MediaId != media.Id) streamedVideo = (media.Id, now, false);
+        // As a video starts, viewers are told a converted stream is coming, so they wait for it instead of starting on
+        // the file and switching a moment later. If it takes more than a few seconds they start on the file after all.
+        if (!streamedVideo.Announced && now - streamedVideo.Since < 1500 && stream is null && streamConverter is null && notice is null && SavedStreamQuality != StreamQuality.OriginalId)
+        {
+            streamedVideo.Announced = true;
+            SendStream(room!, new RoomStream("preparing", media.Id, SavedStreamQuality, 0, 0, 0, 0, 0, Preparing: true));
+        }
+        else if (stream is { Preparing: true } && now - streamedVideo.Since > 5000) SendStream(room!, null);
         if (!ready || loadedMedia != media.Id || player is null || nativeStopCount > 0) return;
         var wanted = WantedConversion(media, notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality);
         if (wanted == convertedFrom) { convertedWanted = wanted; return; }
         // Tracks settle over the first moments of a video; conversion starts once they have.
-        var now = Environment.TickCount64;
         if (wanted != convertedWanted) { convertedWanted = wanted; convertedWantedSince = now; }
         if (now - convertedWantedSince < 800 || wanted is not null && (TrackLanguagesPending(LibVLCSharp.Shared.TrackType.Audio) || TrackLanguagesPending())) return;
-        _ = Guard(() => ConvertRoomVideo(room, media, wanted));
+        _ = Guard(() => ConvertRoomVideo(room!, media, wanted));
+    }
+
+    // The video this app streams to the room, when it was first seen, and whether its converted stream was announced.
+    private (string? MediaId, long Since, bool Announced) streamedVideo;
+    private static void SendStream(RoomClient client, RoomStream? stream)
+    {
+        try { client.Send(new("stream", Data: stream is null ? null : Wire.Serialize(stream))); }
+        catch (IOException) { }
     }
 
     // What the room's stream should be converted from right now, or null for the file itself.
@@ -115,13 +138,12 @@ public partial class MainWindow
         void Offer(StreamConverter? converter, RoomStream? stream)
         {
             client.HostedStream = converter;
-            try { client.Send(new("stream", Data: stream is null ? null : Wire.Serialize(stream))); }
-            catch (IOException) { }
+            SendStream(client, stream);
         }
         string? directory = null; SegmentStore? store = null; StreamConverter? converter = null;
         try
         {
-            if (wanted is null || client.HostedMedia is not ILocalMediaSource local) { if (previous.streamConverter is not null) Offer(null, null); return; }
+            if (wanted is null || client.HostedMedia is not ILocalMediaSource local) { if (previous.streamConverter is not null || client.Snapshot?.Stream is not null) Offer(null, null); return; }
             streamPreparing = true;
             if (Ffmpeg.Find() is not { } ffmpeg) { Decline(media, "The converter is missing from this copy of BlackPearl, so the file is streamed as it is.", failed: true); return; }
             if (probedVideo.Path != local.LocalPath || probedVideo.Probe is null) probedVideo = (local.LocalPath, await VideoProbe.ReadAsync(ffmpeg, local.LocalPath, token));

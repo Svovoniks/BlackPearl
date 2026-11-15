@@ -18,7 +18,7 @@ public sealed class SegmentStore : IDisposable
     private long end, fullUntil = long.MinValue;
     private int stored;
     private bool reported;
-    private volatile bool disposed;
+    private volatile bool disposed, broken;
 
     private SegmentStore(SafeFileHandle file, string path, int segments, long reserve)
     {
@@ -55,7 +55,7 @@ public sealed class SegmentStore : IDisposable
     {
         get
         {
-            if (disposed) return false;
+            if (disposed || broken) return false;
             var until = Volatile.Read(ref fullUntil);
             if (until == long.MinValue) return true;
             var now = Environment.TickCount64;
@@ -72,12 +72,13 @@ public sealed class SegmentStore : IDisposable
         if (index < 0 || index >= lengths.Length || data.Length == 0) return false;
         lock (gate)
         {
-            if (disposed) return false;
+            if (disposed || broken) return false;
             if (lengths[index] != 0) return true;
             if (Environment.TickCount64 < fullUntil) return false;
             if (FreeBytes() is { } free && free - data.Length < reserve) { Full("space"); return false; }
             try { RandomAccess.Write(file, data, end); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException) { Full(ex.GetType().Name); return false; }
+            // A file that cannot be written, as with a quota or a failing disk, is not tried again.
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException) { Full(ex.GetType().Name); broken = true; return false; }
             offsets[index] = end; Interlocked.Add(ref end, data.Length); reported = false; Volatile.Write(ref fullUntil, long.MinValue);
             Volatile.Write(ref lengths[index], data.Length); Interlocked.Increment(ref stored);
             return true;

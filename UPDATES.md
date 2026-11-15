@@ -262,6 +262,32 @@ lasts. Local-file playback bypasses network buffering. The diagnostics log
 records `stream-cache` events and, in each `sample`, the bytes buffered ahead.
 `dotnet run --project tests/BlackPearl.Smoke -c Release -- --buffer-run <video>`
 measures buffering of a real video through real peer connections and the player.
+Whoever plays a room's video chooses its **stream quality** in the player's
+Quality pill: Original, 1080p, 720p or 480p. Original streams the file as above.
+A lower quality converts the video on the streamer's PC while it plays, with the
+bundled `ffmpeg\ffmpeg.exe` (GPL build, a separate program; version and hash are
+pinned in `BlackPearl.Desktop.csproj` and it is cached under
+`.tools\models\ffmpeg-<version>`). The choice is saved in the `streamQuality`
+setting and applies to the next video. The converted stream is H.264 with the
+selected audio track as stereo AAC and the selected subtitles drawn into the
+picture; HDR is tone mapped. A video already smaller than the chosen quality is
+streamed as its file, and the menu says so. The first encoder that works is used,
+in this order: NVIDIA, Intel Quick Sync, AMD, x264, Windows' own.
+The stream is offered in the room state (`RoomSnapshot.Stream`, sent with the
+`stream` command) as four-second pieces. Viewers read
+`stream/<id>/<piece>/size` and `stream/<id>/<piece>` over the media channel, keep
+the pieces in `%TEMP%\BlackPearl\stream-cache\*.segments`, read ahead to the end
+as with a file, and play them from a local playlist. ffmpeg runs from the piece
+somebody asks for, so a seek converts from there; it holds five minutes ahead of
+the furthest request. Changing the quality, audio track or subtitles makes a new
+stream, which viewers reopen at the room's position. Apps from before converted
+streams ignore the offer and are served the file. Viewers of a converted stream
+cannot change tracks, and a room reconnect downloads its pieces again.
+The diagnostics log records `stream-quality` and `stream-convert` events on the
+streaming side and `piece-read` on the viewer's.
+`dotnet run --project tests/BlackPearl.Smoke -c Release -- --buffer-run <video> --quality 720p`
+measures it on a real video, and `-- --stream-frame <video> <seconds> <quality> <picture.png>`
+saves the frame viewers get.
 Buffering recovery requires 750 ms of stable full cache.
 Every member of a room holds a direct connection to every other. A lost one is
 replaced while the room service is reachable: the member whose id sorts first
