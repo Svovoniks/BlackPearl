@@ -395,7 +395,44 @@ public partial class MainWindow
             presence.Update(member?.Joined == true || mine && inVoice, mine && inVoice ? !microphoneOn : member?.Muted == true, mine, voiceLocallyMuted.Contains(id), inVoice, VoiceLevel(id));
         }
         ApplyVoiceGains();
+        RefreshSavedRoomVoice();
     }
+    // Voice on the Rooms page, for the room selected there. In that room it joins or leaves voice like the player's
+    // button; away from it, one click enters the room and joins voice.
+    private void RefreshSavedRoomVoice()
+    {
+        if (SavedRoomVoiceButton is null || VoiceCardStatus is null) return;
+        var saved = SavedRoomsList.SelectedItem as SavedRoom;
+        var here = ConnectedTo(saved);
+        var inVoice = here && voice is not null;
+        var joining = inVoice && voiceJoining || here && voice is null && voiceWaitingRoom is not null && voiceWaitingRoom == room!.Identity?.Room;
+        var me = here ? room!.Identity?.Peer : null;
+        var others = here ? (room!.Snapshot?.Voice ?? []).Count(member => member.Joined && member.Peer != me) : 0;
+        SavedRoomVoiceText.Text = joining ? "Joining voice…" : inVoice ? "Leave voice" : "Join voice";
+        SavedRoomVoiceButton.IsEnabled = saved is not null && (here || !roomBusy);
+        SavedRoomVoiceButton.ToolTip = here ? VoiceButton.ToolTip : saved is null ? null : "Join " + saved.Name + " with voice chat on";
+        System.Windows.Automation.AutomationProperties.SetName(SavedRoomVoiceButton, joining ? "Cancel joining voice chat" : inVoice ? "Leave voice chat" : here ? "Join voice chat" : "Join the room and voice chat");
+        SavedRoomVoiceMute.Visibility = inVoice ? Visibility.Visible : Visibility.Collapsed;
+        SavedRoomVoiceMute.Content = VoiceCardMute.Content; SavedRoomVoiceMute.ToolTip = VoiceCardMute.ToolTip;
+        System.Windows.Automation.AutomationProperties.SetName(SavedRoomVoiceMute, VoiceCardMute.ToolTip as string ?? "Mute microphone");
+        if (inVoice && (voiceMuted || !voice!.Audio.MicrophoneReady)) SavedRoomVoiceMute.Foreground = VoiceOff; else SavedRoomVoiceMute.ClearValue(ForegroundProperty);
+        // Said under the buttons while it matters: joining, in voice, a microphone problem, or others already talking.
+        var problem = inVoice ? voice!.Audio.Problem : null;
+        SavedRoomVoiceStatus.Text = !here || !(inVoice || joining || others > 0) ? "" : problem ?? VoiceCardStatus.Text;
+        SavedRoomVoiceStatus.Visibility = SavedRoomVoiceStatus.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+    private async void ToggleSavedRoomVoice(object sender, RoutedEventArgs e) => await Guard(async () =>
+    {
+        if (SavedRoomsList.SelectedItem is not SavedRoom saved) return;
+        if (ConnectedTo(saved)) { await (voice is null ? JoinVoiceAsync() : LeaveVoiceAsync()); return; }
+        if (roomBusy || !await ConnectToSavedRoom(saved) || room is not { } client) return;
+        // Who is in voice is part of the room's state, which can arrive a moment after entering: voice joins once it has.
+        var joining = Task.CompletedTask;
+        if (client.VoiceAvailable) joining = JoinVoiceAsync();
+        else if (voice is null) { voiceWaitingRoom = client.Identity?.Room; RefreshVoice(); }
+        await OpenPlayerIfPlaying(client);
+        await joining;
+    });
     private bool syncingVoiceVolume;
     // The slider in the participants panel: applied to the mixer at once, saved, and mirrored in Settings.
     private void VoiceCardVolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)

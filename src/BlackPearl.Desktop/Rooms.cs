@@ -30,7 +30,7 @@ public partial class MainWindow
         SavedRoomsContent.Visibility = savedRooms.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         SavedRoomDetails.Visibility = SavedRoomsList.SelectedItem is SavedRoom ? Visibility.Visible : Visibility.Collapsed;
         ConnectSavedRoomButton.IsEnabled = !roomBusy && SavedRoomsList.SelectedItem is SavedRoom;
-        ForgetSavedRoomButton.IsEnabled = CopySavedInviteButton.IsEnabled = CopySavedCodeButton.IsEnabled = SavedRoomsList.SelectedItem is SavedRoom;
+        ForgetSavedRoomButton.IsEnabled = CopySavedCodeButton.IsEnabled = SavedRoomsList.SelectedItem is SavedRoom;
         RefreshRoomSettings(); RefreshRoomHero();
     }
     private readonly Dictionary<string, string> savedMemberLists = [];
@@ -105,11 +105,12 @@ public partial class MainWindow
             : elsewhere is not null ? "Nobody is here right now" : "Not connected";
         SavedRoomStatusDot.Fill = (System.Windows.Media.Brush)FindResource(connected || elsewhere is { Length: > 0 } ? "Success" : "Muted");
         SavedRoomCode.Text = saved is null ? "" : string.Join(" ", saved.Code.Chunk(6).Select(part => new string(part)));
-        SavedRoomInviteHint.Text = saved is null ? "" : (Uri.TryCreate(saved.Server, UriKind.Absolute, out var server) ? server.Host : saved.Server) + " · Anyone with the invitation can join";
+        SavedRoomInviteHint.Text = saved is null ? "" : (Uri.TryCreate(saved.Server, UriKind.Absolute, out var server) ? server.Host : saved.Server) + " · Anyone with the code can join";
         ShowSavedRoomSession(saved);
         ConnectSavedRoomButton.Content = connected ? "Open player" : "Join";
         DisconnectSavedRoomButton.Visibility = connected ? Visibility.Visible : Visibility.Collapsed;
         DisconnectSavedRoomButton.IsEnabled = connected && !roomBusy;
+        RefreshSavedRoomVoice();
         // What others may do while this person plays a video here. It is their own choice, kept for the room.
         SavedRoomSharedControls.IsEnabled = SavedRoomLibraryBrowsing.IsEnabled = saved is not null;
         updatingLibraryPermission = true;
@@ -153,7 +154,7 @@ public partial class MainWindow
         if (SavedRoomGuests.ItemsSource is not IEnumerable<RoomGuestRow> shown || !shown.SequenceEqual(rows)) SavedRoomGuests.ItemsSource = rows;
         var count = rows.Count(row => row.Here);
         SavedRoomGuestCount.Text = saved is null ? "" : count == 0 ? "" : count + " here";
-        SavedRoomGuestHint.Text = saved is null ? "" : rows.Count == 0 ? "Nobody has joined yet. Copy the invitation and send it to your friends." : "";
+        SavedRoomGuestHint.Text = saved is null ? "" : rows.Count == 0 ? "Nobody has joined yet. Copy the code and send it to your friends." : "";
         SavedRoomGuestHintPanel.Visibility = SavedRoomGuestHint.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         var empty = rows.Count == 0;
         SavedRoomGuestHintPanel.VerticalAlignment = empty ? VerticalAlignment.Center : VerticalAlignment.Top;
@@ -221,7 +222,7 @@ public partial class MainWindow
             await Disconnect(); var client = NewRoom();
             try { await client.ConnectAsync(SavedServerAddress, SavedDisplayName, persistent: true, roomName: name); }
             catch { await Disconnect(); throw; }
-            RememberCurrentRoom(); RoomHeading.Text = name; RoomSubtitle.Text = "Copy the invitation to bring friends in.";
+            RememberCurrentRoom(); RoomHeading.Text = name; RoomSubtitle.Text = "Copy the room code to bring friends in.";
             ShowPage("Rooms");
         }
         finally { pendingRoomName = null; roomBusy = false; RefreshSavedRooms(); }
@@ -340,11 +341,5 @@ public partial class MainWindow
             return image;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or InvalidOperationException) { return null; }
-    }
-    private void CopySavedInvitation(object sender, RoutedEventArgs e)
-    {
-        if (SavedRoomsList.SelectedItem is not SavedRoom saved) return;
-        try { Clipboard.SetText(saved.Server + "#" + saved.Code); SetStatus("Invitation copied."); }
-        catch (System.Runtime.InteropServices.ExternalException) { SetStatus("Clipboard is busy."); }
     }
 }

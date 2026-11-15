@@ -216,6 +216,8 @@ static class HostlessRoomUiChecks
             check(Text("RoomHeroLiveText") == "1 here" && Text("RoomHeroPresence") == "Riley is in the room now" && Control<Button>("RoomHeroResume").Content as string == "Join" &&
                 Control<Button>("ConnectSavedRoomButton").Content as string == "Join", "the room offers Join and shows it is occupied");
             check(People("SavedRoomGuests").SequenceEqual([("Riley", "Here now")]), "the people tile lists who is in the room before entering");
+            check(Text("SavedRoomVoiceText") == "Join voice" && Control<Button>("SavedRoomVoiceButton").IsEnabled && Control<Button>("SavedRoomVoiceMute").Visibility != Visibility.Visible &&
+                Control<TextBlock>("SavedRoomVoiceStatus").Visibility != Visibility.Visible, "before entering, the room offers to join with voice");
             window.UpdateLayout();
             check((list.ItemContainerGenerator.ContainerFromItem(saved) as ListBoxItem)?.Tag as string == "busy", "a room other people are in is marked in the room list");
             await Shot("1-before-entering", "RoomsPage");
@@ -302,6 +304,45 @@ static class HostlessRoomUiChecks
             await Wait(() => Field("room") is null && Control<Button>("ConnectSavedRoomButton").Content as string == "Join", "leaving returns the room to Join");
             Set("roomPresenceAsked", -60000L); Call("RefreshRoomPresence", true);
             await Wait(() => Text("SavedRoomStatus") == "Nobody is here right now", "an empty room says so, and stays in the list");
+
+            // Voice from the Rooms page. Away from the room, one click enters it with voice on.
+            var voiceButton = Control<Button>("SavedRoomVoiceButton"); var voiceMute = Control<Button>("SavedRoomVoiceMute"); var voiceStatus = Control<TextBlock>("SavedRoomVoiceStatus");
+            var joiningVoice = Stopwatch.StartNew();
+            voiceButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Wait(() => Field("room") is RoomClient { IsConnected: true } && Field("voice") is not null && !(bool)Field("voiceJoining")!, "Join voice on a room the user isn't in enters the room and joins voice");
+            Console.WriteLine($"In the room and in voice {joiningVoice.ElapsedMilliseconds} ms after the click");
+            await Wait(() => Text("SavedRoomVoiceText") == "Leave voice" && voiceMute.Visibility == Visibility.Visible && voiceStatus.Visibility == Visibility.Visible && voiceStatus.Text.Length > 0,
+                "in voice, the room's tile offers to leave voice and mute, and says who is talking");
+            await Wait(() => People("SavedRoomGuests").SequenceEqual([("Sam (you)", "Here · In voice"), ("Riley", "Not here")]), "the people tile shows the user in voice");
+            check((string)Field("currentPage")! == "Rooms", "joining voice in a room where nothing plays stays on the Rooms page");
+            await Shot("13-voice-from-rooms", "RoomsPage");
+            var session = Field("voice")!; var audio = (VoiceAudio)session.GetType().GetProperty("Audio")!.GetValue(session)!;
+            if (audio.MicrophoneReady)
+            {
+                var onColour = voiceMute.Foreground.ToString();
+                voiceMute.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                check((bool)Field("voiceMuted")! && voiceMute.Foreground.ToString() != onColour && (voiceMute.ToolTip as string)?.StartsWith("Unmute", StringComparison.Ordinal) == true,
+                    "the tile's microphone button mutes, and shows it");
+                await Shot("14-voice-muted", "SavedRoomDetails");
+                voiceMute.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                check(!(bool)Field("voiceMuted")!, "and unmutes");
+            }
+            else Console.WriteLine("No microphone on this machine: the tile's mute button was not exercised (" + audio.Problem + ")");
+            voiceButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Wait(() => Field("voice") is null && Field("room") is RoomClient { IsConnected: true } && Text("SavedRoomVoiceText") == "Join voice" && voiceMute.Visibility != Visibility.Visible && voiceStatus.Visibility != Visibility.Visible,
+                "Leave voice leaves voice and keeps the user in the room");
+            // Someone else talking is said on the tile, so joining them is one click.
+            var talker = new RoomClient(); others.Add(talker);
+            await talker.ConnectAsync(url, "Riley", code);
+            await talker.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30));
+            talker.SetVoice(true, false);
+            await Wait(() => voiceStatus.Visibility == Visibility.Visible && voiceStatus.Text == "Riley is in voice.", "the tile says who is in voice before the user joins");
+            await Shot("15-someone-in-voice", "SavedRoomDetails");
+            voiceButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Wait(() => Field("voice") is not null && !(bool)Field("voiceJoining")! && Text("SavedRoomVoiceText") == "Leave voice", "Join voice in the room joins the people talking there");
+            await talker.DisposeAsync();
+            Call("LeaveRoom", Control<Button>("RoomHeroDisconnect"), new RoutedEventArgs());
+            await Wait(() => Field("room") is null && Field("voice") is null && Text("SavedRoomVoiceText") == "Join voice" && voiceMute.Visibility != Visibility.Visible, "leaving the room leaves voice too");
 
             await CreatorChecks();
         }

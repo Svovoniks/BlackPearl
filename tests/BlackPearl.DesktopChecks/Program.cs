@@ -1587,16 +1587,18 @@ static class Program
         FrameworkElement HeroPart(string name) => (FrameworkElement)window.FindName(name);
         Check(HeroPart("RoomHero").Visibility == Visibility.Visible && HeroText("RoomHeroLiveText") == "Away" && HeroText("RoomHeroTitle") == "Nothing watched here yet" &&
             ((System.Windows.Controls.Button)window.FindName("RoomHeroResume")).Content as string == "Join" &&
-            ((System.Windows.Controls.Button)window.FindName("RoomHeroSecondary")).Content as string == "Copy invite" && HeroPart("RoomHeroSecondary").Visibility == Visibility.Visible &&
-            HeroPart("RoomHeroBadge").Visibility == Visibility.Visible && HeroText("RoomHeroBadgeText") == "M", "an unused room shows its hero with Join, Copy invite and its initial");
+            ((System.Windows.Controls.Button)window.FindName("RoomHeroSecondary")).Content as string == "Copy code" && HeroPart("RoomHeroSecondary").Visibility == Visibility.Visible &&
+            HeroPart("RoomHeroBadge").Visibility == Visibility.Visible && HeroText("RoomHeroBadgeText") == "M", "an unused room shows its hero with Join, Copy code and its initial");
         list.SelectedItem = guest;
         Check(HeroText("RoomHeroLiveText") == "Away" && ((System.Windows.Controls.Button)window.FindName("RoomHeroResume")).Content as string == "Join" &&
-            HeroPart("RoomHeroSecondary").Visibility == Visibility.Visible && HeroText("RoomHeroBadgeText") == "F", "a room someone else created offers the same Join and Copy invite");
+            HeroPart("RoomHeroSecondary").Visibility == Visibility.Visible && HeroText("RoomHeroBadgeText") == "F", "a room someone else created offers the same Join and Copy code");
         Check(HeroPart("SavedRoomHostControls").Visibility == Visibility.Visible && System.Windows.Controls.Grid.GetRow(HeroPart("SavedRoomActions")) == 2 &&
             HeroText("SavedRoomGuestHeading") == "People" && HeroText("SavedRoomSessionTitle") == "Nothing watched here yet" &&
             ((System.Windows.Controls.Button)window.FindName("ConnectSavedRoomButton")).Content as string == "Join" && HeroText("SavedRoomStatus") == "Not connected" &&
-            HeroText("SavedRoomInviteHint").EndsWith("Anyone with the invitation can join", StringComparison.Ordinal),
-            "every room has the same tiles: people, what others may do with your video, and an invitation anyone can use");
+            HeroText("SavedRoomInviteHint").EndsWith("Anyone with the code can join", StringComparison.Ordinal) &&
+            window.FindName("CopySavedInviteButton") is null && ((System.Windows.Controls.Button)window.FindName("CopySavedCodeButton")).IsEnabled &&
+            HeroText("SavedRoomVoiceText") == "Join voice" && ((System.Windows.Controls.Button)window.FindName("SavedRoomVoiceButton")).IsEnabled && HeroPart("SavedRoomVoiceMute").Visibility != Visibility.Visible,
+            "every room has the same tiles: people, what others may do with your video, a code anyone can use, and voice one click away");
         list.SelectedItem = first;
         Check(HeroText("SavedRoomCode") == "AAAAAA AAAAAA AAAAAA AAAAAA" && HeroPart("SavedRoomHostControls").Visibility == Visibility.Visible &&
             HeroText("SavedRoomGuestHeading") == "People", "a room shows its grouped code and the permissions tile");

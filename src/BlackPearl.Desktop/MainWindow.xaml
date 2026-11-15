@@ -971,7 +971,7 @@
      <ScrollViewer x:Name="VoicePreferences" Tag="Voice" Visibility="Collapsed" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" IsVisibleChanged="VoicePreferencesVisibilityChanged" Padding="0,0,16,0"><StackPanel MaxWidth="844" Width="{Binding ViewportWidth, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" Margin="0,0,0,12" HorizontalAlignment="Left">
       <local:Stone Style="{StaticResource Card}"><StackPanel>
        <TextBlock Text="Devices" Style="{StaticResource CardTitle}" Margin="0,0,0,4"/>
-       <TextBlock Text="Talk with everyone in your room while you watch. Join voice from the player's top bar or the Participants panel." Style="{StaticResource Hint}" Margin="0,0,0,14"/>
+       <TextBlock Text="Talk with everyone in your room while you watch. Join voice from the Rooms page, the player's top bar or the Participants panel." Style="{StaticResource Hint}" Margin="0,0,0,14"/>
        <TextBlock Text="Microphone" Style="{StaticResource FieldLabel}"/>
        <ComboBox x:Name="VoiceInputPicker" DisplayMemberPath="Name" SelectedValuePath="Id" AutomationProperties.Name="Microphone for voice chat" Margin="0,6,0,8" MaxWidth="460" HorizontalAlignment="Left" MinWidth="320"/>
        <!-- A live level meter while this page is open: speak and watch it move. -->
@@ -1152,13 +1152,25 @@
             <TextBlock x:Name="SavedRoomStatus" Text="Create a room, or join one with an invitation." Style="{StaticResource MutedText}" FontSize="12.5" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
            </DockPanel>
            <!-- Actions sit on their own row so the status beside the heading is never squeezed. -->
-           <WrapPanel Margin="0,12,0,0"><Button x:Name="ConnectSavedRoomButton" Content="Join" Click="ConnectSavedRoom" Style="{StaticResource Primary}" VerticalAlignment="Center" Margin="0,0,8,0"/><Button x:Name="DisconnectSavedRoomButton" Content="Leave" Click="LeaveRoom" Visibility="Collapsed" AutomationProperties.Name="Leave room" VerticalAlignment="Center" Margin="0"/></WrapPanel>
-           <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Margin="0,14,0,0" Padding="0,12,0,0">
+           <!-- The room's buttons and the voice buttons are two groups: in a narrow tile the voice group moves to a row of its own. -->
+           <WrapPanel Margin="0,12,0,0">
+            <StackPanel Orientation="Horizontal" Margin="0,0,8,8">
+             <Button x:Name="ConnectSavedRoomButton" Content="Join" Click="ConnectSavedRoom" Style="{StaticResource Primary}" Margin="0"/>
+             <Button x:Name="DisconnectSavedRoomButton" Content="Leave" Click="LeaveRoom" Visibility="Collapsed" AutomationProperties.Name="Leave room" Margin="8,0,0,0"/>
+            </StackPanel>
+            <!-- Voice from here: away from the room it joins the room and voice in one click; in the room it joins or leaves voice. -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+             <Button x:Name="SavedRoomVoiceButton" Click="ToggleSavedRoomVoice" Margin="0" AutomationProperties.Name="Join voice chat"><StackPanel Orientation="Horizontal"><TextBlock x:Name="SavedRoomVoiceIcon" Text="&#xE720;" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,9,0"/><TextBlock x:Name="SavedRoomVoiceText" Text="Join voice" VerticalAlignment="Center"/></StackPanel></Button>
+             <Button x:Name="SavedRoomVoiceMute" Click="ToggleVoiceMute" FontFamily="{StaticResource IconFont}" FontSize="14" Width="40" Padding="0" Margin="8,0,0,0" Visibility="Collapsed" Content="&#xE720;" ToolTip="Mute microphone (V)" AutomationProperties.Name="Mute microphone"/>
+            </StackPanel>
+           </WrapPanel>
+           <TextBlock x:Name="SavedRoomVoiceStatus" Style="{StaticResource MutedText}" FontSize="11.5" Margin="0,0,0,8" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite"/>
+           <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Margin="0,6,0,0" Padding="0,12,0,0">
             <StackPanel>
              <TextBlock Text="Invite friends" Style="{StaticResource TileLabel}" Margin="0,0,0,6"/>
              <Viewbox Stretch="Uniform" StretchDirection="DownOnly" HorizontalAlignment="Left"><TextBlock x:Name="SavedRoomCode" FontFamily="Consolas" FontSize="22" Foreground="{DynamicResource Ink}" AutomationProperties.Name="Room code"/></Viewbox>
              <TextBlock x:Name="SavedRoomInviteHint" Style="{StaticResource MutedText}" FontSize="11.5" Margin="0,4,0,12"/>
-             <WrapPanel><Button x:Name="CopySavedInviteButton" Content="Copy invitation" Click="CopySavedInvitation" Style="{StaticResource Primary}"/><Button x:Name="CopySavedCodeButton" Content="Copy code" Click="CopySavedCode" ToolTip="Friends on the same room server can paste just the code"/></WrapPanel>
+             <WrapPanel><Button x:Name="CopySavedCodeButton" Content="Copy code" Click="CopySavedCode" Style="{StaticResource Primary}" ToolTip="Friends paste the code under Join a room"/></WrapPanel>
             </StackPanel>
            </Border>
            <Border BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0" Margin="0,14,0,0" Padding="0,12,0,0">
@@ -1187,7 +1199,7 @@
           <!-- With nobody to list, the hint becomes an empty state in the middle of the tile. -->
           <StackPanel x:Name="SavedRoomGuestHintPanel" Margin="0,0,0,12">
            <Border x:Name="SavedRoomGuestEmptyIcon" Width="52" Height="52" CornerRadius="26" Background="{DynamicResource AccentSoft}" HorizontalAlignment="Center" Margin="0,0,0,12" Visibility="Collapsed"><TextBlock Text="&#xE716;" Style="{StaticResource Icon}" FontSize="20" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center"/></Border>
-           <TextBlock x:Name="SavedRoomGuestHint" Text="Nobody has joined yet. Copy the invitation and send it to your friends." Style="{StaticResource MutedText}" FontSize="11.5"/>
+           <TextBlock x:Name="SavedRoomGuestHint" Text="Nobody has joined yet. Copy the code and send it to your friends." Style="{StaticResource MutedText}" FontSize="11.5"/>
           </StackPanel>
           <ItemsControl x:Name="SavedRoomGuests" Grid.Row="1" AutomationProperties.Name="People in this room"><ItemsControl.ItemTemplate><DataTemplate>
            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -1270,7 +1282,7 @@
             <Border Style="{StaticResource PlayerHeaderGroup}"><StackPanel Orientation="Horizontal">
              <Button x:Name="VoiceMuteButton" Click="ToggleVoiceMute" Style="{StaticResource PlayerSegmentIcon}" Visibility="Collapsed" Content="&#xE720;" ToolTip="Mute microphone (V)" AutomationProperties.Name="Mute microphone"/>
              <Button x:Name="VoiceButton" Click="ToggleVoice" Style="{StaticResource PlayerSegmentButton}" Visibility="Collapsed" ToolTip="Join voice chat to talk while you watch" AutomationProperties.Name="Join voice chat"><StackPanel Orientation="Horizontal"><TextBlock x:Name="VoiceButtonIcon" Text="&#xE95B;" Style="{StaticResource PlayerPillIcon}"/><TextBlock x:Name="VoiceButtonText" Text="Voice" VerticalAlignment="Center"/><Border x:Name="VoiceCountBadge" Visibility="Collapsed" Background="#3FB97A" CornerRadius="8" MinWidth="16" Height="16" Padding="5,0" Margin="7,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="VoiceCountText" Foreground="#0B0B0E" FontSize="10" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border></StackPanel></Button>
-             <Button x:Name="InviteButton" Content="&#xE71B;" Click="CopyInvite" Style="{StaticResource PlayerSegmentIcon}" ToolTip="Copy invite" AutomationProperties.Name="Copy invite"/>
+             <Button x:Name="InviteButton" Content="&#xE71B;" Click="CopyInvite" Style="{StaticResource PlayerSegmentIcon}" ToolTip="Copy room code" AutomationProperties.Name="Copy room code"/>
              <Button x:Name="LeaveButton" Content="Leave" Click="LeaveRoom" Style="{StaticResource PlayerSegmentButton}" Padding="10,0"/>
             </StackPanel></Border>
             <!-- The docked player has no caption row: the window buttons sit in the bar's corner, and the bar drags the window. -->

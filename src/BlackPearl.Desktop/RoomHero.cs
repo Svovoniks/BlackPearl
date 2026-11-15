@@ -154,7 +154,7 @@ public partial class MainWindow
         RoomHeroResume.IsEnabled = connected is not null || !roomBusy;
         RoomHeroResume.Tag = heroRoom.Id;
         System.Windows.Automation.AutomationProperties.SetName(RoomHeroResume, RoomHeroResume.Content + " in " + heroRoom.Name);
-        var secondary = connected is not null ? live is null ? "Open player" : null : session is null ? "Copy invite" : null;
+        var secondary = connected is not null ? live is null ? "Open player" : null : session is null ? "Copy code" : null;
         RoomHeroSecondary.Content = secondary;
         RoomHeroSecondary.Visibility = secondary is null ? Visibility.Collapsed : Visibility.Visible;
         RoomHeroDisconnect.Content = "Leave";
@@ -341,9 +341,9 @@ public partial class MainWindow
     private void RoomHeroSecondaryClick(object sender, RoutedEventArgs e)
     {
         if (savedRooms.FirstOrDefault(x => x.Id == RoomHeroResume.Tag as string) is not { } saved) return;
-        // In the room with nothing playing: open the player. Away: copy the invitation.
+        // In the room with nothing playing: open the player. Away: copy the room's code.
         if (ConnectedSavedRoom?.Id == saved.Id) { ShowPage("Room"); return; }
-        try { Clipboard.SetText(saved.Server + "#" + saved.Code); SetStatus("Invitation copied."); }
+        try { Clipboard.SetText(saved.Code); SetStatus("Room code copied."); }
         catch (System.Runtime.InteropServices.ExternalException) { SetStatus("Clipboard is busy."); }
     }
 }

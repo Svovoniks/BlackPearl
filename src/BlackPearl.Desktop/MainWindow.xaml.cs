@@ -1222,7 +1222,7 @@ public partial class MainWindow : Window
         if (room != client || !ConfirmTakeOver()) return;
         queuePosition = -1;
         await StartHostedVideo(item);
-        PublishQueue(); SetStatus("Playing for the room. Copy the invitation to bring friends in.");
+        PublishQueue(); SetStatus("Playing for the room. Copy the room code to bring friends in.");
         } finally { pendingRoomName = null; roomBusy = false; DetailHost.IsEnabled = selected?.Available == true && File.Exists(selected.Path); RefreshSavedRooms(); UpdateSessionControls(); }
     });
     // An invitation on the clipboard is offered as the answer, so joining is paste-free.
@@ -1240,9 +1240,9 @@ public partial class MainWindow : Window
     private async void JoinClick(object sender, RoutedEventArgs e) => await Guard(async () =>
     {
         if (roomBusy) return;
-        var invitation = Dialogs.Prompt(this, "Join a watch room", "Invitation link or room code", ClipboardInvitation(), validate: text =>
+        var invitation = Dialogs.Prompt(this, "Join a watch room", "Room code", ClipboardInvitation(), validate: text =>
         { try { RoomAddress.Parse(text, SavedServerAddress); return null; } catch (ArgumentException ex) { return ex.Message; } },
-            action: "Join room", help: "Paste the invitation a friend sent you. You're in the room as soon as you join; no video files needed."); if (string.IsNullOrWhiteSpace(invitation)) return;
+            action: "Join room", help: "Paste the code a friend sent you. You're in the room as soon as you join; no video files needed."); if (string.IsNullOrWhiteSpace(invitation)) return;
         var address = RoomAddress.Parse(invitation, SavedServerAddress);
         // An invitation to a room that is already saved enters it with the key kept for it.
         var known = savedRooms.FirstOrDefault(saved => saved.Server == address.Server && saved.Code == address.Code);
@@ -1913,8 +1913,8 @@ public partial class MainWindow : Window
     private void CopyInvite(object sender, RoutedEventArgs e)
     {
         if (room?.IsConnected != true || room.Identity is null) { SetStatus("Create a room from the library first."); return; }
-        try { Clipboard.SetText(room.ServerAddress + "#" + room.Identity.Room); SetStatus("Invitation copied. Anyone who has it and the Windows app can join."); }
-        catch (ExternalException) { SetStatus("Clipboard is busy. Try Copy invite again."); }
+        try { Clipboard.SetText(room.Identity.Room); SetStatus("Room code copied. Anyone who has it and the Windows app can join."); }
+        catch (ExternalException) { SetStatus("Clipboard is busy. Try copying the code again."); }
     }
     private void ShowRoomFeedback(string text)
     {
