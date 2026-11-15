@@ -83,7 +83,10 @@ static class ReadAheadFixture
             check((await cached.ReadAsync(block * 10L, block, default)).SequenceEqual(Source.Bytes(block * 10L, block)) && reopened.Offsets.IsEmpty,
                 "reopening the same video continues from what is already buffered");
             cached.Stop(); disk.Dispose();
-            check(Directory.GetFiles(directory, "*.stream").Length == 0, "the cache file is deleted when the video closes");
+            check(!disk.Accepting, "a closed cache takes no more video at once");
+            // The file itself goes on another thread: deleting gigabytes would freeze the window.
+            await Until(() => Directory.GetFiles(directory, "*.stream").Length == 0);
+            check(true, "the cache file is deleted when the video closes");
 
             // The player's own reads come first.
             var waiting = new Source((long)block * 256) { Hold = new(TaskCreationOptions.RunContinuationsAsynchronously) };
@@ -121,7 +124,7 @@ static class ReadAheadFixture
             cached.Stop();
 
             var full = new Source((long)block * 256);
-            using var noSpace = StreamCache.TryCreate(directory, full.Media, reserveBytes: long.MaxValue)!;
+            using var noSpace = StreamCache.TryCreate(directory, full.Media, reserveBytes: long.MaxValue, fullRetryMs: 200)!;
             cached = new CachedMediaSource(full, disk: noSpace);
             cached.SetReadAhead(block * 10); cached.Played(0);
             await Until(() => full.Offsets.Count >= 10);
@@ -129,13 +132,17 @@ static class ReadAheadFixture
             check(full.Offsets.Count <= MediaStreaming.Window / 2 && !noSpace.Accepting && noSpace.StoredBytes == 0 &&
                 (await cached.ReadAsync(block * 3L, block, default)).SequenceEqual(Source.Bytes(block * 3L, block)) && full.Offsets.Count <= MediaStreaming.Window / 2,
                 "a disk without room leaves the buffer in memory, within its window");
+            // Several retry intervals later, with playback standing still.
+            var fetched = full.Offsets.Count;
+            await Task.Delay(1000);
+            check(full.Offsets.Count == fetched && !noSpace.Accepting, "a disk that is still full is not tried again with more video");
             cached.Stop();
 
             var stale = Path.Combine(directory, "left-behind.stream");
             File.WriteAllBytes(stale, new byte[16]);
             using var next = StreamCache.TryCreate(directory, full.Media, reserveBytes: 0)!;
-            check(!File.Exists(stale) && Directory.GetFiles(directory, "*.stream").Length == 4,
-                "a cache file left behind is removed, and the ones in use stay");
+            await Until(() => !File.Exists(stale));
+            check(Directory.GetFiles(directory, "*.stream").Length == 4, "a cache file left behind is removed, and the ones in use stay");
         }
         finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
     }

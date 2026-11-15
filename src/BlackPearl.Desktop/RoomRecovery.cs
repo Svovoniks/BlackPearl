@@ -35,6 +35,15 @@ public partial class MainWindow
         return streamCache = StreamCache.TryCreate(StreamCacheDirectory, media);
     }
     private void CloseStreamCache() { streamCache?.Dispose(); streamCache = null; }
+    // A reconnect keeps the buffered video for the room's video to continue from. When the room it returns to plays
+    // something else or nothing, no video load or video end comes along to close it, so it is closed here, once whoever
+    // is streaming has said what the room is playing. The room service's first list of members says nothing about that.
+    private async Task CloseUnusedStreamCache(RoomClient client)
+    {
+        try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30), lifetime.Token); }
+        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException) { }
+        if (room == client && streamCache is { } kept && (client.Identity?.Host == true || client.Snapshot?.Media is not { } media || !kept.Matches(media))) CloseStreamCache();
+    }
     // Begin read-ahead once the first frames are playing, so it never competes with startup for the streamer's
     // bandwidth. From then on the rest of the video downloads continuously, also while paused.
     private void StartReadAhead()
@@ -121,6 +130,7 @@ public partial class MainWindow
                     RememberCurrentRoom();
                     if (ConnectedSavedRoom is { } saved) PublishRoomSession(candidate, saved);
                     RoomSubtitle.Text = "Reconnected";
+                    _ = CloseUnusedStreamCache(candidate);
                     // This app was playing for the room: carry on from where it stopped, unless someone else started a
                     // video meanwhile. Theirs stays.
                     if (identity.Host && source is not null && File.Exists(source.LocalPath))

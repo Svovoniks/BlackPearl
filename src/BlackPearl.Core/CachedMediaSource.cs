@@ -183,20 +183,26 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
     }
     private async Task<byte[]> Block(long offset, CancellationToken ct, bool player)
     {
-        if (disk?.TryRead(offset) is { } stored) return stored;
         Pending read;
-        lock (gate)
+        for (var again = false; ; again = true)
         {
-            if (cache.TryGetValue(offset, out var hit))
+            if (disk?.TryRead(offset) is { } stored) return stored;
+            lock (gate)
             {
-                recent.Remove(hit); recent.AddLast(hit); return hit.Value.Bytes;
+                if (cache.TryGetValue(offset, out var hit))
+                {
+                    recent.Remove(hit); recent.AddLast(hit); return hit.Value.Bytes;
+                }
+                if (!pending.TryGetValue(offset, out read!))
+                {
+                    // Stored between the look at the file above and here: read it rather than download it again.
+                    if (!again && disk?.Contains(offset) == true) continue;
+                    read = new Pending(); pending.Add(offset, read);
+                    read.Task = Fetch(offset, read);
+                }
+                read.Users++; if (player) playerWaits++;
             }
-            if (!pending.TryGetValue(offset, out read!))
-            {
-                read = new Pending(); pending.Add(offset, read);
-                read.Task = Fetch(offset, read);
-            }
-            read.Users++; if (player) playerWaits++;
+            break;
         }
         try { return await read.Task.WaitAsync(ct); }
         finally

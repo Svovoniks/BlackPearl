@@ -2037,10 +2037,13 @@ public partial class MainWindow : Window
             oldBridge?.CancelPendingReads();
             var stopBridge = oldBridge is null ? Task.CompletedTask : oldBridge.DisposeAsync().AsTask();
             await Task.WhenAll(StopNativePlayback(), stopBridge, disconnect);
+        }
+        finally
+        {
             // A reconnect usually returns to the same video, which then continues from what is already buffered.
             if (!reconnecting) CloseStreamCache();
+            loading.Release();
         }
-        finally { loading.Release(); }
         PeopleList.ItemsSource = null; ParticipantsPillDetail.Text = ""; RoomFeedback.Text = ""; RoomFeedback.Visibility = Visibility.Collapsed;
         RefreshPlayerEmpty();
         SetThreadExecutionState(0x80000000); ConnectionStatus.Text = "Local playback";
