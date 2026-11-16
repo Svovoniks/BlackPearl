@@ -52,6 +52,7 @@ public partial class MainWindow
     private void OnRoleChanged(RoomClient client, bool mine)
     {
         ResetRoomPlaybackTracking();
+        EndGuestFollowing();
         // Queues shared by, or with, the previous arrangement no longer apply.
         ClearHostQueues();
         if (mine)
