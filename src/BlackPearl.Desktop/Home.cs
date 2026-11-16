@@ -153,7 +153,10 @@ public partial class MainWindow
     {
         var media = view.Card.Media; var parts = new List<string>();
         if (view.Card.Level is "series" or "season")
-            parts.Add(homeFacts.GetValueOrDefault(view.Key) is { Episodes: > 0 } facts ? facts.Episodes == 1 ? "1 episode" : $"{facts.Episodes} episodes" : media.Kind == "Anime" ? "Anime" : "Series");
+        {
+            var episodes = homeFacts.GetValueOrDefault(view.Key)?.Episodes ?? view.RemoteEpisodes;
+            parts.Add(episodes > 0 ? episodes == 1 ? "1 episode" : $"{episodes} episodes" : media.Kind == "Anime" ? "Anime" : "Series");
+        }
         else if (media.RuntimeMinutes is > 0 and var runtime) parts.Add(Duration(runtime));
         if (media.Year is { } year) parts.Add(year.ToString());
         return string.Join(" · ", parts);
@@ -204,14 +207,25 @@ public partial class MainWindow
     private Action? mysteryReveal;
     private void RenderMystery(bool redraw, bool animate = false)
     {
-        var local = !GuestLibrary && homeUnseen.Length > 0;
-        HomeMysteryFilters.Visibility = local ? Visibility.Visible : Visibility.Collapsed;
-        LibraryCardView? pick = homeMysteryFallback; var note = "";
-        if (local)
+        RequestGuestDraw(animate);
+        // In someone else's library their app draws from their unstarted titles; apps from before that send one fixed pick.
+        var remote = GuestLibrary ? guestDraw : null;
+        // Until their first answer the filters keep their place and the card stays blank, so the deck does not jump.
+        var waiting = remote is null && guestDrawPending is not null;
+        var filtered = GuestLibrary ? remote is { Unseen: > 0 } : homeUnseen.Length > 0;
+        HomeMysteryFilters.Visibility = filtered || waiting ? Visibility.Visible : Visibility.Collapsed;
+        LibraryCardView? pick = waiting ? null : homeMysteryFallback; var note = "";
+        if (waiting) HomeMysteryDraw.IsEnabled = false;
+        else if (remote is { Unseen: > 0 })
+        {
+            pick = remote.Pick;
+            if (pick is not null) note = "Not started yet";
+            HomeMysteryDraw.IsEnabled = remote.Matches > 1;
+        }
+        else if (filtered)
         {
             var current = homeMystery is { HomeSection: "draw" } shown ? LibraryIdentity.TitleKey(shown.Card.Media) : null;
-            var title = redraw ? null : homeUnseen.FirstOrDefault(title => LibraryIdentity.TitleKey(title.Card.Media) == current && LibraryHome.Matches(title, mysteryKind, mysteryLength));
-            title ??= LibraryHome.Draw(homeUnseen, mysteryKind, mysteryLength, mysteryDraw, redraw ? current : null);
+            var title = LibraryHome.Pick(homeUnseen, mysteryKind, mysteryLength, mysteryDraw, current, redraw);
             pick = title is null ? null : homeMystery is { HomeSection: "draw" } same && same.Key == LibraryCardView.Identity(title.Card) ? same : new LibraryCardView(title.Card) { HomeSection = "draw" };
             if (title is not null) { pick!.Update(title.Card); note = "Not started yet"; }
             HomeMysteryDraw.IsEnabled = homeUnseen.Count(candidate => LibraryHome.Matches(candidate, mysteryKind, mysteryLength)) > 1;
@@ -221,8 +235,8 @@ public partial class MainWindow
         homeMystery = pick;
         HomeMysteryPlay.DataContext = pick;
         HomeMysteryPlay.IsEnabled = pick is not null;
-        var heading = pick?.DisplayTitle ?? (local ? "Nothing matches" : "");
-        var meta = pick is null ? local ? "Try another type or length." : "" :
+        var heading = pick?.DisplayTitle ?? (filtered ? "Nothing matches" : "");
+        var meta = pick is null ? filtered ? "Try another type or length." : "" :
             string.Join(" · ", new[] { pick.Card.Media.Kind, TitleFacts(pick), note }.Where(part => part.Length > 0));
         if (pick is not null) { pick.ShowIn(128, 190); _ = pick.LoadPosterAsync(); }
         void Reveal()
@@ -233,6 +247,58 @@ public partial class MainWindow
             HomeMysteryTitle.Text = heading; HomeMysteryMeta.Text = meta;
         }
         if (animate && changed) FlipMysteryCard(Reveal); else { mysteryReveal = null; Reveal(); }
+    }
+    // The streamer's latest draw and the filters, draw and Home visit it answers; a change of any of them asks again.
+    private sealed record GuestDraw(string? Kind, MysteryLength Length, int Seed, int Visit, LibraryCardView? Pick, int Matches, int Unseen);
+    private sealed record GuestDrawRequest(long Number, string? Kind, MysteryLength Length, int Seed, int Visit, bool Animate, long Sent);
+    private GuestDraw? guestDraw;
+    private GuestDrawRequest? guestDrawPending;
+    private long guestDrawSequence;
+    private void RequestGuestDraw(bool animate)
+    {
+        if (!GuestLibrary || !OwnsLibrary) { guestDraw = null; guestDrawPending = null; return; }
+        if (room?.StreamerDrawsTitles != true) return;
+        bool Current(string? kind, MysteryLength length, int seed, int visit) =>
+            kind == mysteryKind && length == mysteryLength && seed == mysteryDraw && visit == homeSeed;
+        // An unanswered request is given up after the time the library itself waits.
+        if (guestDrawPending is { } waiting && Environment.TickCount64 - waiting.Sent > 15000) guestDrawPending = null;
+        if (guestDraw is { } shown && Current(shown.Kind, shown.Length, shown.Seed, shown.Visit) ||
+            guestDrawPending is { } pending && Current(pending.Kind, pending.Length, pending.Seed, pending.Visit)) return;
+        // Above the library's own request numbers, and positive unlike artwork's, so replies cannot be confused.
+        var request = new GuestDrawRequest((1L << 40) + ++guestDrawSequence, mysteryKind, mysteryLength, mysteryDraw, homeSeed,
+            animate || guestDrawPending?.Animate == true, Environment.TickCount64);
+        guestDrawPending = request;
+        // A new draw number is Draw another; a new filter or visit keeps the current pick while it still fits.
+        TryLibraryCommand(new("catalog-draw", Number: request.Number, Data: Wire.Serialize(new LibraryDrawRequest(mysteryKind, mysteryLength, mysteryDraw,
+            guestDraw?.Pick?.Card.Media.Id, guestDraw is { } previous && previous.Seed != mysteryDraw))));
+    }
+    private void ReceiveGuestDraw(WireMessage message)
+    {
+        if (guestDrawPending is not { } request || message.Number != request.Number) return;
+        guestDrawPending = null;
+        if (!GuestLibrary || !OwnsLibrary) return;
+        LibraryDraw draw;
+        try { draw = Wire.Read<LibraryDraw>(message.Data ?? ""); }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or System.IO.InvalidDataException)
+        {
+            guestDrawPending = request; ReceiveGuestDrawError(message with { Type = "catalog-error", Text = "Could not draw a title." }); return;
+        }
+        var shown = guestDraw?.Pick;
+        var pick = draw.Entry is not { } entry ? null : shown is not null && shown.Card.Media.Id == entry.Id && shown.Card.Level == entry.Level ? shown : LibraryCardView.FromSharedEntry(entry);
+        if (pick is not null && !ReferenceEquals(pick, shown)) pick.RemoteArtworkLoader = () => LoadHostArtwork(pick.Card);
+        guestDraw = new(request.Kind, request.Length, request.Seed, request.Visit, pick, draw.Matches, draw.Unseen);
+        if (currentPage == "Home") RenderMystery(redraw: false, animate: request.Animate);
+    }
+    // A failed draw keeps the card as it was, answered for these filters, so it is not asked again on every refresh.
+    private bool ReceiveGuestDrawError(WireMessage message)
+    {
+        if (message.Type != "catalog-error" || guestDrawPending is not { } request || message.Number != request.Number) return false;
+        guestDrawPending = null;
+        guestDraw = guestDraw is { } shown ? shown with { Kind = request.Kind, Length = request.Length, Seed = request.Seed, Visit = request.Visit }
+            : new(request.Kind, request.Length, request.Seed, request.Visit, null, 0, 0);
+        SetStatus(message.Text ?? "Could not draw a title.");
+        if (currentPage == "Home") RenderMystery(redraw: false);
+        return true;
     }
     // Turns the drawn card over: it folds to its edge, swaps title, and opens again.
     private void FlipMysteryCard(Action reveal)
@@ -283,7 +349,7 @@ public partial class MainWindow
     }
     private void DrawMystery(object sender, RoutedEventArgs e)
     {
-        if (GuestLibrary || homeUnseen.Length == 0) { RefreshHomePicks(sender, e); return; }
+        if (GuestLibrary ? guestDraw is not { Unseen: > 0 } : homeUnseen.Length == 0) { RefreshHomePicks(sender, e); return; }
         mysteryDraw = Random.Shared.Next(); RenderMystery(redraw: true, animate: true);
     }
     private void RefreshHomePicks(object sender, RoutedEventArgs e)

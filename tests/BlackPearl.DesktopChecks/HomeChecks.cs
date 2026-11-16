@@ -170,6 +170,67 @@ static class HomeChecks
             Call("ReceiveHostLibrary", new WireMessage("catalog-page", Number: Field<long>("guestBrowseRequest") - 1,
                 Data: Wire.Serialize(new LibraryBrowsePage([], 0, 0, "Home"))));
             Check(Continuing().Length == 2, "stale guest responses cannot replace Home rows");
+            // A streamer whose app draws for guests gets the same filters as Home in your own library; the host's app answers each draw.
+            var events = typeof(RoomClient).GetField("events", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(client)!;
+            var reader = events.GetType().GetProperty("Reader")!.GetValue(events)!;
+            var tryRead = reader.GetType().GetMethod("TryRead")!;
+            List<WireMessage> Sent(string type)
+            {
+                var found = new List<WireMessage>(); var slot = new object?[1];
+                while ((bool)tryRead.Invoke(reader, slot)!)
+                    if (slot[0]!.GetType().GetProperty("Message")!.GetValue(slot[0]) is WireMessage { } sent && sent.Type == type) found.Add(sent);
+                return found;
+            }
+            Task Receive(WireMessage message) => (Task)typeof(MainWindow).GetMethod("OnRoomMessage", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, [message])!;
+            async Task<WireMessage> Answer()
+            {
+                var sent = Sent("catalog-draw").Single();
+                var drawn = SharedLibrary.Draw(items, Wire.Read<LibraryDrawRequest>(sent.Data!), playback: store.PlaybackSettings());
+                await Receive(new WireMessage("catalog-drawn", Number: sent.Number, Data: Wire.Serialize(drawn)));
+                await Task.Delay(30);
+                return sent;
+            }
+            Sent("catalog-draw");
+            typeof(RoomClient).GetField("hostFeatures", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(client, 3);
+            Call("RenderGuestHome");
+            Check(Control<StackPanel>("HomeMysteryFilters").Visibility == Visibility.Visible && Field<LibraryCardView?>("homeMystery") is null &&
+                Control<Button>("HomeMysteryCard").Visibility == Visibility.Hidden && Control<TextBlock>("HomeMysteryTitle").Text == "" &&
+                !Control<Button>("HomeMysteryPlay").IsEnabled && !Control<Button>("HomeMysteryDraw").IsEnabled,
+                "while the streamer draws, the filters keep their place and the card waits blank instead of showing a fixed pick");
+            var first = await Answer();
+            var guestPick = Field<LibraryCardView?>("homeMystery");
+            Check(Wire.Read<LibraryDrawRequest>(first.Data!) is { Kind: null, Length: MysteryLength.Any, Current: null, Redraw: false } &&
+                Control<StackPanel>("HomeMysteryFilters").Visibility == Visibility.Visible && guestPick is { IsRemote: true, HomeSection: "draw" } &&
+                guestPick.Card.Media.Id.StartsWith("home-new") && Control<TextBlock>("HomeMysteryMeta").Text == "Movie · 2026 · Not started yet" &&
+                Control<Button>("HomeMysteryDraw").IsEnabled && Control<Button>("HomeMysteryCard").DataContext == guestPick,
+                "guest Home shows the type and length filters and a title the streamer's app drew from its unstarted titles");
+            Call("RenderGuestHome"); Call("RefreshSharedLibrary");
+            Check(Sent("catalog-draw").Count == 0, "refreshing guest Home does not ask the streamer to draw again");
+            Call("DrawMystery", null, new RoutedEventArgs());
+            var another = await Answer();
+            await Until(() => Control<Button>("HomeMysteryCard").DataContext == Field<LibraryCardView?>("homeMystery"));
+            Check(Wire.Read<LibraryDrawRequest>(another.Data!) is { Redraw: true } redrawn && redrawn.Current == guestPick.Card.Media.Id &&
+                Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } other && other.Key != guestPick.Key && Continuing().Length == 2,
+                "Draw another asks the streamer for a different title and keeps the rest of guest Home");
+            Control<RadioButton>("MysteryAnime").IsChecked = true;
+            var anime = await Answer();
+            await Until(() => Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches");
+            Check(Wire.Read<LibraryDrawRequest>(anime.Data!) is { Kind: "Anime", Redraw: false } && Field<LibraryCardView?>("homeMystery") is null &&
+                !Control<Button>("HomeMysteryPlay").IsEnabled && !Control<Button>("HomeMysteryDraw").IsEnabled,
+                "a guest filter with no matching titles in the streamer's library says so");
+            Control<RadioButton>("MysteryAnything").IsChecked = true;
+            await Answer();
+            Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } && Control<Button>("HomeMysteryPlay").IsEnabled, "clearing the guest's type filter draws again");
+            Layout(1280, 850, "home-guest-draw");
+            var kept = Field<LibraryCardView?>("homeMystery");
+            Control<RadioButton>("MysteryAnime").IsChecked = true;
+            var failed = Sent("catalog-draw").Single();
+            await Receive(new WireMessage("catalog-error", Number: failed.Number, Text: "Their app is busy. Try again shortly."));
+            Call("RenderGuestHome"); Call("RefreshSharedLibrary");
+            Check(ReferenceEquals(Field<LibraryCardView?>("homeMystery"), kept) && Continuing().Length == 2 && Field<string?>("guestLibraryNotice") is null &&
+                Sent("catalog-draw").Count == 0, "a failed guest draw keeps the card and Home, and is not asked again on every refresh");
+            Control<RadioButton>("MysteryAnything").IsChecked = true;
+            await Answer();
             Call("OpenHomeTitle", paused);
             Check(Field<string>("currentPage") == "Details" && Field<bool>("guestHomeResume") && Control<Button>("DetailPlay").Content.Equals("Play in room"),
                 "guest continue watching opens room playback details with resume intent");
