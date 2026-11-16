@@ -14,7 +14,7 @@ public partial class MainWindow
         public override string ToString() => Label;
     }
     // What a converted stream was made from: a change to any of it means a new stream.
-    private sealed record ConvertedFrom(string MediaId, string Quality, int? Audio, BurnedSubtitle? Subtitle);
+    private sealed record ConvertedFrom(string MediaId, string Quality, int? Audio, BurnedSubtitle? Subtitle, bool Hevc);
 
     private StreamConverter? streamConverter;
     private SegmentStore? streamConverterStore;
@@ -61,12 +61,15 @@ public partial class MainWindow
         if (hostedPath is not null && probedVideo.Path != hostedPath && probingVideo != hostedPath && Ffmpeg.Find() is { } converter) _ = Guard(() => ProbeHostedVideo(converter, hostedPath));
         var probe = probedVideo.Probe is { } read && probedVideo.Path == hostedPath ? read : null;
         var height = probe?.ClassHeight ?? int.MaxValue;
+        // Whether this PC converts to HEVC, which decides what each quality takes. Known once the video has been read.
+        var hevc = Ffmpeg.HevcEncoder is not null;
         // What sending the file takes: its size over its length.
         var durationMs = probe?.DurationMs ?? (stream is { DurationMs: > 0 } ? stream.DurationMs : loadedMedia == media.Id && loadedStream is null && player is { Length: > 0 } ? player.Length : 0);
         var fileKbps = durationMs > 0 ? media.Length * 8 / durationMs : 0;
         var choices = new List<QualityChoice> { new(StreamQuality.OriginalId, "Original", fileKbps > 0 ? $"The file, about {Mbps(fileKbps)} Mbps" : "The file as it is") };
-        if (streaming) choices.AddRange(StreamQuality.For(height).Select(q => new QualityChoice(q.Id, q.Name, $"about {q.TotalMbps:0.#} Mbps")));
-        else if (stream is not null) choices.Add(new(stream.Quality, stream.Quality, $"about {(StreamQuality.Find(stream.Quality)?.TotalMbps ?? (stream.VideoKbps + StreamQuality.AudioKbps) / 1000.0):0.#} Mbps"));
+        // A quality's bitrate is a limit: an encoder that stops at a picture quality sends most video in less.
+        if (streaming) choices.AddRange(StreamQuality.For(height).Select(q => new QualityChoice(q.Id, q.Name, $"up to {q.TotalMbps(hevc):0.#} Mbps")));
+        else if (stream is not null) choices.Add(new(stream.Quality, stream.Quality, stream.VideoKbps > 0 ? $"up to {Mbps(stream.VideoKbps + StreamQuality.AudioKbps)} Mbps" : "Being prepared"));
         var selected = streaming ? notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality : stream?.Quality ?? StreamQuality.OriginalId;
         qualityUpdating = true;
         try
@@ -84,9 +87,9 @@ public partial class MainWindow
         {
             if (!streaming || room!.SlowestReceiveRate(maximumAgeMs) is not { } slowest) return null;
             var sent = notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality;
-            var better = probe is not null && notice is not { Failed: true } ? StreamQuality.Suggest(probe, media.Length, sent, slowest.Kbps) : null;
-            return new(slowest.Name, slowest.Kbps, slowest.Others, probe is null ? fileKbps : StreamQuality.NeededKbps(probe, media.Length, sent), better,
-                better is not null && StreamQuality.Fits(better.VideoKbps + StreamQuality.AudioKbps, slowest.Kbps));
+            var better = probe is not null && notice is not { Failed: true } ? StreamQuality.Suggest(probe, media.Length, sent, slowest.Kbps, hevc) : null;
+            return new(slowest.Name, slowest.Kbps, slowest.Others, probe is null ? fileKbps : StreamQuality.NeededKbps(probe, media.Length, sent, hevc), better,
+                better is null ? 0 : better.Kbps(hevc) + StreamQuality.AudioKbps);
         }
         var known = Advise(60000);
         var speed = known is null ? "" : $" {known.Name} is receiving about {Mbps(known.Kbps)} Mbps{(known.Others ? ", the slowest connection in the room" : "")}." +
@@ -108,8 +111,9 @@ public partial class MainWindow
             SendStream(room!, new RoomStream("preparing", media.Id, SavedStreamQuality, 0, 0, 0, 0, 0, Preparing: true));
         }
         else if (stream is { Preparing: true } && now - streamedVideo.Since > 5000) SendStream(room!, null);
-        if (!ready || loadedMedia != media.Id || player is null || nativeStopCount > 0) return;
-        var wanted = WantedConversion(media, notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality);
+        // Which encoder this PC has is found while the video is read, and a conversion is planned for it.
+        if (!ready || loadedMedia != media.Id || player is null || nativeStopCount > 0 || probingVideo == hostedPath) return;
+        var wanted = WantedConversion(media, notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality, hevc);
         if (wanted == convertedFrom) { convertedWanted = wanted; return; }
         // Tracks settle over the first moments of a video; conversion starts once they have.
         if (wanted != convertedWanted) { convertedWanted = wanted; convertedWantedSince = now; }
@@ -120,7 +124,10 @@ public partial class MainWindow
     private static string Mbps(long kbps) => (kbps / 1000.0).ToString("0.#");
 
     // The slowest viewer's connection against what the room is sent, and the quality that would suit it better.
-    private sealed record QualityAdvice(string Name, int Kbps, bool Others, long NeededKbps, StreamQuality? Suggestion, bool SuggestionFits);
+    private sealed record QualityAdvice(string Name, int Kbps, bool Others, long NeededKbps, StreamQuality? Suggestion, int SuggestionKbps)
+    {
+        public bool SuggestionFits => Suggestion is not null && StreamQuality.Fits(SuggestionKbps, Kbps);
+    }
     // The quality being offered in the player, for which video.
     private (string MediaId, string Quality)? qualityOffered;
     // The video whose offer was answered or left alone: it is not offered twice. The menu goes on saying what would fit.
@@ -149,7 +156,7 @@ public partial class MainWindow
         if (show)
         {
             QualityOfferText.Text = $"{advice!.Name} is receiving about {Mbps(advice.Kbps)} Mbps, and what is sent now needs about {Mbps(advice.NeededKbps)}. " +
-                $"{better!.Name} (about {better.TotalMbps:0.#} Mbps) {(advice.SuggestionFits ? "would keep up." : "is the smallest there is.")}";
+                $"{better!.Name} (up to {Mbps(advice.SuggestionKbps)} Mbps) {(advice.SuggestionFits ? "would keep up." : "is the smallest there is.")}";
             QualityOfferSwitchText.Text = "Switch to " + better.Name;
         }
         var visibility = show ? Visibility.Visible : Visibility.Collapsed;
@@ -186,21 +193,21 @@ public partial class MainWindow
     }
 
     // What the room's stream should be converted from right now, or null for the file itself.
-    private ConvertedFrom? WantedConversion(SharedMedia media, string quality)
+    private ConvertedFrom? WantedConversion(SharedMedia media, string quality, bool hevc)
     {
         if (quality == StreamQuality.OriginalId || player is null) return null;
         var audio = DescribeRoomTrack(player.AudioTrack, AudioTracks.ItemsSource as TrackChoice[] ?? [], false);
         var subtitles = DescribeRoomTrack(player.Spu, SubtitleTracks.ItemsSource as TrackChoice[] ?? [], true);
         BurnedSubtitle? burned = subtitles is null or { Index: < 0 } ? null
             : subtitles.AssetId is { } asset ? room?.HostedAssetPath(asset) is { } file ? new(File: file) : null : new(Track: subtitles.Index);
-        return new(media.Id, quality, audio is { Index: >= 0 } ? audio.Index : null, burned);
+        return new(media.Id, quality, audio is { Index: >= 0 } ? audio.Index : null, burned, hevc);
     }
 
     private string? probingVideo;
     private async Task ProbeHostedVideo(string ffmpeg, string path)
     {
         probingVideo = path;
-        try { var probe = await VideoProbe.ReadAsync(ffmpeg, path, lifetime.Token); probedVideo = (path, probe); }
+        try { var probe = await VideoProbe.ReadAsync(ffmpeg, path, lifetime.Token); await Ffmpeg.HevcEncoderAsync(ffmpeg).WaitAsync(lifetime.Token); probedVideo = (path, probe); }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         finally { if (probingVideo == path) probingVideo = null; }
     }
@@ -228,11 +235,14 @@ public partial class MainWindow
             if (probedVideo.Path != local.LocalPath || probedVideo.Probe is null) probedVideo = (local.LocalPath, await VideoProbe.ReadAsync(ffmpeg, local.LocalPath, token));
             if (!Current()) return;
             if (probedVideo.Probe is not { } probe) { Decline(media, "This video cannot be converted, so the file is streamed as it is.", failed: true); return; }
-            var plan = StreamQuality.Plan(probe, media.Length, StreamQuality.Find(wanted.Quality)!);
+            // The stream is planned for the encoder it was wanted with: when that changes, another conversion replaces this one.
+            var hevcEncoder = wanted.Hevc ? await Ffmpeg.HevcEncoderAsync(ffmpeg).WaitAsync(token) : null;
+            if (!Current()) return;
+            var plan = StreamQuality.Plan(probe, media.Length, StreamQuality.Find(wanted.Quality)!, hevcEncoder is not null);
             var quality = plan.Quality;
             if (!plan.Smaller)
             {
-                Decline(media, $"This file is already smaller than {quality.Name} would be ({plan.FileKbps / 1000.0:0.0} Mbps, against about {quality.TotalMbps:0.0}), so it is streamed as it is.", failed: false);
+                Decline(media, $"This file is already smaller than {quality.Name} may be ({plan.FileKbps / 1000.0:0.0} Mbps, against up to {(plan.VideoKbps + StreamQuality.AudioKbps) / 1000.0:0.0}), so it is streamed as it is.", failed: false);
                 return;
             }
             directory = Path.Combine(StreamCacheDirectory, "convert-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
@@ -242,8 +252,8 @@ public partial class MainWindow
             store = SegmentStore.TryCreate(directory, segments);
             if (store is null) { Decline(media, "There is no room on the disk to convert the video, so the file is streamed as it is.", failed: true); return; }
             var audio = probe.AudioTracks == 0 || wanted.Audio is null ? (int?)null : Math.Min(wanted.Audio.Value, probe.AudioTracks - 1);
-            var stream = new RoomStream(Guid.NewGuid().ToString("N"), media.Id, quality.Id, plan.Height, quality.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
-            converter = new StreamConverter(ffmpeg, new StreamInput(local.LocalPath, probe, audio, subtitle), stream, store);
+            var stream = new RoomStream(Guid.NewGuid().ToString("N"), media.Id, quality.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+            converter = new StreamConverter(ffmpeg, new StreamInput(local.LocalPath, probe, audio, subtitle), stream, store, hevcEncoder);
             var started = converter;
             converter.Failed += message => Dispatcher.BeginInvoke(() =>
             {
@@ -254,7 +264,7 @@ public partial class MainWindow
             (streamConverter, streamConverterStore, streamConverterDirectory) = (converter, store, directory);
             (converter, store, directory) = (null, null, null);
             Offer(streamConverter, stream);
-            PlaybackDiagnostics.Record("stream-quality", new { quality = quality.Id, height = stream.Height, segments, audio, subtitles = subtitle is null ? "none" : subtitle.ImageTrack is null ? "text" : "picture" });
+            PlaybackDiagnostics.Record("stream-quality", new { quality = quality.Id, height = stream.Height, kbps = stream.VideoKbps, encoder = streamConverter.Encoder, segments, audio, subtitles = subtitle is null ? "none" : subtitle.ImageTrack is null ? "text" : "picture" });
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         finally

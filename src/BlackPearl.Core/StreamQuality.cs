@@ -6,49 +6,52 @@ using System.Text.RegularExpressions;
 namespace BlackPearl.Core;
 
 // The qualities a room's video can be converted to while it plays. Original streams the file as it is.
-public sealed record StreamQuality(string Id, string Name, int Height, int VideoKbps)
+// VideoKbps is the most its picture takes as H.264; HevcKbps as HEVC, which shows the same picture in fewer bits.
+public sealed record StreamQuality(string Id, string Name, int Height, int VideoKbps, int HevcKbps)
 {
     public const string OriginalId = "original", SettingKey = "streamQuality";
     public static readonly StreamQuality[] Converted =
     [
-        new("1080p", "1080p", 1080, 5000),
-        new("720p", "720p", 720, 2800),
-        new("480p", "480p", 480, 1400),
+        new("1080p", "1080p", 1080, 5000, 3200),
+        new("720p", "720p", 720, 2800, 1900),
+        new("480p", "480p", 480, 1400, 1000),
     ];
     public const int AudioKbps = 160;
     public static StreamQuality? Find(string? id) => Converted.FirstOrDefault(q => q.Id == id);
     // A video is never enlarged: a 720p video offers 720p and 480p. The height is the video's class (VideoProbe.ClassHeight).
     public static StreamQuality[] For(int classHeight) => Converted.Where(q => q.Height <= Math.Max(classHeight, Converted[^1].Height) + 8).ToArray();
-    public double TotalMbps => (VideoKbps + AudioKbps) / 1000.0;
+    // What the picture takes with the encoder this PC converts with: HEVC where its graphics hardware encodes it.
+    public int Kbps(bool hevc) => hevc ? HevcKbps : VideoKbps;
+    public double TotalMbps(bool hevc) => (Kbps(hevc) + AudioKbps) / 1000.0;
     // What a video becomes for a chosen quality: the largest quality it is big enough for, at or below the chosen one,
     // and its picture shrunk by as much as a full frame of its class would be. A 1920x800 film at 720p is 1280x532.
-    public static StreamPlan Plan(VideoProbe probe, long fileBytes, StreamQuality chosen)
+    public static StreamPlan Plan(VideoProbe probe, long fileBytes, StreamQuality chosen, bool hevc)
     {
         var quality = For(probe.ClassHeight).FirstOrDefault(q => q.Height <= chosen.Height) ?? Converted[^1];
         var height = (int)Math.Round((double)probe.Height * quality.Height / Math.Max(probe.ClassHeight, quality.Height));
-        return new(quality, Math.Min(probe.Height, height) / 2 * 2, fileBytes * 8 / Math.Max(1, probe.DurationMs));
+        return new(quality, Math.Min(probe.Height, height) / 2 * 2, fileBytes * 8 / Math.Max(1, probe.DurationMs), quality.Kbps(hevc));
     }
     // A stream needs this much more than its average bitrate for the connection to keep up through its busier scenes.
     public const double Headroom = 1.2;
     public static bool Fits(long neededKbps, int receivedKbps) => neededKbps * Headroom <= receivedKbps;
     // What the room is sent for a choice: the quality's bitrate when the file is converted to it, otherwise the file's own.
-    public static long NeededKbps(VideoProbe probe, long fileBytes, string? chosenId) =>
-        Find(chosenId) is { } chosen && Plan(probe, fileBytes, chosen) is { Smaller: true } plan ? plan.Quality.VideoKbps + AudioKbps : fileBytes * 8 / Math.Max(1, probe.DurationMs);
+    public static long NeededKbps(VideoProbe probe, long fileBytes, string? chosenId, bool hevc) =>
+        Find(chosenId) is { } chosen && Plan(probe, fileBytes, chosen, hevc) is { Smaller: true } plan ? plan.VideoKbps + AudioKbps : fileBytes * 8 / Math.Max(1, probe.DurationMs);
     // For a connection that carries this much: null while the choice fits it or nothing smaller exists; otherwise
     // the best quality that fits, or the smallest there is when none does.
-    public static StreamQuality? Suggest(VideoProbe probe, long fileBytes, string? chosenId, int receivedKbps)
+    public static StreamQuality? Suggest(VideoProbe probe, long fileBytes, string? chosenId, int receivedKbps, bool hevc)
     {
-        var needed = NeededKbps(probe, fileBytes, chosenId);
+        var needed = NeededKbps(probe, fileBytes, chosenId, hevc);
         if (Fits(needed, receivedKbps)) return null;
-        var smaller = For(probe.ClassHeight).Where(q => q.VideoKbps + AudioKbps < needed && Plan(probe, fileBytes, q).Smaller).ToArray();
-        return smaller.FirstOrDefault(q => Fits(q.VideoKbps + AudioKbps, receivedKbps)) ?? smaller.LastOrDefault();
+        var smaller = For(probe.ClassHeight).Where(q => q.Kbps(hevc) + AudioKbps < needed && Plan(probe, fileBytes, q, hevc).Smaller).ToArray();
+        return smaller.FirstOrDefault(q => Fits(q.Kbps(hevc) + AudioKbps, receivedKbps)) ?? smaller.LastOrDefault();
     }
 }
 
-public sealed record StreamPlan(StreamQuality Quality, int Height, long FileKbps)
+public sealed record StreamPlan(StreamQuality Quality, int Height, long FileKbps, int VideoKbps)
 {
     // A file whose bitrate is already this low would take as long to send converted, and look worse, whatever its size.
-    public bool Smaller => FileKbps > Quality.VideoKbps + StreamQuality.AudioKbps;
+    public bool Smaller => FileKbps > VideoKbps + StreamQuality.AudioKbps;
 }
 
 // What ffmpeg says a video file holds: enough to choose a quality and to draw its subtitles into the picture.
@@ -140,7 +143,14 @@ public static class Ffmpeg
             await output; await process.WaitForExitAsync(deadline.Token);
             return (process.ExitCode, errors);
         }
-        finally { if (!process.HasExited) try { process.Kill(true); } catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { } }
+        finally { Kill(process); }
+    }
+
+    // Stops a process that may be exiting, or gone, at this very moment: stopping it then fails in one of these ways.
+    internal static void Kill(Process process)
+    {
+        try { if (!process.HasExited) process.Kill(true); }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) { }
     }
 
     // Subtitles are prepared once for a stream: a text track is copied out of the video with its fonts, because the
@@ -189,22 +199,69 @@ public static class Ffmpeg
         return graph.ToString();
     }
 
-    public static readonly string[] Encoders = ["h264_nvenc", "h264_qsv", "h264_amf", "libx264", "h264_mf"];
+    // Tried in this order. "/vbr" is the same encoder aiming at the bitrate itself, for graphics hardware
+    // too old for the mode that stops at a picture quality.
+    public static readonly string[] Encoders = ["h264_nvenc", "h264_qsv", "h264_qsv/vbr", "h264_amf", "libx264", "h264_mf"];
+    // HEVC shows the same picture in fewer bits. Only graphics hardware is used for it: in software it ran at two
+    // thirds of x264's speed on a 16-core processor, and the PCs whose graphics cannot encode HEVC are older ones.
+    public static readonly string[] HevcEncoders = ["hevc_nvenc", "hevc_qsv", "hevc_qsv/vbr", "hevc_amf"];
+    public const string CodecSetting = "STREAM_CODEC";
 
+    private static readonly object hevcGate = new();
+    private static Task<string?>? hevcEncoder;
+    // The HEVC encoder this PC's graphics hardware has, found once by encoding a second of video with each; null when
+    // there is none. BLACKPEARL_STREAM_CODEC=h264 leaves HEVC unused.
+    public static Task<string?> HevcEncoderAsync(string ffmpeg)
+    {
+        lock (hevcGate) return hevcEncoder ??= Task.Run(() => FindHevcEncoderAsync(ffmpeg));
+    }
+    // The encoder found so far: null until the check has finished.
+    public static string? HevcEncoder { get { lock (hevcGate) return hevcEncoder is { IsCompletedSuccessfully: true } found ? found.Result : null; } }
+    // The encoder passed the check and then converted nothing where another did: it is left alone from here on.
+    internal static void HevcFailed() { lock (hevcGate) hevcEncoder = Task.FromResult<string?>(null); }
+
+    private static async Task<string?> FindHevcEncoderAsync(string ffmpeg)
+    {
+        if (string.Equals(AppEnvironment.Get(CodecSetting), "h264", StringComparison.OrdinalIgnoreCase)) return null;
+        foreach (var encoder in HevcEncoders)
+        {
+            try
+            {
+                var (exit, errors) = await RunAsync(ffmpeg, ["-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24,format=yuv420p", "-frames:v", "24",
+                    .. EncoderArguments(encoder, StreamQuality.Converted[1].HevcKbps), "-f", "null", "-"], null, TimeSpan.FromSeconds(20), default);
+                PlaybackDiagnostics.Record("stream-encoder", new { encoder, works = exit == 0, error = exit == 0 ? null : Tail(errors) });
+                if (exit == 0) return encoder;
+            }
+            catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or OperationCanceledException) { PlaybackDiagnostics.Record("stream-encoder", new { encoder, works = false, error = ex.Message }); }
+        }
+        return null;
+    }
+
+    // kbps is the most the picture takes. NVIDIA's and Intel's encoders and x264 stop at a picture quality where the
+    // video needs less; the others aim at the bitrate itself.
     internal static string[] EncoderArguments(string encoder, int kbps)
     {
-        string rate = kbps.ToString(CultureInfo.InvariantCulture) + "k", buffer = (kbps * 2).ToString(CultureInfo.InvariantCulture) + "k";
+        string rate = kbps.ToString(CultureInfo.InvariantCulture) + "k", above = (kbps + 1).ToString(CultureInfo.InvariantCulture) + "k", buffer = (kbps * 2).ToString(CultureInfo.InvariantCulture) + "k";
+        var name = encoder.Split('/')[0];
         // Pieces are cut at keyframes, so the only keyframes are the ones forced at piece boundaries.
-        string[] shared = ["-g", "100000", "-maxrate", rate, "-bufsize", buffer];
+        string[] shared = ["-g", "100000", "-bufsize", buffer];
         return encoder switch
         {
-            "h264_nvenc" => ["-c:v", encoder, "-preset", "p4", "-rc", "vbr", "-cq", "24", "-b:v", "0", "-no-scenecut", "1", "-forced-idr", "1", .. shared],
-            "h264_qsv" => ["-c:v", encoder, "-preset", "fast", "-global_quality", "24", "-forced_idr", "1", .. shared],
-            "h264_amf" => ["-c:v", encoder, "-rc", "vbr_peak", "-b:v", rate, "-forced_idr", "1", .. shared],
-            "libx264" => ["-c:v", encoder, "-preset", "veryfast", "-crf", "22", "-sc_threshold", "0", "-keyint_min", "100000", .. shared],
-            _ => ["-c:v", encoder, "-b:v", rate, .. shared],
+            "h264_nvenc" or "hevc_nvenc" => ["-c:v", name, "-preset", "p4", "-rc", "vbr", "-cq", "24", "-b:v", "0", "-maxrate", rate, "-no-scenecut", "1", "-forced-idr", "1", .. shared],
+            // Intel's encoder takes a quality and a bitrate together only when given a target and a higher peak. Given a
+            // quality and a peak alone it encodes every frame at fixed quantizers and ignores the peak. The peak is
+            // barely higher, because its HEVC encoder stays at the peak for as long as the video is hard: two minutes
+            // of noise came out 17% over the target with a peak a fifth above it.
+            "h264_qsv" or "hevc_qsv" => ["-c:v", name, "-preset", "fast", "-global_quality", IntelQuality, "-b:v", rate, "-maxrate", above, "-forced_idr", "1", .. shared],
+            "h264_qsv/vbr" or "hevc_qsv/vbr" => ["-c:v", name, "-preset", "fast", "-b:v", rate, "-maxrate", above, "-forced_idr", "1", .. shared],
+            "h264_amf" or "hevc_amf" => ["-c:v", name, "-rc", "vbr_peak", "-b:v", rate, "-maxrate", rate, "-forced_idr", "1", .. shared],
+            "libx264" => ["-c:v", name, "-preset", "veryfast", "-crf", "22", "-maxrate", rate, "-sc_threshold", "0", "-keyint_min", "100000", .. shared],
+            _ => ["-c:v", name, "-b:v", rate, "-maxrate", rate, .. shared],
         };
     }
+    // Intel's quality setting means about the same picture as H.264 and as HEVC: on a clean film and a grainy one,
+    // at every size, HEVC scored within 1.5 VMAF points of H.264 in 27 to 50% fewer bits.
+    private const string IntelQuality = "24";
 
     internal static string Number(double value) => value.ToString("0.######", CultureInfo.InvariantCulture);
 

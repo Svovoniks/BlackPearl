@@ -68,11 +68,12 @@ static class BufferRunFixture
                 var probe = await VideoProbe.ReadAsync(ffmpeg, path, timeout.Token) ?? throw new IOException("The video could not be read.");
                 var prepare = Stopwatch.StartNew();
                 var subtitle = int.TryParse(Option("--subtitle"), out var track) ? await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), Directory.CreateDirectory(Path.Combine(directory, "convert")).FullName, timeout.Token) : null;
-                var plan = StreamQuality.Plan(probe, file.Media.Length, quality); var chosen = plan.Quality;
+                var hevcEncoder = await Ffmpeg.HevcEncoderAsync(ffmpeg);
+                var plan = StreamQuality.Plan(probe, file.Media.Length, quality, hevcEncoder is not null); var chosen = plan.Quality;
                 var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
-                stream = new RoomStream(Guid.NewGuid().ToString("N"), file.Media.Id, chosen.Id, plan.Height, chosen.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+                stream = new RoomStream(Guid.NewGuid().ToString("N"), file.Media.Id, chosen.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
                 converted = SegmentStore.TryCreate(Path.Combine(directory, "convert"), segments) ?? throw new IOException("No room for the converted video.");
-                converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, converted);
+                converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, converted, hevcEncoder);
                 converter.Failed += message => Console.WriteLine("CONVERSION FAILED: " + message);
                 host.ResolveMedia = id => id == file.Media.Id ? sent : converter.Resolve(id) is { } piece ? new LimitedSource(piece, limiter) : null;
                 var kept = SegmentStore.TryCreate(Path.Combine(directory, "viewer"), segments);
@@ -85,7 +86,7 @@ static class BufferRunFixture
                     }
                 }, kept);
                 url = await bridge.StartAsync(remote);
-                Console.WriteLine($"source {probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")}, {probe.AudioTracks} audio, {probe.Subtitles.Length} subtitle tracks; converting to {chosen.Name}, {stream.Height} high, at about {chosen.TotalMbps:0.#} Mbps (file {plan.FileKbps / 1000.0:0.0} Mbps{(plan.Smaller ? "" : ", which the app would stream as it is")})" +
+                Console.WriteLine($"source {probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")}, {probe.AudioTracks} audio, {probe.Subtitles.Length} subtitle tracks; converting to {chosen.Name}, {stream.Height} high, at up to {(plan.VideoKbps + StreamQuality.AudioKbps) / 1000.0:0.#} Mbps (file {plan.FileKbps / 1000.0:0.0} Mbps{(plan.Smaller ? "" : ", which the app would stream as it is")})" +
                     (subtitle is null ? "" : $"; subtitles {(subtitle.ImageTrack is null ? "text" : "picture")}, prepared in {prepare.Elapsed.TotalSeconds:F1} s"));
             }
             Core.Initialize();

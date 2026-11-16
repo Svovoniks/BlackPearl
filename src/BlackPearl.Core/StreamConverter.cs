@@ -107,17 +107,24 @@ public sealed class StreamConverter : IDisposable
     private readonly SemaphoreSlim wake = new(0, 1);
     private readonly byte[] empty = TransportSegmenter.Empty();
     private Run? run;
-    private int encoder = Volatile.Read(ref preferredEncoder), demand, last = int.MaxValue;
+    // The encoders this stream may use, in the order they are tried.
+    private readonly string[] encoders;
+    private int encoder, demand, last = int.MaxValue;
     private bool encoderWorked, disposed;
     public RoomStream Stream { get; }
     public string? Failure { get; private set; }
-    public string Encoder => Ffmpeg.Encoders[Math.Min(encoder, Ffmpeg.Encoders.Length - 1)];
+    public string Encoder => encoders[encoder];
     public int ConvertedSegments => store.Count;
     // Raised once, from a background thread, when no encoder on this PC can convert the video.
     public event Action<string>? Failed;
 
-    public StreamConverter(string ffmpeg, StreamInput input, RoomStream stream, SegmentStore store)
-    { this.ffmpeg = ffmpeg; this.input = input; Stream = stream; this.store = store; }
+    // hevcEncoder is the one Ffmpeg.HevcEncoderAsync found, for a stream whose bitrate was chosen for HEVC.
+    public StreamConverter(string ffmpeg, StreamInput input, RoomStream stream, SegmentStore store, string? hevcEncoder = null)
+    {
+        this.ffmpeg = ffmpeg; this.input = input; Stream = stream; this.store = store;
+        var known = Ffmpeg.Encoders[Volatile.Read(ref preferredEncoder)..];
+        encoders = hevcEncoder is null ? known : [hevcEncoder, .. known];
+    }
 
     private sealed class Run(int start)
     {
@@ -225,8 +232,7 @@ public sealed class StreamConverter : IDisposable
         if (run is not { } old) return;
         run = null;
         old.Cancellation.Cancel();
-        try { if (old.Process is { HasExited: false } process) process.Kill(true); }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+        if (old.Process is { } process) Ffmpeg.Kill(process);
     }
 
     private async Task Convert(Run current)
@@ -245,6 +251,8 @@ public sealed class StreamConverter : IDisposable
             {
                 if (run != current) return;
                 if (!kept) { Fail("The disk has no room to convert the video."); return; }
+                // The HEVC encoder converted nothing and an H.264 one did: later streams are planned without it.
+                if (!encoderWorked && encoder > 0 && encoders[0].StartsWith("hevc", StringComparison.Ordinal)) Ffmpeg.HevcFailed();
                 encoderWorked = true; current.Next = index + 1; current.Produced++;
                 foreach (var arrived in produced.Keys.Where(key => key <= index && store.Has(key)).ToArray()) { produced[arrived].TrySetResult(); produced.Remove(arrived); }
                 var elsewhere = Elsewhere(current);
@@ -259,7 +267,7 @@ public sealed class StreamConverter : IDisposable
             foreach (var argument in Ffmpeg.ConversionArguments(input, Stream, name, current.Start)) info.ArgumentList.Add(argument);
             PlaybackDiagnostics.Record("stream-convert", new { state = "run", stream = Stream.Id, from = current.Start, encoder = name });
             using var process = Process.Start(info) ?? throw new IOException("ffmpeg did not start.");
-            lock (gate) { if (run != current) { try { process.Kill(true); } catch (InvalidOperationException) { } return; } current.Process = process; }
+            lock (gate) { if (run != current) { Ffmpeg.Kill(process); return; } current.Process = process; }
             // The video being watched on this PC comes first.
             try { process.PriorityClass = ProcessPriorityClass.BelowNormal; } catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
             var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
@@ -292,7 +300,7 @@ public sealed class StreamConverter : IDisposable
             }
             PlaybackDiagnostics.Record("stream-convert", new { state = "stopped", stream = Stream.Id, encoder = name, exit, produced = current.Produced, error = Ffmpeg.Tail(errors) });
             // An encoder that never produced anything is not available on this PC; the next one is tried.
-            if (!encoderWorked && current.Produced == 0 && encoder + 1 < Ffmpeg.Encoders.Length) { encoder++; Start(current.Start); return; }
+            if (!encoderWorked && current.Produced == 0 && encoder + 1 < encoders.Length) { encoder++; Start(current.Start); return; }
             var attempts = retries[current.Next] = retries.GetValueOrDefault(current.Next) + 1;
             if (encoderWorked && attempts <= 2) { Start(current.Next); return; }
             Fail(encoderWorked ? "The video could not be converted past this point." : "This PC has no video encoder that can convert the video.");
@@ -315,7 +323,7 @@ public sealed class StreamConverter : IDisposable
         {
             if (disposed) return;
             disposed = true; Stop();
-            if (encoderWorked) Volatile.Write(ref preferredEncoder, encoder);
+            if (encoderWorked && Array.IndexOf(Ffmpeg.Encoders, Encoder) is >= 0 and var worked) Volatile.Write(ref preferredEncoder, worked);
             foreach (var arrival in produced.Values) arrival.TrySetException(new ObjectDisposedException(nameof(StreamConverter)));
             produced.Clear();
         }

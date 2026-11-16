@@ -68,13 +68,36 @@ static class StreamQualityFixture
             converter.Resolve("stream/another/5") is null && converter.Resolve(StreamConverter.Resource(stream.Id, 99)) is null && converter.Resolve("stream/" + stream.Id + "/x") is null,
             "viewers read a piece's size and ranges by name, and nothing outside the stream");
 
+        // A picture that is hard to encode still takes no more than its quality's bitrate. Noise is the hardest there
+        // is, and a film's grain is noise. With HEVC, where this PC's graphics hardware encodes it, the bitrate is lower.
+        var busy = Path.Combine(directory, "busy.mkv");
+        await Ffmpeg.RunAsync(ffmpeg!, ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=426x240:rate=24,noise=alls=40:allf=t,format=yuv420p",
+            "-t", "16", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "30", "-g", "48", busy], null, TimeSpan.FromMinutes(2), default);
+        var busyProbe = await VideoProbe.ReadAsync(ffmpeg!, busy, default);
+        var hevcEncoder = await Ffmpeg.HevcEncoderAsync(ffmpeg!);
+        if (hevcEncoder is null) Console.WriteLine("No HEVC hardware encoder on this PC: streams are checked as H.264 only.");
+        foreach (var hevc in hevcEncoder is null ? new[] { false } : [false, true])
+        {
+            var plan = StreamQuality.Plan(busyProbe!, new FileInfo(busy).Length, quality, hevc);
+            using var busyStore = SegmentStore.TryCreate(Path.Combine(directory, hevc ? "busy-hevc" : "busy"), 4, reserveBytes: 0)!;
+            using var busyConverter = new StreamConverter(ffmpeg!, new StreamInput(busy, busyProbe!, null, null),
+                new RoomStream("busy", "busy", quality.Id, plan.Height, plan.VideoKbps, busyProbe!.DurationMs, StreamConverter.SegmentMs, 4), busyStore, hevc ? hevcEncoder : null);
+            long bytes = 0;
+            for (var index = 0; index < 4; index++) bytes += await busyConverter.LengthAsync(index, limit.Token);
+            var kbps = bytes * 8.0 / 16 / 1000;
+            // The first seconds may spend the encoder's buffer, and the transport stream adds a little. Intel's
+            // encoder, told a quality and a peak alone, sent this sample at four times the bitrate.
+            check(plan.Smaller && plan.VideoKbps == quality.Kbps(hevc) && busyConverter.Encoder.StartsWith("hevc") == hevc && kbps < plan.VideoKbps * 1.25,
+                $"a picture full of noise is sent within its quality's bitrate ({kbps:F0} kbps for {plan.VideoKbps}, with {busyConverter.Encoder})");
+        }
+
         // A DVD's pixels are not square, and scaling leaves pixel shapes one encoder writes wrongly. The picture is sent
         // with square pixels, at the width it is shown.
         var dvd = Path.Combine(directory, "dvd.mkv");
         await Ffmpeg.RunAsync(ffmpeg!, ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x202020:size=720x480:rate=24,format=yuv420p,setsar=32/27",
             "-t", "8", "-c:v", "libx264", "-preset", "ultrafast", "-g", "48", dvd], null, TimeSpan.FromMinutes(2), default);
         var dvdProbe = await VideoProbe.ReadAsync(ffmpeg!, dvd, default);
-        var dvdPlan = StreamQuality.Plan(dvdProbe!, new FileInfo(dvd).Length, quality);
+        var dvdPlan = StreamQuality.Plan(dvdProbe!, new FileInfo(dvd).Length, quality, hevc: false);
         var dvdWork = Path.Combine(directory, "dvd"); Directory.CreateDirectory(dvdWork);
         using (var dvdStore = SegmentStore.TryCreate(dvdWork, 2, reserveBytes: 0)!)
         using (var dvdConverter = new StreamConverter(ffmpeg!, new StreamInput(dvd, dvdProbe!, null, null), new RoomStream("dvd", "dvd", quality.Id, dvdPlan.Height, quality.VideoKbps, dvdProbe!.DurationMs, StreamConverter.SegmentMs, 2), dvdStore))
@@ -145,6 +168,32 @@ static class StreamQualityFixture
         }
         finally { player.Stop(); }
 
+        // The same video as HEVC: a piece still plays on its own and sits at its place in the film, and the player
+        // plays and seeks it like the other.
+        if (hevcEncoder is not null)
+        {
+            var hevcStream = Offer("hevc") with { VideoKbps = quality.HevcKbps };
+            using var hevcStore = SegmentStore.TryCreate(Path.Combine(directory, "hevc"), stream.Segments, reserveBytes: 0)!;
+            using var hevcConverter = new StreamConverter(ffmpeg!, new StreamInput(video, probe!, 0, null), hevcStream, hevcStore, hevcEncoder);
+            var sixth = hevcConverter.Read(5, 0, await hevcConverter.LengthAsync(5, limit.Token))!;
+            var codec = await Codec(ffmpeg!, sixth, work);
+            check(hevcConverter.Encoder == hevcEncoder && codec == "hevc" && Math.Abs(FirstVideoTime(sixth) - (Ffmpeg.TimestampOffsetSeconds + 20)) < 0.05 && await Decodes(ffmpeg!, sixth, work),
+                $"with {hevcEncoder}, a piece is HEVC, holds the video from its place in the film and plays on its own (it is {codec})");
+            using var hevcRemote = new RemoteStream(hevcStream, (name, offset, count, ct) => (hevcConverter.Resolve(name) ?? throw new IOException("No such part")).ReadAsync(offset, count, ct), null);
+            await using var hevcBridge = new MediaBridge();
+            using var hevcMedia = new Media(vlc, await hevcBridge.StartAsync(hevcRemote));
+            hevcMedia.AddOption($":network-caching={MediaStreaming.NetworkCacheForRtt(50)}");
+            try
+            {
+                check(player.Play(hevcMedia), "the player opens the HEVC stream");
+                await Until(() => player.IsPlaying && player.Time > 500);
+                player.Time = 18500;
+                await Until(() => player.Time is >= 19500 and < 24000);
+                check(player.IsPlaying && Math.Abs(player.Length - probe!.DurationMs) < 500, $"the player plays the HEVC stream at its full length and seeks in it ({player.Time} ms after asking for 18500)");
+            }
+            finally { player.Stop(); }
+        }
+
         // The video's end and a conversion nothing can start.
         using var shortStore = SegmentStore.TryCreate(Path.Combine(directory, "short"), stream.Segments + 3, reserveBytes: 0)!;
         var longer = Offer("longer") with { DurationMs = probe!.DurationMs + 12000, Segments = stream.Segments + 3 };
@@ -158,6 +207,13 @@ static class StreamQualityFixture
         failing.Failed += message => failed.TrySetResult(message);
         try { await failing.LengthAsync(0, limit.Token); check(false, "a video that cannot be converted fails"); }
         catch (IOException) { check(failing.Failure is not null && (await failed.Task.WaitAsync(TimeSpan.FromSeconds(10))).Length > 0, "a video that cannot be converted is reported once, after every encoder was tried"); }
+        check(Ffmpeg.HevcEncoder == hevcEncoder, "a video that no encoder can convert says nothing about the encoders");
+
+        // An HEVC encoder that passed the check and then converts nothing. Last, because it changes what later streams use.
+        using var fallbackStore = SegmentStore.TryCreate(Path.Combine(directory, "fallback"), stream.Segments, reserveBytes: 0)!;
+        using var fallback = new StreamConverter(ffmpeg!, new StreamInput(video, probe, 0, null), Offer("fallback"), fallbackStore, "hevc_none");
+        check(await fallback.LengthAsync(0, limit.Token) > 0 && !fallback.Encoder.StartsWith("hevc") && Ffmpeg.HevcEncoder is null,
+            $"when the HEVC encoder converts nothing the stream is converted by the next one ({fallback.Encoder}), and later streams are planned without HEVC");
     }
 
     // --stream-frame <video> <seconds> <quality> <picture.png> [--audio <track>] [--subtitle <track>]
@@ -169,7 +225,8 @@ static class StreamQualityFixture
         var ffmpeg = FindFfmpeg() ?? throw new IOException("ffmpeg was not found.");
         var probe = await VideoProbe.ReadAsync(ffmpeg, path, default) ?? throw new IOException("The video could not be read.");
         var chosen = StreamQuality.Find(args[3]) ?? throw new ArgumentException("Unknown quality");
-        var plan = StreamQuality.Plan(probe, new FileInfo(path).Length, chosen); var quality = plan.Quality;
+        var hevcEncoder = await Ffmpeg.HevcEncoderAsync(ffmpeg);
+        var plan = StreamQuality.Plan(probe, new FileInfo(path).Length, chosen, hevcEncoder is not null); var quality = plan.Quality;
         var directory = Path.Combine(Path.GetTempPath(), "BlackPearl-checks", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
         try
         {
@@ -177,9 +234,9 @@ static class StreamQualityFixture
             var subtitle = int.TryParse(Option("--subtitle"), out var track) ? await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), directory, default) : null;
             var prepared = clock.Elapsed.TotalSeconds;
             var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
-            var stream = new RoomStream("frame", "video", quality.Id, plan.Height, quality.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+            var stream = new RoomStream("frame", "video", quality.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
             using var store = SegmentStore.TryCreate(directory, segments, reserveBytes: 0)!;
-            using var converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, store);
+            using var converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, store, hevcEncoder);
             var index = (int)(seconds * 1000 / StreamConverter.SegmentMs);
             clock.Restart();
             var length = await converter.LengthAsync(index, default);
@@ -253,7 +310,7 @@ static class StreamQualityFixture
         // A film's picture is as wide as its class and often shorter. Judged by height alone, 1920x1040 lost its 1080p.
         VideoProbe Sized(int width, int height) => film! with { Width = width, Height = height };
         long Bytes(int kbps) => (film!.DurationMs * kbps + 7) / 8;
-        StreamPlan Plan(VideoProbe video, int kbps, string quality) => StreamQuality.Plan(video, Bytes(kbps), StreamQuality.Find(quality)!);
+        StreamPlan Plan(VideoProbe video, int kbps, string quality, bool hevc = false) => StreamQuality.Plan(video, Bytes(kbps), StreamQuality.Find(quality)!, hevc);
         check(film!.ClassHeight == 1080 && Sized(1920, 800).ClassHeight == 1080 && Sized(1280, 536).ClassHeight == 720 && Sized(1440, 1080).ClassHeight == 1080 &&
             Sized(1080, 1920).ClassHeight == 1920 && StreamQuality.For(Sized(1920, 800).ClassHeight).Length == 3 && StreamQuality.For(Sized(1280, 536).ClassHeight).Select(q => q.Id).SequenceEqual(["720p", "480p"]),
             "a wide film is offered the qualities of the frame it is cut from");
@@ -264,9 +321,21 @@ static class StreamQualityFixture
         check(!Plan(film, 2761, "1080p").Smaller && !Plan(film, 2761, "720p").Smaller && Plan(film, 2761, "480p").Smaller && !Plan(Sized(3840, 2160), 1500, "480p").Smaller && Plan(Sized(640, 360), 6813, "480p").Smaller,
             "a file whose bitrate is already below the quality's is not converted, whatever its size");
 
+        // HEVC shows the same picture in fewer bits, so each quality takes less where this PC encodes it.
+        var hd = StreamQuality.Find("1080p")!; var small = StreamQuality.Find("480p")!;
+        check(StreamQuality.Converted.All(q => q.HevcKbps < q.VideoKbps && q.Kbps(true) == q.HevcKbps && q.Kbps(false) == q.VideoKbps) && hd.TotalMbps(true) < hd.TotalMbps(false) &&
+            Plan(film, hd.HevcKbps + 500, "1080p", hevc: true) is { Smaller: true } converted && converted.VideoKbps == hd.HevcKbps && !Plan(film, hd.HevcKbps + 500, "1080p").Smaller,
+            "with HEVC a quality takes less, so a file is worth converting that would not be as H.264");
+        string Arguments(string encoder) => string.Join(' ', Ffmpeg.EncoderArguments(encoder, 3000));
+        check(Ffmpeg.Encoders.Concat(Ffmpeg.HevcEncoders).All(encoder => Arguments(encoder).Contains("-maxrate ") && Arguments(encoder).Contains("-bufsize 6000k") && Arguments(encoder).Contains("-g 100000")) &&
+            Arguments("hevc_qsv").StartsWith("-c:v hevc_qsv ") && Arguments("hevc_qsv").Contains("-global_quality ") && Arguments("hevc_qsv").Contains("-b:v 3000k -maxrate 3001k") &&
+            Arguments("h264_qsv/vbr").StartsWith("-c:v h264_qsv ") && !Arguments("h264_qsv/vbr").Contains("-global_quality") && Arguments("h264_qsv/vbr").Contains("-b:v 3000k -maxrate 3001k"),
+            "every encoder is given the bitrate as a limit, and Intel's a target with a peak just above it, which is what makes it keep to one");
+
         // What a connection carries against what is sent: the best quality that fits it is suggested.
-        StreamQuality? Suggest(int fileKbps, string chosen, int received) => StreamQuality.Suggest(film, Bytes(fileKbps), chosen, received);
-        check(StreamQuality.NeededKbps(film, Bytes(6813), StreamQuality.OriginalId) == 6813 && StreamQuality.NeededKbps(film, Bytes(6813), "720p") == 2960 && StreamQuality.NeededKbps(film, Bytes(2761), "720p") == 2761,
+        StreamQuality? Suggest(int fileKbps, string chosen, int received, bool hevc = false) => StreamQuality.Suggest(film, Bytes(fileKbps), chosen, received, hevc);
+        long Needed(int fileKbps, string chosen, bool hevc = false) => StreamQuality.NeededKbps(film, Bytes(fileKbps), chosen, hevc);
+        check(Needed(6813, StreamQuality.OriginalId) == 6813 && Needed(6813, "720p") == 2960 && Needed(2761, "720p") == 2761,
             "a choice needs its quality's bitrate when the file is converted to it, and the file's own otherwise");
         check(Suggest(6813, StreamQuality.OriginalId, 20000) is null && Suggest(6813, StreamQuality.OriginalId, 8200) is null && Suggest(6813, StreamQuality.OriginalId, 8000)?.Id == "1080p",
             "nothing is suggested while the connection carries the video with room to spare");
@@ -275,6 +344,9 @@ static class StreamQualityFixture
         check(Suggest(6813, StreamQuality.OriginalId, 900)?.Id == "480p" && Suggest(6813, "480p", 900) is null, "a connection slower than every quality is offered the smallest, and nothing once that is chosen");
         check(Suggest(2761, StreamQuality.OriginalId, 2500)?.Id == "480p" && Suggest(2761, "720p", 2500)?.Id == "480p" && Suggest(1500, StreamQuality.OriginalId, 1000) is null,
             "only qualities that would make the file smaller are suggested");
+        check(Needed(6813, "720p", hevc: true) == StreamQuality.Find("720p")!.HevcKbps + StreamQuality.AudioKbps && Suggest(6813, StreamQuality.OriginalId, (int)((small.HevcKbps + StreamQuality.AudioKbps) * 1.25), hevc: true)?.Id == "480p" &&
+            Suggest(6813, StreamQuality.OriginalId, (int)((small.HevcKbps + StreamQuality.AudioKbps) * 1.25)) is { Id: "480p" } && !StreamQuality.Fits(small.VideoKbps + StreamQuality.AudioKbps, (int)((small.HevcKbps + StreamQuality.AudioKbps) * 1.25)),
+            "a connection too slow for the smallest H.264 quality is carried by the HEVC one");
 
         // The speed of a connection is measured only while many reads are under way.
         var time = 0L; var meter = new TransferMeter(() => time);
@@ -315,6 +387,15 @@ static class StreamQualityFixture
             return ((long)(b[0] >> 1 & 7) << 30 | (long)b[1] << 22 | (long)(b[2] >> 1) << 15 | (long)b[3] << 7 | (long)(b[4] >> 1)) / 90000.0;
         }
         return -1;
+    }
+
+    // The video codec ffmpeg reads in a piece.
+    private static async Task<string> Codec(string ffmpeg, byte[] piece, string work)
+    {
+        var file = Path.Combine(work, Guid.NewGuid().ToString("N") + ".ts"); await File.WriteAllBytesAsync(file, piece);
+        var (_, described) = await Ffmpeg.RunAsync(ffmpeg, ["-hide_banner", "-i", file], null, TimeSpan.FromMinutes(1), default);
+        File.Delete(file);
+        return System.Text.RegularExpressions.Regex.Match(described, @"Video: (\w+)").Groups[1].Value;
     }
 
     private static async Task<bool> Decodes(string ffmpeg, byte[] piece, string work)

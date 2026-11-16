@@ -173,7 +173,7 @@ static class StreamQualityChecks
             await Wait(() => offerCard.Visibility == Visibility.Visible, "a lower quality is offered when the viewer receives less than is sent", 30);
             check(slow.ElapsedMilliseconds >= 8500, $"the offer waits for the slow connection to last ({slow.ElapsedMilliseconds} ms)");
             Console.WriteLine("Offer: " + Text("QualityOfferText") + " [" + Text("QualityOfferSwitchText") + "]");
-            check(Text("QualityOfferText").Contains("Riley is receiving about 2 Mbps") && Text("QualityOfferText").Contains("480p (about 1.6 Mbps) would keep up") && Text("QualityOfferSwitchText") == "Switch to 480p",
+            check(Text("QualityOfferText").Contains("Riley is receiving about 2 Mbps") && Text("QualityOfferText").Contains($"480p (up to {StreamQuality.Find("480p")!.TotalMbps(Ffmpeg.HevcEncoder is not null):0.#} Mbps) would keep up") && Text("QualityOfferSwitchText") == "Switch to 480p",
                 "the offer names the viewer, the speeds and the best quality that fits");
             Call("ShowPlayerControls"); window.UpdateLayout(); await Task.Delay(400); window.UpdateLayout();
             var dock = Control<FrameworkElement>("PlaybackDock"); var offerText = Control<TextBlock>("QualityOfferText");

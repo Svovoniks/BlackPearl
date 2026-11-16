@@ -268,13 +268,27 @@ A lower quality converts the video on the streamer's PC while it plays, with the
 bundled `ffmpeg\ffmpeg.exe` (GPL build, a separate program; version and hash are
 pinned in `BlackPearl.Desktop.csproj` and it is cached under
 `.tools\models\ffmpeg-<version>`). The choice is saved in the `streamQuality`
-setting and applies to the next video. The converted stream is H.264 with the
+setting and applies to the next video. The converted stream carries the
 selected audio track as stereo AAC and the selected subtitles drawn into the
 picture; HDR is tone mapped. A video is offered the qualities of the 16:9 frame
 it is cut from, so a 1920x800 film is offered 1080p, and it is never enlarged. A
 file whose bitrate is already at or below the chosen quality's is streamed as its
-file, whatever its size, and the menu says so. The first encoder that works is used,
-in this order: NVIDIA, Intel Quick Sync, AMD, x264, Windows' own.
+file, whatever its size, and the menu says so. The picture is HEVC where the streamer's graphics hardware encodes it, and H.264
+otherwise. HEVC shows the same picture in about a third fewer bits, so with it
+1080p, 720p and 480p take at most 3.2, 1.9 and 1.0 Mbps of video instead of 5.0,
+2.8 and 1.4; the menu and `RoomStream.VideoKbps` say which. Only hardware HEVC
+encoders are used (NVIDIA, Intel Quick Sync, AMD, in that order):
+`Ffmpeg.HevcEncoderAsync` finds one once per run by encoding a second of video
+with each, and `BLACKPEARL_STREAM_CODEC=h264` leaves HEVC unused. One that passes
+that check and then converts nothing is replaced by the H.264 encoders, and
+streams after that are planned without it. H.264 comes from the first encoder
+that works: NVIDIA, Intel Quick Sync, AMD, x264, Windows' own. Every encoder
+stops at a picture quality where the video needs less than the bitrate, and at
+the bitrate where it would need more. Intel's does that only when given a target
+with a peak above it (its QVBR mode, with plain VBR as the fallback for hardware
+without it); given a quality and a peak alone it ignores the peak. The peak is
+one kbit above the target, because Intel's HEVC encoder stays at its peak for as
+long as the video is hard.
 The stream is offered in the room state (`RoomSnapshot.Stream`, sent with the
 `stream` command) as four-second pieces. Viewers read
 `stream/<id>/<piece>/size` and `stream/<id>/<piece>` over the media channel, keep
