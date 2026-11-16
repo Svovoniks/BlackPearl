@@ -187,6 +187,35 @@ static class HostLibraryBrowseChecks
             Check(Field<string>("currentPage") == "Library" && Field<bool>("librarySearch") && Control<FrameworkElement>("SearchHeader").Visibility == Visibility.Visible &&
                 Control<FrameworkElement>("LibraryCategoryBar").Visibility != Visibility.Visible,
                 "a host following a guest's search returns to Search when the guest leaves a result");
+            // A followed guest who opens Settings gives up the browsing slot. Following waits for them and picks up again when
+            // they come back, and ends when someone else takes the slot, the guest leaves, or the host stops it.
+            var withOther = snapshot with { People = [.. snapshot.People, new("other", "Other", false, true)] };
+            void Activity(RoomSnapshot shared, LibraryBrowseActivity? activity)
+            { typeof(RoomClient).GetProperty("Snapshot")!.SetValue(client, shared with { LibraryActivity = activity }); Call("RefreshSharedLibrary"); }
+            var activityText = Control<TextBlock>("HostLibraryActivityText");
+            Activity(withOther, null);
+            Check(follow.Visibility == Visibility.Visible && follow.Content.ToString() == "Stop following" && activityText.Text.StartsWith("Guest left your library"),
+                "following waits while the followed guest is out of the library");
+            PumpUntil(() => ReferenceEquals(grid.ItemsSource, ownCards), "the host's own library shows while the followed guest is away");
+            Activity(withOther, snapshot.LibraryActivity! with { View = null });
+            Check(follow.Visibility == Visibility.Visible && follow.Content.ToString() == "Stop following", "following still waits until the returning guest's view arrives");
+            Activity(withOther, snapshot.LibraryActivity! with { View = guestView });
+            Check(ReferenceEquals(grid.ItemsSource, mirror) && Field<string>("currentPage") == "Library" && !Field<bool>("librarySearch") &&
+                follow.Content.ToString() == "Stop following", "following picks up again when the guest comes back to the library");
+            Activity(withOther, null); Activity(withOther, new("other", "Other", "All titles", "", 0, guestView));
+            Check(follow.Content.ToString() == "Follow Other",
+                "following ends when someone else takes the browsing slot");
+            Activity(withOther, null);
+            Check(follow.Visibility == Visibility.Collapsed, "nobody is waited for after following ended");
+            Activity(withOther, snapshot.LibraryActivity! with { View = guestView }); Call("BrowseWithGuest", window, new RoutedEventArgs());
+            Activity(snapshot with { People = [snapshot.People[0]] }, null);
+            Activity(withOther, snapshot.LibraryActivity! with { View = guestView });
+            Check(follow.Content.ToString() == "Follow Guest", "following ends when the followed guest leaves the room");
+            Call("BrowseWithGuest", window, new RoutedEventArgs()); Activity(withOther, null);
+            Call("BrowseWithGuest", window, new RoutedEventArgs());
+            Check(follow.Visibility == Visibility.Collapsed && activityText.Text == "People in the room can browse your library", "Stop following ends a follow that is waiting");
+            Activity(withOther, snapshot.LibraryActivity! with { View = guestView });
+            Check(follow.Content.ToString() == "Follow Guest", "a stopped follow does not pick up again when the guest comes back");
         }
         finally
         {

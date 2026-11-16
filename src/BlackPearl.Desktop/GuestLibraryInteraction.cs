@@ -236,7 +236,7 @@ public partial class MainWindow
 
     // The host browses their own library; following a guest is opt-in.
     private bool followGuest, applyingGuestMirror;
-    private string? followedPeer;
+    private string? followedPeer, followedName;
     private LibraryBrowseView? mirroredView;
     private readonly LibraryCardCollection mirroredCards = [];
     private bool FollowingGuest => room?.Identity?.Host == true && room.Snapshot?.LibraryActivity?.View is not null && followGuest;
@@ -244,11 +244,19 @@ public partial class MainWindow
     private void RefreshGuestMirror(LibraryBrowseActivity? activity)
     {
         if (room?.Identity?.Host != true) return;
-        if (activity?.Peer != followedPeer) { followedPeer = activity?.Peer; followGuest = false; mirroredView = null; mirroredPointer = null; }
-        HostLibraryActivityText.Text = activity is null ? room.Snapshot?.LibraryBrowsing == true ? "People in the room can browse your library" : "People in the room can’t browse your library"
+        // A followed guest who steps out of the library, to Settings or the player, gives up the browsing slot. Following
+        // waits for them and picks up again when they browse again; it ends if someone else takes the slot, browsing is
+        // turned off, or they leave the room.
+        var away = followGuest && activity is null && followedPeer is not null && room.Snapshot is { LibraryBrowsing: true } shared &&
+            shared.People.Any(person => person.Id == followedPeer && person.Approved);
+        if (away) { mirroredView = null; mirroredPointer = null; }
+        else if (activity?.Peer != followedPeer) { followedPeer = activity?.Peer; followGuest = false; mirroredView = null; mirroredPointer = null; }
+        if (activity is not null) followedName = activity.Name;
+        HostLibraryActivityText.Text = away ? followedName + " left your library · Following continues when they come back"
+            : activity is null ? room.Snapshot?.LibraryBrowsing == true ? "People in the room can browse your library" : "People in the room can’t browse your library"
             : activity.Name + " · " + activity.Location + (activity.Query.Length == 0 ? "" : " · " + activity.Query);
         BrowseWithGuestButton.Content = followGuest ? "Stop following" : "Follow " + activity?.Name;
-        BrowseWithGuestButton.Visibility = activity?.View is not null ? Visibility.Visible : Visibility.Collapsed;
+        BrowseWithGuestButton.Visibility = activity?.View is not null || followGuest ? Visibility.Visible : Visibility.Collapsed;
         if (FollowingGuest) ApplyGuestMirror();
         // The host's own library replaces the mirror once it is filtered; an update already running will do it.
         else if (PosterGrid.ItemsSource == mirroredCards && !applyingGuestMirror && librarySearchCancellation is null) FilterLibrary(backgroundUpdate: true);
@@ -257,7 +265,8 @@ public partial class MainWindow
     // Stopping keeps the guest's location, and scrolling away keeps the host's place in it, in the host's own full library.
     private void DetachGuestMirror(bool keepPlace = false)
     {
-        if (applyingGuestMirror || !FollowingGuest) return;
+        // Also ends following that is waiting for the guest to come back to the library.
+        if (applyingGuestMirror || !followGuest) return;
         followGuest = false;
         libraryKeepPlace = keepPlace;
         RefreshGuestMirror(room?.Snapshot?.LibraryActivity);
@@ -271,7 +280,7 @@ public partial class MainWindow
     private void HostLibraryTouchInput(object sender, TouchEventArgs e) => DetachGuestMirror(keepPlace: true);
     private void BrowseWithGuest(object sender, RoutedEventArgs e)
     {
-        if (FollowingGuest) { DetachGuestMirror(keepPlace: true); return; }
+        if (followGuest) { DetachGuestMirror(keepPlace: true); return; }
         followGuest = true; ShowPage("Library"); mirroredView = null; ApplyGuestMirror();
     }
     private void ApplyGuestMirror()
