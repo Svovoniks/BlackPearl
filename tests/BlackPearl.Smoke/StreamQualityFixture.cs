@@ -168,6 +168,17 @@ static class StreamQualityFixture
         }
         finally { player.Stop(); }
 
+        // The pieces are the viewer's to keep: a stream that is closed and opened again, as after a reconnect to the
+        // room, starts with everything that was downloaded and asks for none of it again.
+        var held = viewerStore.Count; var fetched = reads;
+        using (var closed = new RemoteStream(stream, (_, _, _, _) => Task.FromException<byte[]>(new IOException("unused")), viewerStore)) closed.Dispose();
+        using (var reopened = new RemoteStream(stream, (_, _, _, _) => { Interlocked.Increment(ref reads); return Task.FromException<byte[]>(new IOException("Whoever converts the video is away")); }, viewerStore))
+        {
+            var again = await reopened.SegmentAsync(3, limit.Token);
+            check(viewerStore.Accepting && viewerStore.Count == held && again.AsSpan().SequenceEqual(third) && reopened.BufferedUntilMs == stream.DurationMs && reads == fetched,
+                $"a stream opened again starts with the pieces already downloaded ({held} of {stream.Segments}) and fetches none of them again");
+        }
+
         // The same video as HEVC: a piece still plays on its own and sits at its place in the film, and the player
         // plays and seeks it like the other.
         if (hevcEncoder is not null)

@@ -28,13 +28,29 @@ public partial class MainWindow
     // what was buffered.
     private StreamCache? streamCache;
     private static string StreamCacheDirectory => Path.Combine(Path.GetTempPath(), "BlackPearl", "stream-cache");
+    // The same for a converted stream: its pieces as they download, and the stream they belong to. A stream's pieces
+    // never change, so they are good for as long as the room offers that stream.
+    private (string StreamId, SegmentStore Store)? streamPieces;
     private StreamCache? StreamCacheFor(SharedMedia media)
     {
+        CloseStreamPieces();
         if (streamCache?.Matches(media) == true) return streamCache;
-        CloseStreamCache();
+        CloseFileCache();
         return streamCache = StreamCache.TryCreate(StreamCacheDirectory, media);
     }
-    private void CloseStreamCache() { streamCache?.Dispose(); streamCache = null; }
+    private SegmentStore? StreamPiecesFor(RoomStream stream)
+    {
+        CloseFileCache();
+        if (streamPieces is { } kept && kept.StreamId == stream.Id && kept.Store.Segments == stream.Segments) return kept.Store;
+        CloseStreamPieces();
+        var store = SegmentStore.TryCreate(StreamCacheDirectory, stream.Segments);
+        if (store is not null) streamPieces = (stream.Id, store);
+        return store;
+    }
+    private void CloseFileCache() { streamCache?.Dispose(); streamCache = null; }
+    // Closing the file deletes it, which takes long enough for gigabytes that it happens on another thread.
+    private void CloseStreamPieces() { if (streamPieces is { } kept) { streamPieces = null; _ = Task.Run(kept.Store.Dispose); } }
+    private void CloseStreamCache() { CloseFileCache(); CloseStreamPieces(); }
     // A reconnect keeps the buffered video for the room's video to continue from. When the room it returns to plays
     // something else or nothing, no video load or video end comes along to close it, so it is closed here, once whoever
     // is streaming has said what the room is playing. The room service's first list of members says nothing about that.
@@ -44,7 +60,9 @@ public partial class MainWindow
         catch (TimeoutException) { }
         // The connection failed again before anyone said what the room plays: the next reconnect decides.
         catch (Exception ex) when (ex is IOException or OperationCanceledException) { return; }
-        if (room == client && streamCache is { } kept && (client.Identity?.Host == true || client.Snapshot?.Media is not { } media || !kept.Matches(media))) CloseStreamCache();
+        if (room != client) return;
+        if (streamCache is { } kept && (client.Identity?.Host == true || client.Snapshot?.Media is not { } media || !kept.Matches(media))) CloseFileCache();
+        if (streamPieces is { } pieces && (client.Identity?.Host == true || client.Snapshot?.Stream?.Id != pieces.StreamId)) CloseStreamPieces();
     }
     // Begin read-ahead once the first frames are playing, so it never competes with startup for the streamer's
     // bandwidth. From then on the rest of the video downloads continuously, also while paused.

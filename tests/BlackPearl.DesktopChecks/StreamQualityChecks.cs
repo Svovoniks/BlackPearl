@@ -291,6 +291,22 @@ static class StreamQualityChecks
             Control<Popup>("QualityMenu").IsOpen = false;
             await Wait(() => Field("bridge") is MediaBridge { BufferedAheadBytes: > 0 } buffering && hostStore.Count >= offered.Segments - 1, "the rest of the converted film is read ahead while the start plays");
 
+            // Sam's connection to the room drops and comes back. The film continues from the pieces Sam already has:
+            // Riley serves none while Sam returns, so anything played and shown as buffered is what was kept.
+            var pieces = ((ValueTuple<string, SegmentStore>)Field("streamPieces")!).Item2;
+            var before = (Count: pieces.Count, Bytes: pieces.StoredBytes, Time: player.Time);
+            host.HostedStream = null;
+            await ((Task)Call("ReconnectRoomAsync", me)!).WaitAsync(TimeSpan.FromSeconds(60));
+            await Wait(() => Field("room") is RoomClient { IsConnected: true } returned && returned != me && Field("bridge") is MediaBridge { PlaysConvertedStream: true } && (bool)Field("ready")! && (string?)Field("loadedStream") == offered.Id,
+                "after a reconnect to the room the viewer opens the same converted stream", 45);
+            HostReady();
+            await Wait(() => player.IsPlaying && player.Time > before.Time + 1000 && SliderBuffer.GetFraction(timeline) == 1, "it plays on, and the timeline shows the whole film as buffered, with nobody serving it", 45);
+            var after = Field("streamPieces") is ValueTuple<string, SegmentStore> kept ? kept : default;
+            Console.WriteLine($"Reconnect: {before.Count} pieces ({before.Bytes / 1000} KB) before, {after.Item2?.Count} ({after.Item2?.StoredBytes / 1000} KB) after; position {before.Time} ms before, {player.Time} ms after");
+            check(ReferenceEquals(after.Item2, pieces) && after.Item1 == offered.Id && pieces.Accepting && pieces.Count == before.Count && pieces.StoredBytes == before.Bytes && before.Count >= offered.Segments - 1,
+                "the pieces downloaded before the reconnect are the ones played after it");
+            host.HostedStream = converter;
+
             // The room seeks, and the viewer follows on the converted stream.
             host.Send(new("playback", Data: Wire.Serialize(new PlaybackState(0, offered.MediaId, true, 40000, 0, Seek: true))));
             await Task.Delay(300); HostReady();
@@ -299,6 +315,7 @@ static class StreamQualityChecks
             // The streamer goes back to the file: the viewer reopens it and carries on from the room's position.
             host.HostedStream = null; host.Send(new("stream"));
             await Wait(() => Field("bridge") is MediaBridge { PlaysConvertedStream: false } && (bool)Field("ready")! && Field("loadedStream") is null, "when the stream is withdrawn the viewer opens the file");
+            check(Field("streamPieces") is null && !pieces.Accepting, "and the stream's pieces are let go");
             HostReady();
             await Wait(() => player.IsPlaying && player.Time is > 40000 and < 59000, "and playback continues from where the room is");
             Call("PlaybackTickCore");

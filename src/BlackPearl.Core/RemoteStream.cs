@@ -5,6 +5,7 @@ namespace BlackPearl.Core;
 
 // A viewer's side of a RoomStream. Pieces are fetched from whoever converts the video, kept in a
 // temporary file, and read ahead of playback to the end of the video, as the file itself would be.
+// The file is the caller's: it outlives this, so the same stream opened again starts with what was downloaded.
 public sealed class RemoteStream : IDisposable
 {
     public delegate Task<byte[]> Reader(string resource, long offset, int count, CancellationToken ct);
@@ -240,6 +241,5 @@ public sealed class RemoteStream : IDisposable
         _ = readAhead?.ContinueWith(t => _ = t.Exception, TaskScheduler.Default);
     }
 
-    // Closing the file deletes it, which takes long enough for gigabytes that it happens on another thread.
-    public void Dispose() { Stop(); if (store is not null) _ = Task.Run(store.Dispose); }
+    public void Dispose() => Stop();
 }

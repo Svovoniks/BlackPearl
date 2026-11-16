@@ -59,7 +59,7 @@ static class BufferRunFixture
             var received = new CountingSource(new RemoteMediaSource(guest, file.Media));
             using var cache = useFile && quality is null ? StreamCache.TryCreate(directory, file.Media) : null;
             await using var bridge = new MediaBridge();
-            StreamConverter? converter = null; SegmentStore? converted = null; RoomStream? stream = null; long streamBytes = 0;
+            StreamConverter? converter = null; SegmentStore? converted = null, viewerPieces = null; RoomStream? stream = null; long streamBytes = 0;
             Uri url;
             if (quality is null) url = await bridge.StartAsync(received, cache);
             else
@@ -76,7 +76,7 @@ static class BufferRunFixture
                 converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, converted, hevcEncoder);
                 converter.Failed += message => Console.WriteLine("CONVERSION FAILED: " + message);
                 host.ResolveMedia = id => id == file.Media.Id ? sent : converter.Resolve(id) is { } piece ? new LimitedSource(piece, limiter) : null;
-                var kept = SegmentStore.TryCreate(Path.Combine(directory, "viewer"), segments);
+                viewerPieces = SegmentStore.TryCreate(Path.Combine(directory, "viewer"), segments);
                 var remote = new RemoteStream(stream, async (resource, offset, count, ct) =>
                 {
                     while (true)
@@ -84,7 +84,7 @@ static class BufferRunFixture
                         try { var bytes = await guest.ReadAsync(resource, offset, count, ct); Interlocked.Add(ref streamBytes, bytes.Length); return bytes; }
                         catch (PeerBusyException) { await Task.Delay(100, ct); }
                     }
-                }, kept);
+                }, viewerPieces);
                 url = await bridge.StartAsync(remote);
                 Console.WriteLine($"source {probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")}, {probe.AudioTracks} audio, {probe.Subtitles.Length} subtitle tracks; converting to {chosen.Name}, {stream.Height} high, at up to {(plan.VideoKbps + StreamQuality.AudioKbps) / 1000.0:0.#} Mbps (file {plan.FileKbps / 1000.0:0.0} Mbps{(plan.Smaller ? "" : ", which the app would stream as it is")})" +
                     (subtitle is null ? "" : $"; subtitles {(subtitle.ImageTrack is null ? "text" : "picture")}, prepared in {prepare.Elapsed.TotalSeconds:F1} s"));
@@ -138,7 +138,7 @@ static class BufferRunFixture
                 $"buffered ahead at the end {bridge.BufferedAheadBytes / 1e6:F1} MB; position {TimeSpan.FromMilliseconds(Math.Max(0, player.Time)):mm\\:ss}; buffering events {stalls}; cache file {(cache?.StoredBytes ?? 0) / 1e6:F1} MB");
             if (converter is not null) Console.WriteLine($"CONVERTED {converter.ConvertedSegments * StreamConverter.SegmentMs / 1000 / 60.0:F1} min of video in {clock.Elapsed.TotalSeconds:F0} s with {converter.Encoder}, {converted!.StoredBytes / 1e6:F1} MB; failure: {converter.Failure ?? "none"}");
             player.Stop();
-            converter?.Dispose(); converted?.Dispose();
+            converter?.Dispose(); converted?.Dispose(); viewerPieces?.Dispose();
             timeout.Cancel(); await pump;
         }
         finally

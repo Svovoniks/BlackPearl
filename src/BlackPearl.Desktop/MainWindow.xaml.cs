@@ -1536,9 +1536,7 @@ public partial class MainWindow : Window
             Uri? streamUri = null;
             if (source is not ILocalMediaSource && converted is not null)
             {
-                CloseStreamCache();
-                var remote = new RemoteStream(converted, (resource, offset, count, token) => client.ReadStreamAsync(converted, resource, offset, count, token),
-                    SegmentStore.TryCreate(StreamCacheDirectory, converted.Segments));
+                var remote = new RemoteStream(converted, (resource, offset, count, token) => client.ReadStreamAsync(converted, resource, offset, count, token), StreamPiecesFor(converted));
                 bridge = new(); streamUri = await bridge.StartAsync(remote);
             }
             else if (source is not ILocalMediaSource)

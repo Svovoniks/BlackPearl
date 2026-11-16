@@ -298,7 +298,10 @@ somebody asks for, so a seek converts from there; it holds five minutes ahead of
 the furthest request. Changing the quality, audio track or subtitles makes a new
 stream, which viewers reopen at the room's position. Apps from before converted
 streams ignore the offer and are served the file. Viewers of a converted stream
-cannot change tracks, and a room reconnect downloads its pieces again.
+cannot change tracks. A viewer's pieces belong to the stream's id and outlive the
+player's connection to it, so a viewer who reconnects to the room continues with
+what it had downloaded. When the streamer reconnects, its conversion starts again
+as a new stream, and viewers download that one from the start.
 The menu shows what sending the file takes (its size over its length) beside
 Original. Each viewer's app measures **how fast the video reaches it**: the bytes
 that arrive over the time it has at least eight reads under way (`TransferMeter`),
