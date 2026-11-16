@@ -300,7 +300,14 @@ the pieces in `%TEMP%\BlackPearl\stream-cache\*.segments`, read ahead to the end
 as with a file, and play them from a local playlist. ffmpeg runs from the piece
 somebody asks for, so a seek converts from there; it holds five minutes ahead of
 the furthest request. Changing the quality, audio track or subtitles makes a new
-stream, which viewers reopen at the room's position. Apps from before converted
+stream, which viewers reopen at the room's position. As a video that will be
+converted starts, the streamer first offers a stream marked `Preparing`, within
+1.5 seconds of the video: viewers wait for the stream instead of opening the
+file and switching a moment later. If the stream is not ready 5 seconds after
+the video started, the announcement is withdrawn and they open the file. Music
+is neither announced nor converted, and has no Quality pill. A file the converter
+cannot read, or a converter that does not start, leaves the file streamed as it
+is, with the reason in the menu. Apps from before converted
 streams ignore the offer and are served the file. Viewers of a converted stream
 cannot change tracks. A viewer's pieces belong to the stream's id and wait two
 minutes for it like the file's buffer, so a viewer who reconnects to the room

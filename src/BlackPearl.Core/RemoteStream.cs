@@ -207,7 +207,8 @@ public sealed class RemoteStream : IDisposable
                         if (bytes.Length != count) throw new EndOfStreamException("Incomplete stream piece");
                         bytes.CopyTo(data, at);
                     }
-                    finally { window.Release(); }
+                    // A piece that failed is gone, and its window with it, while its other ranges finish.
+                    finally { try { window.Release(); } catch (ObjectDisposedException) { } }
                 }, token));
                 // One failed range ends the piece rather than fetching the rest of it.
                 if (ranges.FirstOrDefault(range => range.IsFaulted) is { } failed) await failed;

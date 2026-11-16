@@ -19,7 +19,7 @@ public sealed record StreamQuality(string Id, string Name, int Height, int Video
     public const int AudioKbps = 160;
     public static StreamQuality? Find(string? id) => Converted.FirstOrDefault(q => q.Id == id);
     // A video is never enlarged: a 720p video offers 720p and 480p. The height is the video's class (VideoProbe.ClassHeight).
-    public static StreamQuality[] For(int classHeight) => Converted.Where(q => q.Height <= Math.Max(classHeight, Converted[^1].Height) + 8).ToArray();
+    public static StreamQuality[] For(int classHeight) => Converted.Where(q => q.Height - 8 <= Math.Max(classHeight, Converted[^1].Height)).ToArray();
     // What the picture takes with the encoder this PC converts with: HEVC where its graphics hardware encodes it.
     public int Kbps(bool hevc) => hevc ? HevcKbps : VideoKbps;
     public double TotalMbps(bool hevc) => (Kbps(hevc) + AudioKbps) / 1000.0;
@@ -232,7 +232,7 @@ public static class Ffmpeg
                 PlaybackDiagnostics.Record("stream-encoder", new { encoder, works = exit == 0, error = exit == 0 ? null : Tail(errors) });
                 if (exit == 0) return encoder;
             }
-            catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or OperationCanceledException) { PlaybackDiagnostics.Record("stream-encoder", new { encoder, works = false, error = ex.Message }); }
+            catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or OperationCanceledException) { PlaybackDiagnostics.Record("stream-encoder", new { encoder, works = false, error = ex.GetType().Name }); }
         }
         return null;
     }

@@ -285,7 +285,7 @@ static class StreamQualityFixture
         check(Wire.Serialize(room.Snapshot with { Stream = stream }).Contains("\"stream\":") && Wire.Read<RoomSnapshot>(Wire.Serialize(room.Snapshot).Replace(",\"stream\":null", "")).Media?.Id == "next",
             "the stream is an addition older apps ignore");
         check(StreamQuality.For(1080).Select(q => q.Id).SequenceEqual(["1080p", "720p", "480p"]) && StreamQuality.For(720).Select(q => q.Id).SequenceEqual(["720p", "480p"]) &&
-            StreamQuality.For(360).Select(q => q.Id).SequenceEqual(["480p"]) && StreamQuality.For(2160).Length == 3, "a video is offered the qualities it is large enough for");
+            StreamQuality.For(360).Select(q => q.Id).SequenceEqual(["480p"]) && StreamQuality.For(2160).Length == 3 && StreamQuality.For(int.MaxValue).Length == 3, "a video is offered the qualities it is large enough for");
     }
 
     private static void Probing(Action<bool, string> check)

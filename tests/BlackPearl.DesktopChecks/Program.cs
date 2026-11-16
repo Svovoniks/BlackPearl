@@ -124,7 +124,8 @@ static class Program
         if (args.FirstOrDefault() == "--stream-quality")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            var qualityWindow = new MainWindow { Left = -20000, Top = 0, Width = 1280, Height = 820, WindowStartupLocation = WindowStartupLocation.Manual };
+            // --width makes the window as narrow as a small screen keeps it: the build runners' 1024-wide screen held it to about 1044.
+            var qualityWindow = new MainWindow { Left = -20000, Top = 0, Width = Array.IndexOf(args, "--width") is > 0 and var widthAt ? double.Parse(args[widthAt + 1], System.Globalization.CultureInfo.InvariantCulture) : 1280, Height = 820, WindowStartupLocation = WindowStartupLocation.Manual };
             qualityWindow.Loaded += async (_, _) =>
             {
                 var count = 0;

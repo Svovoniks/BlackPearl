@@ -2202,10 +2202,10 @@ public partial class MainWindow : Window
         ShowPlayerControls();
         PlayerOverlay.Focus();
     }
-    private bool PlayerMenuOpen => AudioMenu.IsOpen || SubtitleMenu.IsOpen || PlayerQueueMenu.IsOpen || ParticipantsMenu.IsOpen || OverflowMenu.IsOpen;
-    private void ClosePlayerMenus() => AudioMenu.IsOpen = SubtitleMenu.IsOpen = PlayerQueueMenu.IsOpen = ParticipantsMenu.IsOpen = OverflowMenu.IsOpen = false;
+    private bool PlayerMenuOpen => AudioMenu.IsOpen || SubtitleMenu.IsOpen || PlayerQueueMenu.IsOpen || ParticipantsMenu.IsOpen || QualityMenu.IsOpen || OverflowMenu.IsOpen;
+    private void ClosePlayerMenus() => AudioMenu.IsOpen = SubtitleMenu.IsOpen = PlayerQueueMenu.IsOpen = ParticipantsMenu.IsOpen = QualityMenu.IsOpen = OverflowMenu.IsOpen = false;
     // Skips the fade when the bar itself hides or the window changes size.
-    private void ClosePlayerMenusNow() { AudioMenu.CloseNow(); SubtitleMenu.CloseNow(); PlayerQueueMenu.CloseNow(); ParticipantsMenu.CloseNow(); OverflowMenu.CloseNow(); HideVolumeFlyout(); }
+    private void ClosePlayerMenusNow() { AudioMenu.CloseNow(); SubtitleMenu.CloseNow(); PlayerQueueMenu.CloseNow(); ParticipantsMenu.CloseNow(); QualityMenu.CloseNow(); OverflowMenu.CloseNow(); HideVolumeFlyout(); }
     private void PlayerMenuOpened(object sender, EventArgs e)
     {
         ShowPlayerControls();
@@ -2213,7 +2213,7 @@ public partial class MainWindow : Window
         var menu = (System.Windows.Controls.Primitives.Popup)sender;
         if (menu == OverflowMenu || menu == ParticipantsMenu)
         { Dispatcher.BeginInvoke(() => ((FrameworkElement)menu.Child).MoveFocus(new TraversalRequest(FocusNavigationDirection.First)), DispatcherPriority.Input); return; }
-        var list = menu == AudioMenu ? AudioTracks : menu == SubtitleMenu ? SubtitleTracks : QueueList;
+        var list = menu == AudioMenu ? AudioTracks : menu == SubtitleMenu ? SubtitleTracks : menu == QualityMenu ? QualityChoices : QueueList;
         // Rows are virtualized, so bring the selected one into view before focusing it.
         if (list.SelectedItem is { } chosen) list.ScrollIntoView(chosen);
         Dispatcher.BeginInvoke(() =>

@@ -24,7 +24,7 @@ public partial class MainWindow
     private ConvertedFrom? convertedFrom;
     private ConvertedFrom? convertedWanted;
     private long convertedWantedSince;
-    private bool streamPreparing, qualityUpdating;
+    private bool streamPreparing, qualityUpdating, encoderAsked;
     // The converted stream this viewer's player has open; null while it plays the file.
     private string? loadedStream;
     private (string Path, VideoProbe? Probe) probedVideo;
@@ -44,21 +44,25 @@ public partial class MainWindow
     // conversion in step with the chosen quality and tracks.
     private void RefreshStreamQuality()
     {
+        // Which encoder this PC has is asked on entering a room, so it is known by the time a video starts there.
+        if (!encoderAsked && room?.IsConnected == true) { encoderAsked = true; if (Ffmpeg.Find() is { } found) _ = Ffmpeg.HevcEncoderAsync(found); }
         var media = room?.IsConnected == true ? room.Snapshot?.Media : null;
         var streaming = media is not null && StreamsRoomVideo;
         var stream = media is not null && room!.Snapshot!.Stream is { } offered && offered.MediaId == media.Id ? offered : null;
-        // Whoever plays the video always has the choice. A viewer sees the pill while what arrives is not the file itself.
-        PillStrip.SetShown(QualityPill, streaming || stream is not null);
-        // The bar is as wide as its other pills need. Where the window has room it grows by this pill's width, so the
-        // pills that were there keep their place; where it has none, this pill is the first to fold.
+        var hostedPath = streaming ? (room!.HostedMedia as ILocalMediaSource)?.LocalPath : null;
+        // Music has no picture to convert, and so no quality to choose.
+        var music = streaming && (PlayingKnownMusic || audioPlayback);
         // This app's own connection to the room is being replaced. The conversion waits for the video to be started again.
         var returning = roomReconnect is not null || room is { IsConnected: false };
+        // Whoever plays a video always has the choice. A viewer sees the pill while what arrives is not the file itself.
+        PillStrip.SetShown(QualityPill, streaming && !music || stream is not null);
+        // The bar is as wide as its other pills need. Where the window has room it grows by this pill's width, so the
+        // pills that were there keep their place; where it has none, this pill is the first to fold.
         var dockWidth = PlaybackDockWidth + (PillStrip.GetShown(QualityPill) ? QualityPill.DesiredSize.Width > 0 ? Math.Ceiling(QualityPill.DesiredSize.Width) : 100 : 0);
         if (PlaybackDock.MaxWidth != dockWidth) PlaybackDock.MaxWidth = dockWidth;
         if (media is null) { if (!returning && (convertedFrom is not null || streamPreparation is not null)) StopConversion(); RefreshQualityOffer(null, null); return; }
         var notice = qualityNotice is { } said && said.MediaId == media.Id ? said : ((string, string Text, bool Failed)?)null;
 
-        var hostedPath = streaming ? (room!.HostedMedia as ILocalMediaSource)?.LocalPath : null;
         // The video's size decides which qualities are offered, so it is read as soon as the video is this app's to stream.
         if (hostedPath is not null && probedVideo.Path != hostedPath && probingVideo != hostedPath && Ffmpeg.Find() is { } converter) _ = Guard(() => ProbeHostedVideo(converter, hostedPath));
         var probe = probedVideo.Probe is { } read && probedVideo.Path == hostedPath ? read : null;
@@ -114,7 +118,10 @@ public partial class MainWindow
         if (streamedVideo.MediaId != media.Id) streamedVideo = (media.Id, now, false);
         // As a video starts, viewers are told a converted stream is coming, so they wait for it instead of starting on
         // the file and switching a moment later. If it takes more than a few seconds they start on the file after all.
-        if (!streamedVideo.Announced && now - streamedVideo.Since < 1500 && stream is null && streamConverter is null && notice is null && SavedStreamQuality != StreamQuality.OriginalId)
+        // Only a video that will be converted is announced: one that is read, has a picture, and is larger than the
+        // quality. The conversion still set from the video before this one is not this video's.
+        if (!streamedVideo.Announced && now - streamedVideo.Since < 1500 && stream is null && convertedFrom?.MediaId != media.Id && notice is null &&
+            StreamQuality.Find(SavedStreamQuality) is { } announced && probe is not null && StreamQuality.Plan(probe, media.Length, announced, hevc).Smaller)
         {
             streamedVideo.Announced = true;
             SendStream(room!, new RoomStream("preparing", media.Id, SavedStreamQuality, 0, 0, 0, 0, 0, Preparing: true));
@@ -122,7 +129,7 @@ public partial class MainWindow
         else if (stream is { Preparing: true } && now - streamedVideo.Since > 5000) SendStream(room!, null);
         // Which encoder this PC has is found while the video is read, and a conversion is planned for it.
         if (!ready || loadedMedia != media.Id || player is null || nativeStopCount > 0 || probingVideo == hostedPath) return;
-        var wanted = WantedConversion(media, notice is { Failed: true } ? StreamQuality.OriginalId : SavedStreamQuality, hevc);
+        var wanted = WantedConversion(media, notice is { Failed: true } || music ? StreamQuality.OriginalId : SavedStreamQuality, hevc);
         if (wanted == convertedFrom) { convertedWanted = wanted; return; }
         // Tracks settle over the first moments of a video; conversion starts once they have.
         if (wanted != convertedWanted) { convertedWanted = wanted; convertedWantedSince = now; }
@@ -216,8 +223,21 @@ public partial class MainWindow
     private async Task ProbeHostedVideo(string ffmpeg, string path)
     {
         probingVideo = path;
-        try { var probe = await VideoProbe.ReadAsync(ffmpeg, path, lifetime.Token); await Ffmpeg.HevcEncoderAsync(ffmpeg).WaitAsync(lifetime.Token); probedVideo = (path, probe); }
+        try
+        {
+            // The video's description is used as soon as it is read; conversion also waits for the encoder check, which
+            // takes a second or two the first time.
+            probedVideo = (path, await VideoProbe.ReadAsync(ffmpeg, path, lifetime.Token));
+            await Ffmpeg.HevcEncoderAsync(ffmpeg).WaitAsync(lifetime.Token);
+        }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        // The converter did not start, as when security software holds it, or took too long. The file is then one
+        // that cannot be converted: asked once, and streamed as it is.
+        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or OperationCanceledException)
+        {
+            if (probedVideo.Path != path) probedVideo = (path, null);
+            PlaybackDiagnostics.Record("stream-quality", new { state = "probe failed", error = ex.GetType().Name });
+        }
         finally { if (probingVideo == path) probingVideo = null; }
     }
 
@@ -241,9 +261,9 @@ public partial class MainWindow
             if (wanted is null || client.HostedMedia is not ILocalMediaSource local) { if (previous.streamConverter is not null || client.Snapshot?.Stream is not null) Offer(null, null); return; }
             streamPreparing = true;
             if (Ffmpeg.Find() is not { } ffmpeg) { Decline(media, "The converter is missing from this copy of BlackPearl, so the file is streamed as it is.", failed: true); return; }
-            if (probedVideo.Path != local.LocalPath || probedVideo.Probe is null) probedVideo = (local.LocalPath, await VideoProbe.ReadAsync(ffmpeg, local.LocalPath, token));
+            if (probedVideo.Path != local.LocalPath) await ProbeHostedVideo(ffmpeg, local.LocalPath);
             if (!Current()) return;
-            if (probedVideo.Probe is not { } probe) { Decline(media, "This video cannot be converted, so the file is streamed as it is.", failed: true); return; }
+            if (probedVideo.Path != local.LocalPath || probedVideo.Probe is not { } probe) { Decline(media, "This file cannot be converted, so it is streamed as it is.", failed: false); return; }
             // The stream is planned for the encoder it was wanted with: when that changes, another conversion replaces this one.
             var hevcEncoder = wanted.Hevc ? await Ffmpeg.HevcEncoderAsync(ffmpeg).WaitAsync(token) : null;
             if (!Current()) return;
@@ -276,6 +296,12 @@ public partial class MainWindow
             PlaybackDiagnostics.Record("stream-quality", new { quality = quality.Id, height = stream.Height, kbps = stream.VideoKbps, encoder = streamConverter.Encoder, segments, audio, subtitles = subtitle is null ? "none" : subtitle.ImageTrack is null ? "text" : "picture" });
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        // The converter stopped working after the video was read, while its subtitles were prepared.
+        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or OperationCanceledException)
+        {
+            PlaybackDiagnostics.Record("stream-quality", new { state = "preparation failed", error = ex.GetType().Name });
+            if (Current()) Decline(media, "The converter did not start, so the file is streamed as it is.", failed: true);
+        }
         finally
         {
             if (streamPreparation == cancellation) { streamPreparation = null; streamPreparing = false; }

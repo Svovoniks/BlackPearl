@@ -110,17 +110,44 @@ static class StreamQualityChecks
             Call("PlaybackTickCore"); window.UpdateLayout(); await Task.Delay(300); Call("PlaybackTickCore"); window.UpdateLayout();
             var strip = Control<PillStrip>("PlayerPills");
             Console.WriteLine("Pills: " + string.Join(", ", new[] { "AudioPill", "SubtitlePill", "QueuePill", "ParticipantsPill", "QualityPill", "OverflowPill" }.Select(name => $"{name} {Control<ToggleButton>(name).DesiredSize.Width:F0}{(strip.Folded.Contains(Control<ToggleButton>(name)) ? " folded" : "")}")) + $"; strip {strip.ActualWidth:F0} of {((FrameworkElement)strip.Parent).ActualWidth:F0}");
-            check(strip.Folded.Count == 0, "the bar grows by the quality pill's width, so no other pill is pushed out of it");
+            // A screen too narrow for the wider bar, such as a build runner's, folds the quality pill into the … menu.
+            var qualityFolded = strip.Folded.Contains(Control<ToggleButton>("QualityPill"));
+            check(strip.Folded.All(pill => pill == Control<ToggleButton>("QualityPill")) && (!qualityFolded || window.ActualWidth < 1200),
+                $"the bar grows by the quality pill's width, so no other pill is pushed out of it{(qualityFolded ? "; this window is too narrow for it, and the quality pill is the one that folds" : "")}");
             check(Choices().SequenceEqual(["Original", "1080p", "720p", "480p"]) && Control<ListBox>("QualityChoices").IsEnabled, "whoever plays the video chooses among the qualities it is large enough for");
             await Shot("1-streamer-pill");
             // The pill opens its menu like the others: above the pill, and gone when another pill's menu opens.
             var qualityPill = Control<ToggleButton>("QualityPill"); var qualityMenu = Control<Popup>("QualityMenu");
-            qualityPill.IsChecked = true;
+            // A folded pill's menu opens from the … pill, as its row in the … menu does.
+            var anchor = qualityFolded ? Control<ToggleButton>("OverflowPill") : qualityPill;
+            void OpenQualityMenu() { if (qualityFolded) qualityMenu.IsOpen = true; else qualityPill.IsChecked = true; }
+            OpenQualityMenu();
             await Wait(() => qualityMenu.IsOpen && qualityMenu.Child is FrameworkElement { ActualHeight: > 100 }, "the quality pill opens its menu", 5);
             await Shot("2-streamer-menu");
             var card = (FrameworkElement)qualityMenu.Child;
-            var above = card.PointToScreen(new Point(0, card.ActualHeight)).Y <= qualityPill.PointToScreen(new Point(0, qualityPill.ActualHeight)).Y + 1;
-            check(above && card.ActualHeight < 400 && card.ActualWidth < 500 && qualityMenu.PlacementTarget == qualityPill, $"the menu is a compact card above its pill ({card.ActualWidth:F0} by {card.ActualHeight:F0})");
+            var above = card.PointToScreen(new Point(0, card.ActualHeight)).Y <= anchor.PointToScreen(new Point(0, anchor.ActualHeight)).Y + 1;
+            check(above && card.ActualHeight < 400 && card.ActualWidth < 500 && qualityMenu.PlacementTarget == anchor, $"the menu is a compact card above its pill ({card.ActualWidth:F0} by {card.ActualHeight:F0})");
+            // It is one of the player's menus: the bar stays while it is open, and a click on a quality, Escape, or
+            // the bar going away closes it. The window is off the screen, so the click and the key are raised.
+            bool MenuOpen() => (bool)typeof(MainWindow).GetProperty("PlayerMenuOpen", flags)!.GetValue(window)!;
+            typeof(MainWindow).GetField("lastPlayerInteraction", flags)!.SetValue(window, Environment.TickCount64 - 10000);
+            Call("PlaybackTickCore");
+            check(MenuOpen() && qualityMenu.IsOpen && Control<FrameworkElement>("PlaybackControls").Visibility == Visibility.Visible, "the player's bar stays while the quality menu is open");
+            var qualities = Control<ListBox>("QualityChoices");
+            ListBoxItem Row() { qualities.UpdateLayout(); return (ListBoxItem)qualities.ItemContainerGenerator.ContainerFromIndex(Math.Max(0, qualities.SelectedIndex)); }
+            await Wait(() => Row() is { IsKeyboardFocusWithin: true } || qualities.IsKeyboardFocusWithin, "opening the menu moves the keyboard into its list", 5);
+            Row().RaiseEvent(new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, Environment.TickCount, System.Windows.Input.MouseButton.Left) { RoutedEvent = System.Windows.Input.Mouse.PreviewMouseUpEvent });
+            await Wait(() => !qualityMenu.IsOpen && !MenuOpen(), "a click on a quality closes the menu", 5);
+            OpenQualityMenu();
+            await Wait(() => qualityMenu.IsOpen && qualityMenu.Child is FrameworkElement { ActualHeight: > 100 }, "the menu opens again", 5);
+            Row().RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice, PresentationSource.FromVisual(Row())!, Environment.TickCount, System.Windows.Input.Key.Escape) { RoutedEvent = System.Windows.Input.Keyboard.PreviewKeyDownEvent });
+            await Wait(() => !qualityMenu.IsOpen, "Escape closes the menu", 5);
+            OpenQualityMenu();
+            await Wait(() => qualityMenu.IsOpen, "the menu opens once more", 5);
+            Call("ClosePlayerMenusNow");
+            check(!qualityMenu.IsOpen, "the menu goes at once when the bar does");
+            OpenQualityMenu();
+            await Wait(() => qualityMenu.IsOpen, "the menu opens for the next check", 5);
             Control<ToggleButton>("AudioPill").IsChecked = true;
             await Wait(() => Control<Popup>("AudioMenu").IsOpen && !qualityMenu.IsOpen && qualityPill.IsChecked == false, "opening another pill's menu closes the quality menu", 5);
             Call("ClosePlayerMenus");
@@ -234,6 +261,55 @@ static class StreamQualityChecks
             Control<Popup>("QualityMenu").IsOpen = true;
             await Shot("3-streamer-menu-small-video");
             Control<Popup>("QualityMenu").IsOpen = false;
+
+            // The next video that will be converted is announced like the first one, although the conversion of the
+            // video before it is still there when it starts.
+            await own.StartStreamAsync(RoomClient.PrepareHostedFile(film, "Quality film"), true);
+            await Wait(() => own.Snapshot?.Stream is { Quality: "480p", Preparing: false } && Field("streamConverter") is not null, "the film converts again");
+            var next = RoomClient.PrepareHostedFile(film, "Next film"); var nextId = next.Media.Media.Id;
+            await own.StartStreamAsync(next, true);
+            var coming = false; var told = new List<string>();
+            for (var until = Environment.TickCount64 + 20000; Environment.TickCount64 < until; await Task.Delay(15))
+            {
+                if (own.Snapshot is not { Media: { } playing } state || playing.Id != nextId) continue;
+                var now = state.Stream is null ? "file" : state.Stream.Preparing ? "coming" : "stream";
+                if (told.LastOrDefault() != now) told.Add(now);
+                if (now == "coming") coming = true;
+                if (now == "stream") break;
+            }
+            Console.WriteLine("Next video: " + string.Join(", ", told));
+            check(coming && told.LastOrDefault() == "stream", "the next video's stream is announced before it is ready, so viewers wait for it");
+
+            // Music has no picture. Nothing is announced or converted, nobody is told a conversion failed, and there
+            // is no quality to choose.
+            var song = Path.Combine(directory, "quality-song.mp3");
+            using (var made = Process.Start(new ProcessStartInfo(ffmpeg!, $"-hide_banner -nostdin -y -loglevel error -f lavfi -i sine=frequency=440:sample_rate=44100 -t 30 \"{song}\"") { UseShellExecute = false, CreateNoWindow = true })!) await made.WaitForExitAsync();
+            Control<TextBlock>("StatusText").Text = "";
+            var music = RoomClient.PrepareHostedFile(song, "Quality song"); var musicId = music.Media.Media.Id;
+            await own.StartStreamAsync(music, true);
+            var songOffered = false;
+            for (var until = Environment.TickCount64 + 5000; Environment.TickCount64 < until; await Task.Delay(15)) songOffered |= own.Snapshot is { Stream: not null, Media: { } playing } && playing.Id == musicId;
+            Call("PlaybackTickCore");
+            Console.WriteLine($"Music: status \"{Text("StatusText")}\", pill {(PillStrip.GetShown(qualityPill) ? "shown" : "hidden")}");
+            check(File.Exists(song) && own.Snapshot?.Media?.Id == musicId && !songOffered && own.Snapshot.Stream is null && !Text("StatusText").Contains("convert", StringComparison.OrdinalIgnoreCase) && !PillStrip.GetShown(qualityPill),
+                "music is streamed as its file: no stream is announced, no failure is reported, and there is no quality pill");
+
+            // A converter that cannot start, as when security software holds it. The video is asked about once, not
+            // with every tick, and the menu says the file is streamed as it is.
+            var unread = Path.Combine(directory, "quality-unread.mkv"); File.Copy(small, unread, true);
+            var notProgram = Path.Combine(directory, "not-a-program.exe"); await File.WriteAllTextAsync(notProgram, "This is not a program.");
+            var converterBefore = Environment.GetEnvironmentVariable("BLACKPEARL_FFMPEG");
+            Environment.SetEnvironmentVariable("BLACKPEARL_FFMPEG", notProgram);
+            try
+            {
+                await own.StartStreamAsync(RoomClient.PrepareHostedFile(unread, "Unread film"), true);
+                await Wait(() => Text("QualityHint").Contains("cannot be converted"), "with a converter that does not start, the menu says the file is streamed as it is", 20);
+                await Task.Delay(1000); Call("PlaybackTickCore");
+                var read = ((string Path, VideoProbe? Probe))Field("probedVideo")!;
+                check(read.Path == unread && read.Probe is null && Field("probingVideo") is null && own.Snapshot?.Stream is null && PillStrip.GetShown(qualityPill),
+                    "the failed read is remembered, so the converter is not started again with every tick");
+            }
+            finally { Environment.SetEnvironmentVariable("BLACKPEARL_FFMPEG", converterBefore); }
             await (Task)Call("Disconnect", false, false)!;
             check(Field("streamConverter") is null && !PillStrip.GetShown(Control<ToggleButton>("QualityPill")), "leaving the room stops converting and puts the pill away");
             foreach (var client in others) await client.DisposeAsync();
