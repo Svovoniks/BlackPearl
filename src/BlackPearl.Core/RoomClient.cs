@@ -89,6 +89,27 @@ public sealed partial class RoomClient : IAsyncDisposable
     // Why the room service ended this connection for good: removed from the room, or entered from another window.
     public string? ClosedReason { get; private set; }
     public IMediaSource? HostedMedia { get; set; }
+    // The converted copy of the hosted video that viewers are offered instead of the file, if any.
+    public StreamConverter? HostedStream { get; set; }
+    // What this app accepts from viewers while it plays the room's video, told to them with the room's state.
+    private const int ReceiveRateFeature = 1, HostFeatures = ReceiveRateFeature;
+    private int hostFeatures;
+    private readonly ConcurrentDictionary<string, (int Kbps, long At)> receiveRates = new();
+    // How fast the room's video reaches this viewer, measured while the app was asking for more than arrived.
+    public (int Kbps, long AgeMs)? ReceiveRate => Identity?.Host == false && hostPeer is { } playing && peers.TryGetValue(playing, out var source) ? source.Received.Rate : null;
+    // For whoever plays the video: the slowest viewer's connection among those measured within maximumAgeMs, by the
+    // viewers' own reports, and whether anyone else was measured too.
+    public (string Name, int Kbps, bool Others)? SlowestReceiveRate(long maximumAgeMs)
+    {
+        if (Identity?.Host != true || Snapshot is not { } snapshot) return null;
+        var now = Environment.TickCount64;
+        var measured = receiveRates.Where(rate => now - rate.Value.At <= maximumAgeMs && snapshot.People.Any(person => person.Id == rate.Key && person.Approved)).OrderBy(rate => rate.Value.Kbps).ToArray();
+        return measured.Length == 0 ? null : (snapshot.People.First(person => person.Id == measured[0].Key).Name, measured[0].Value.Kbps, measured.Length > 1);
+    }
+    // Reports a speed as if it had been measured; the checks use it in place of a slow connection.
+    internal void ReportReceiveRate(int kbps) => Post(new("receive-rate", Message: new("receive-rate", Number: kbps)));
+    // The file behind a subtitle shared with the room, for drawing it into a converted stream.
+    public string? HostedAssetPath(string id) => (assets.GetValueOrDefault(id) as ILocalMediaSource)?.LocalPath;
     public void ShareSubtitle(string path)
     {
         if (!IsConnected || Identity?.Host != true || Snapshot?.Media is not { } media) throw new IOException("Only whoever is streaming can load room subtitles.");
@@ -114,11 +135,12 @@ public sealed partial class RoomClient : IAsyncDisposable
     {
         ApplyHostedFile(PrepareHostedFile(path, title));
     }
-    public static HostedFileSelection PrepareHostedFile(string path, string title)
+    // id: the id the video had, when the same video is started again after a reconnect.
+    public static HostedFileSelection PrepareHostedFile(string path, string title, string? id = null)
     {
         using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read)) { }
         var preparedAssets = new Dictionary<string, IMediaSource>();
-        var file = new FileMediaSource(path, title);
+        var file = new FileMediaSource(path, title, id);
         if (file.Media.Length <= 0) throw new InvalidDataException("Video file is empty");
         var stem = Path.GetFileNameWithoutExtension(path);
         foreach (var sidecar in Directory.EnumerateFiles(Path.GetDirectoryName(Path.GetFullPath(path))!))
@@ -261,7 +283,7 @@ public sealed partial class RoomClient : IAsyncDisposable
             QueueDiscovery(message.Type == "room-name" ? new("rename", Text: message.Text) : message);
             return;
         }
-        if (message.Type is "tracks" or "catalog-follow" or "catalog-pointer" or "catalog-artwork" or "catalog-watch" or "catalog-view" or "catalog-browse" or "catalog-release" or "catalog-renew" or "catalog-permission" or "media" or "controls" or "last-session" or "session-artwork" or "artwork-ack" or "queue" or "playback" or "ready" or "buffering")
+        if (message.Type is "tracks" or "catalog-follow" or "catalog-pointer" or "catalog-artwork" or "catalog-watch" or "catalog-view" or "catalog-browse" or "catalog-release" or "catalog-renew" or "catalog-permission" or "media" or "stream" or "controls" or "last-session" or "session-artwork" or "artwork-ack" or "queue" or "playback" or "ready" or "buffering")
         {
             if (Identity?.Host != true && !directConnected.Task.IsCompletedSuccessfully)
                 throw new IOException("Still connecting to whoever is streaming. Try again in a moment.");
@@ -304,6 +326,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                 Post(new("links"));
                 Post(new("peer-health"));
                 Post(new("clock", Message: new("clock-ping", Number: Interlocked.Increment(ref pingId))));
+                Post(new("receive-rate"));
                 await Task.Delay(2000, lifetime.Token);
             }
         }
@@ -449,6 +472,13 @@ public sealed partial class RoomClient : IAsyncDisposable
                                 DepartPeer(item.Peer!, "Direct connection did not open");
                             }
                             break;
+                        case "receive-rate":
+                            // A viewer tells whoever plays the video how fast it arrives, as measured while this app was
+                            // asking for more. Apps from before this would answer the unknown command with an error.
+                            if (Identity?.Host == false && (hostFeatures & ReceiveRateFeature) != 0 && hostPeer is { } playing && negotiated.ContainsKey(playing) &&
+                                (item.Message?.Number ?? (peers.TryGetValue(playing, out var source) && source.Received.Rate is { AgeMs: < 3000 } measured ? measured.Kbps : 0)) is > 0 and var kbps)
+                                SendPeer(playing, new("receive-rate", Number: kbps));
+                            break;
                         case "clock":
                             // The streamer's replies set the room clock; everyone's show that their connection is alive.
                             foreach (var id in negotiated.Keys.ToArray())
@@ -516,7 +546,7 @@ public sealed partial class RoomClient : IAsyncDisposable
     private void ChangeHost(string? streamer, long newEpoch)
     {
         var identity = Identity!;
-        epoch = newEpoch; hostPeer = streamer;
+        epoch = newEpoch; hostPeer = streamer; hostFeatures = 0;
         var mine = streamer == identity.Peer;
         PlaybackDiagnostics.Record("room-streamer", new { room = diagnosticId, mine, epoch = newEpoch });
         if (mine && !identity.Host) Promote();
@@ -568,7 +598,7 @@ public sealed partial class RoomClient : IAsyncDisposable
     // Someone else took the streaming role: this member's video ends, and it follows theirs.
     private void Demote()
     {
-        coordinator = null; HostedMedia = null; assets.Clear(); artworkTransfers.Clear();
+        coordinator = null; HostedMedia = null; assets.Clear(); artworkTransfers.Clear(); receiveRates.Clear();
         Identity = Identity! with { Host = false };
         publishedSnapshot = publishedRecipients = null;
         ResetHostLink();
@@ -679,6 +709,8 @@ public sealed partial class RoomClient : IAsyncDisposable
         if (Identity?.Host == true)
         {
             if (message.Type == "state-request") { SendHostState(sender); return; }
+            // How fast the video reaches this viewer, by their own measure. It changes nothing in the room.
+            if (message.Type == "receive-rate") { if (message.Number is > 0 and <= 10_000_000) receiveRates[sender] = ((int)message.Number, Environment.TickCount64); return; }
             // Acknowledgements pace a transfer the host started; they bypass the command budget, and each releases at most one chunk.
             if (message.Type == "artwork-ack") { if (coordinator!.Approved(sender)) ContinueArtwork(sender, message.Number); return; }
             if (message.Type == "catalog-pointer") { ReceivePointer(sender, message); return; }
@@ -696,7 +728,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                     if (state.HostNowMs <= 0 || !state.Snapshot.People.Any(p => p.Id == sender && p.IsHost && p.Approved)) throw new InvalidDataException("Invalid host room state");
                     // Recovery to the same host keeps its RTT-compensated samples instead of an uncompensated reset.
                     if (clockHost != sender) { clock.Initialize(state.HostNowMs); clockHost = sender; }
-                    receivedSequence = state.Sequence; ApplySnapshot(state.Snapshot);
+                    receivedSequence = state.Sequence; hostFeatures = state.Features; ApplySnapshot(state.Snapshot);
                     directConnected.TrySetResult();
                     ReconcileVoice();
                     if (Interlocked.Exchange(ref peerRecovering, 0) != 0)
@@ -713,7 +745,7 @@ public sealed partial class RoomClient : IAsyncDisposable
     private void SendHostState(string id)
     {
         var snapshot = coordinator!.Snapshot;
-        SendPeer(id, new("host-state", Data: Wire.Serialize(new HostRoomState(++stateSequence, clock.Now, PublicSnapshot(snapshot), epoch))));
+        SendPeer(id, new("host-state", Data: Wire.Serialize(new HostRoomState(++stateSequence, clock.Now, PublicSnapshot(snapshot), epoch, HostFeatures))));
     }
     private static RoomSnapshot PublicSnapshot(RoomSnapshot snapshot) =>
         snapshot with { People = snapshot.People.Where(p => p.Approved).Select(p => p with { GuestId = null }).ToArray(), AdmittedGuests = null };
@@ -821,7 +853,7 @@ public sealed partial class RoomClient : IAsyncDisposable
         if (json == publishedSnapshot && recipients == publishedRecipients) return;
         publishedSnapshot = json; publishedRecipients = recipients;
         ApplySnapshot(snapshot, json);
-        Broadcast(new("host-state", Data: Wire.Serialize(new HostRoomState(++stateSequence, clock.Now, PublicSnapshot(snapshot), epoch))));
+        Broadcast(new("host-state", Data: Wire.Serialize(new HostRoomState(++stateSequence, clock.Now, PublicSnapshot(snapshot), epoch, HostFeatures))));
     }
     private void Broadcast(WireMessage message)
     {
@@ -849,7 +881,7 @@ public sealed partial class RoomClient : IAsyncDisposable
     // connection failed, they are still in the room, and ReconcileLinks makes a new one.
     private void DepartPeer(string id, string? reason = null, bool left = false)
     {
-        artworkTransfers.Remove(id); voiceBudgets.TryRemove(id, out _);
+        artworkTransfers.Remove(id); voiceBudgets.TryRemove(id, out _); receiveRates.TryRemove(id, out _);
         var name = roster.FirstOrDefault(p => p.Id == id)?.Name ?? Snapshot?.People.FirstOrDefault(p => p.Id == id)?.Name;
         var wasNegotiated = negotiated.TryRemove(id, out _);
         if (peers.TryRemove(id, out var peer) || wasNegotiated || left && name is not null)
@@ -909,7 +941,8 @@ public sealed partial class RoomClient : IAsyncDisposable
         PlaybackDiagnostics.Record("peer-created", new { room = diagnosticId, transport = peer.DiagnosticId, offer });
         // Only whoever is streaming serves its video, and only to people in the room.
         peer.ResolveMedia = media => Identity?.Host == true && negotiated.ContainsKey(id) && roster.Any(p => p.Id == id)
-            ? HostedMedia?.Media.Id == media ? HostedMedia : assets.GetValueOrDefault(media) : null;
+            ? media.StartsWith("stream/", StringComparison.Ordinal) ? HostedStream?.Resolve(media)
+            : HostedMedia?.Media.Id == media ? HostedMedia : assets.GetValueOrDefault(media) : null;
         peer.Signal += (type, data) => TryQueueDiscovery(new("signal", Target: id, Text: type, Data: data, Number: generation));
         // With a connection to everyone, only the streamer's says how the video arrives.
         peer.Status += text => { if (Identity?.Host == true || id == hostPeer) Status?.Invoke(text); };
@@ -996,6 +1029,39 @@ public sealed partial class RoomClient : IAsyncDisposable
         }
         catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && !lifetime.IsCancellationRequested)
         { throw new IOException("The connection to whoever is playing the video did not recover within 45 seconds.", ex); }
+    }
+    // Reads part of the room's converted stream from whoever converts it. A piece that is not converted yet is asked
+    // for again until it is, or until the caller gives up.
+    public async Task<byte[]> ReadStreamAsync(RoomStream stream, string resource, long offset, int count, CancellationToken ct)
+    {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.Token);
+        PeerTransport? failed = null;
+        var interruptedAt = 0L;
+        while (true)
+        {
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (Snapshot?.Stream?.Id != stream.Id) throw new IOException("This stream is no longer playing in the room.");
+            var hostId = hostPeer;
+            if (hostId is null || !directConnected.Task.IsCompletedSuccessfully || !peers.TryGetValue(hostId, out var peer) || peer == failed || !negotiated.ContainsKey(hostId))
+            {
+                if (interruptedAt == 0) interruptedAt = Environment.TickCount64;
+                if (Environment.TickCount64 - interruptedAt > 45000) throw new IOException("The connection to whoever is playing the video did not recover within 45 seconds.");
+                await Task.Delay(50, cancellation.Token); continue;
+            }
+            interruptedAt = 0;
+            try
+            {
+                await peer.Ready.WaitAsync(cancellation.Token);
+                return await peer.ReadAsync(resource, offset, count, cancellation.Token);
+            }
+            catch (PeerBusyException) when (!cancellation.IsCancellationRequested) { await Task.Delay(100, cancellation.Token); }
+            catch (Exception ex) when (!cancellation.IsCancellationRequested && (peer.IsInterrupted || ex is TimeoutException))
+            {
+                PlaybackDiagnostics.Record("media-range-retry", new { room = diagnosticId, transport = peer.DiagnosticId, error = ex.GetType().Name });
+                failed = peer;
+                Post(new("closed", hostId, Transport: peer));
+            }
+        }
     }
     private static string DiagnosticReason(string reason)
     {

@@ -41,6 +41,7 @@ public partial class MainWindow
         PlayerBottomChrome.SizeChanged += (_, _) => PlaceUpNextCard();
         PlayerOverlay.SizeChanged += (_, _) => RefreshPlayerCorners();
         InitializeSubtitleLift();
+        InitializeStreamQuality();
         PlayerPills.Overflow = OverflowPill;
         PlayerPills.FoldedChanged += (_, _) => RefreshOverflowMenu();
         // The player's controls and menus sit in LibVLC's overlay window, outside the player page that maps the app palette, and
@@ -50,7 +51,7 @@ public partial class MainWindow
         PlayerUpdateHost.Resources.MergedDictionaries.Add(Application.Current.Resources);
         VolumeFlyout.PlacementTarget = MuteButton;
         MuteButton.GotKeyboardFocus += (_, _) => { if (InputManager.Current.MostRecentInputDevice is KeyboardDevice) ShowVolumeFlyout(); };
-        foreach (var (pill, menu) in new[] { (AudioPill, AudioMenu), (SubtitlePill, SubtitleMenu), (QueuePill, PlayerQueueMenu), (ParticipantsPill, ParticipantsMenu), (OverflowPill, OverflowMenu) })
+        foreach (var (pill, menu) in new[] { (AudioPill, AudioMenu), (SubtitlePill, SubtitleMenu), (QueuePill, PlayerQueueMenu), (ParticipantsPill, ParticipantsMenu), (QualityPill, QualityMenu), (OverflowPill, OverflowMenu) })
         {
             menu.PlacementTarget = pill;
             // A folded pill's menu opens from the overflow pill, so a click there only closes it.
@@ -86,7 +87,7 @@ public partial class MainWindow
     private void OpenPillUnderPointer(System.Windows.Controls.Primitives.ToggleButton closing)
     {
         if (Mouse.LeftButton != MouseButtonState.Pressed) return;
-        var pill = new[] { AudioPill, SubtitlePill, QueuePill, ParticipantsPill, OverflowPill }.FirstOrDefault(candidate =>
+        var pill = new[] { AudioPill, SubtitlePill, QueuePill, ParticipantsPill, QualityPill, OverflowPill }.FirstOrDefault(candidate =>
             candidate != closing && candidate.IsVisible && candidate.IsEnabled && new Rect(candidate.RenderSize).Contains(Mouse.GetPosition(candidate)));
         if (pill is null) return;
         pillReleaseWatch?.Stop();
@@ -241,6 +242,9 @@ public partial class MainWindow
         var padding = PlaybackControls.Padding;
         var margin = new Thickness(0, 0, 0, PlaybackControls.IsVisible ? 10 - padding.Top : padding.Bottom);
         if (UpNextCard.Margin != margin) UpNextCard.Margin = margin;
+        // The quality offer has that place while there is no up-next card, and sits above the card when there is one.
+        var offer = UpNextCard.Visibility == Visibility.Visible ? new Thickness(0, 0, 0, 8) : margin;
+        if (QualityOffer.Margin != offer) QualityOffer.Margin = offer;
     }
 
     // Windows rounds the window but not LibVLC's overlay window above the video, so the overlay rounds itself to match,
@@ -309,14 +313,14 @@ public partial class MainWindow
     {
         var width = e.NewSize.Width;
         FitPlayerEmptyContent();
-        UpNextCard.Width = Math.Clamp(width - 16, 240, 340);
+        UpNextCard.Width = QualityOffer.Width = Math.Clamp(width - 16, 240, 340);
         // Resizing fires this continuously; only re-lay out the bar when it crosses a density step.
         var density = width >= 900 ? 6 : width >= 640 ? 5 : width >= 580 ? 4 : width >= 540 ? 3 : width >= 520 ? 2 : width >= 440 ? 1 : 0;
         if (density == controlsDensity) return;
         controlsDensity = density;
-        foreach (var detail in new[] { AudioPillDetail, SubtitlePillDetail, QueuePillDetail, ParticipantsPillDetail })
+        foreach (var detail in new[] { AudioPillDetail, SubtitlePillDetail, QualityPillDetail, QueuePillDetail, ParticipantsPillDetail })
         { detail.MaxWidth = width >= 900 ? 96 : 0; detail.Margin = new Thickness(width >= 900 ? 6 : 0, 0, 0, 0); }
-        foreach (var text in new[] { AudioPillText, SubtitlePillText, QueuePillText, ParticipantsPillText }) text.MaxWidth = width >= 640 ? 130 : 72;
+        foreach (var text in new[] { AudioPillText, SubtitlePillText, QualityPillText, QueuePillText, ParticipantsPillText }) text.MaxWidth = width >= 640 ? 130 : 72;
         LoopButton.Visibility = width >= 580 ? Visibility.Visible : Visibility.Collapsed;
         StopButton.Visibility = width >= 540 ? Visibility.Visible : Visibility.Collapsed;
         PictureInPictureButton.Visibility = width >= 520 ? Visibility.Visible : Visibility.Collapsed;
@@ -326,7 +330,8 @@ public partial class MainWindow
 
     private (System.Windows.Controls.Primitives.ToggleButton Pill, PlayerMenuPopup Menu, TextBlock Icon, TextBlock Text, TextBlock Detail)[] PillMenus =>
         [(AudioPill, AudioMenu, AudioPillIcon, AudioPillText, AudioPillDetail), (SubtitlePill, SubtitleMenu, SubtitlePillIcon, SubtitlePillText, SubtitlePillDetail),
-         (QueuePill, PlayerQueueMenu, QueuePillIcon, QueuePillText, QueuePillDetail), (ParticipantsPill, ParticipantsMenu, ParticipantsPillIcon, ParticipantsPillText, ParticipantsPillDetail)];
+         (QueuePill, PlayerQueueMenu, QueuePillIcon, QueuePillText, QueuePillDetail), (ParticipantsPill, ParticipantsMenu, ParticipantsPillIcon, ParticipantsPillText, ParticipantsPillDetail),
+         (QualityPill, QualityMenu, QualityPillIcon, QualityPillText, QualityPillDetail)];
 
     // The … menu lists the folded pills, each opening its own menu from the … pill, then any bar buttons hidden for width.
     private void RefreshOverflowMenu()

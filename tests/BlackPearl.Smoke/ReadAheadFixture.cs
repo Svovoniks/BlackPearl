@@ -20,6 +20,7 @@ static class ReadAheadFixture
         await Until(() => cached.CachedAheadBytes >= block * 10);
         check(source.Offsets.All(offset => offset < block * 10) && source.Offsets.Count == 10,
             "without a cache file, read-ahead fills its window past the playback position without player requests");
+        check(!cached.CachedToEnd, "a window of the video is not the video to its end");
         cached.Played(block * 5);
         await Until(() => source.Offsets.Contains(block * 14));
         check(!source.Offsets.Any(offset => offset >= block * 15), "read-ahead follows the playback position and stops at the window");
@@ -65,6 +66,7 @@ static class ReadAheadFixture
             cached = new CachedMediaSource(movie, disk: disk);
             cached.SetReadAhead(block * 4); cached.Played(0);
             await Until(() => cached.CachedAheadBytes == movie.Media.Length);
+            check(cached.CachedToEnd, "a video downloaded to its last block is held to its end");
             check(movie.Offsets.Count == 1025 && movie.Offsets.Distinct().Count() == 1025 && disk!.StoredBytes >= movie.Media.Length,
                 "with a cache file, read-ahead downloads the rest of the video while the player asks for nothing");
             var tail = await cached.ReadAsync(movie.Media.Length - 5000, 5000, default);

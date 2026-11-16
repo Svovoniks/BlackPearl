@@ -1,7 +1,8 @@
 namespace BlackPearl.Core;
 
 // Epoch is the room service's count of streaming-role changes when this state was published.
-internal sealed record HostRoomState(long Sequence, long HostNowMs, RoomSnapshot Snapshot, long Epoch = 0);
+// Features says what whoever plays the video accepts beyond the first protocol 2 apps; see RoomClient.HostFeatures.
+internal sealed record HostRoomState(long Sequence, long HostNowMs, RoomSnapshot Snapshot, long Epoch = 0, int Features = 0);
 
 // Accessed by RoomClient's single control event loop. The room service supplies who is in the room and who holds the
 // streaming role; that member, called the host here, owns all playback, readiness and queue state while it holds it.
@@ -36,7 +37,12 @@ internal sealed class HostRoomCoordinator(string host)
     private bool resumeWhenReady;
     public AdmittedGuest[] AdmittedGuests { get; set; } = [];
     public RoomSnapshot Snapshot => new(people.Values.ToArray(), Media, Playback, SharedControls, Queue, AdmittedGuests, Name, LibraryBrowsing, LibraryActivity, Tracks, LastSession,
-        voice.Values.Where(v => people.ContainsKey(v.Peer)).OrderBy(v => v.Slot).ToArray(), GuestPointers: true);
+        voice.Values.Where(v => people.ContainsKey(v.Peer)).OrderBy(v => v.Slot).ToArray(), GuestPointers: true, Stream: Stream);
+    // The converted copy of the video on offer, if any; see RoomStream.
+    public RoomStream? Stream { get; private set; }
+    internal static bool ValidStream(RoomStream s) => s.Id is { Length: > 0 and <= 64 } && s.Quality is { Length: > 0 and <= 16 } && (s.Preparing ||
+        s.Height is >= 144 and <= 4320 && s.VideoKbps is >= 100 and <= 100000 && s.DurationMs is > 0 and <= 604800000 &&
+        s.SegmentMs is >= 1000 and <= 30000 && s.Segments is > 0 and <= 700000 && s.Segments == (int)((s.DurationMs + s.SegmentMs - 1) / s.SegmentMs));
     // Everyone whose app supports voice reports its state once connected; each keeps a small slot that
     // labels its relayed audio frames, so listeners can tell speakers apart without per-frame names.
     private readonly Dictionary<string, VoiceMember> voice = [];
@@ -137,7 +143,7 @@ internal sealed class HostRoomCoordinator(string host)
             case "media" when sender == host:
                 var media = Wire.Read<SharedMedia>(message.Data!);
                 if (!ValidMedia(media)) throw new InvalidDataException("Invalid shared media");
-                Media = media; Tracks = null; resumeWhenReady = false; generation++;
+                Media = media; Tracks = null; Stream = null; resumeWhenReady = false; generation++;
                 foreach (var p in people.Values.ToArray()) people[p.Id] = p with { Ready = false };
                 Playback = new(++revision, media.Id, false, 0, now, RequestedPlaying: false, Generation: generation, Stop: new("loading"));
                 return true;
@@ -155,6 +161,10 @@ internal sealed class HostRoomCoordinator(string host)
                 if (Media is null || tracks.MediaId != Media.Id || !ValidTrack(tracks.Audio, false) || !ValidTrack(tracks.Subtitles, true)) return false;
                 Tracks = new(Media.Id, tracks.Audio ?? Tracks?.Audio, tracks.Subtitles ?? Tracks?.Subtitles, ++trackRevision);
                 return true;
+            case "stream" when sender == host:
+                var stream = message.Data is null ? null : Wire.Read<RoomStream>(message.Data);
+                if (Media is null || stream is not null && (stream.MediaId != Media.Id || !ValidStream(stream))) return false;
+                Stream = stream; return true;
             case "controls" when sender == host: SharedControls = message.Number == 1; return true;
             case "queue" when sender == host:
                 var queue = Wire.Read<string[]>(message.Data!);

@@ -213,6 +213,21 @@ static class HostlessRoomFixture
         var fromA = await b.GetSourceAsync(b.Snapshot!.Media!, CancellationToken.None);
         check((await fromA.ReadAsync(1000, 500, CancellationToken.None)).SequenceEqual(firstBytes[1000..1500]), "the second member reads the video from the first");
 
+        // A viewer measures how fast the video reaches it while it asks for more than arrives, and tells whoever plays it.
+        check(a.SlowestReceiveRate(60000) is null && b.ReceiveRate is null, "a connection's speed is unknown until video has been pulled over it");
+        b.ReportReceiveRate(3200);
+        await Wait(() => a.SlowestReceiveRate(60000) is { Name: "Ben", Kbps: 3200, Others: false }, "a viewer's speed reaches whoever plays the video");
+        check(b.SlowestReceiveRate(60000) is null && bMessages.All(m => m.Type != "error"), "only whoever plays the video is told, and the report is not a room command");
+        using (var pulling = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        {
+            var chunk = (int)Math.Min(32768, firstBytes.Length);
+            var pulls = Enumerable.Range(0, 16).Select(async _ => { while (b.ReceiveRate is null) await fromA.ReadAsync(0, chunk, pulling.Token); }).ToArray();
+            await Task.WhenAll(pulls);
+            var own = b.ReceiveRate!.Value.Kbps;
+            await Wait(() => a.SlowestReceiveRate(60000) is { Kbps: var told } && told != 3200, "a speed measured while pulling video is reported without being asked");
+            check(own > 0 && a.SlowestReceiveRate(60000)!.Value.Kbps > 0, $"sixteen reads at once measure the connection ({own / 1000.0:F1} Mbps here)");
+        }
+
         await c.ConnectAsync(url, "Cy", a.Identity.Room);
         await c.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(25));
         await Wait(() => new[] { a, b, c }.All(client => Negotiated(client).Count == 2), "every member holds a direct connection to every other member");

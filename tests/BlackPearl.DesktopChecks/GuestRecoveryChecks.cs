@@ -92,6 +92,10 @@ static class GuestRecoveryChecks
             await Wait(() => cache is not null && cache.StoredBytes >= host.HostedMedia.Media.Length);
             Check(((MediaBridge)Field("bridge")!).BuffersWholeVideo && player.Time < player.Length / 2,
                 "a guest downloads the rest of the room's video into its cache file while the start is still playing");
+            // The timeline draws what is buffered; a file held to its end reads as buffered to the end.
+            var timeline = (System.Windows.Controls.Slider)window.FindName("Timeline");
+            await Wait(() => SliderBuffer.GetFraction(timeline) == 1);
+            Check(timeline.Value < timeline.Maximum / 2, $"the timeline shows the whole video as buffered while the start is still playing (buffered to {SliderBuffer.GetFraction(timeline):P0}, position {timeline.Value / timeline.Maximum:P0})");
             var priorPosition = player.Time;
             var bridge = Field("bridge"); var loadedMedia = Field("loadedMedia"); var loadGeneration = Field("loadGeneration");
             var restored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -122,9 +126,12 @@ static class GuestRecoveryChecks
                 "restored guest connection resumes through the same player input without reloading the movie");
             Check(!guest.IsPeerRecovering && Field("disconnectToast") is null, "successful recovery clears the reconnecting state quietly");
             Check(ReferenceEquals(Field("streamCache"), cache), "the buffered video survives the interruption");
-            // A reconnect to the room keeps the buffer, and what the room plays afterwards decides whether it stays.
-            await (Task)Call("CloseUnusedStreamCache", guest)!;
-            Check(ReferenceEquals(Field("streamCache"), cache) && cache!.Accepting, "a buffer kept across a reconnect stays while the room still plays that video");
+            // A buffer waits only so long for its video. One the player is reading from is not waiting.
+            var grace = typeof(MainWindow).GetField("bufferGraceMs", flags)!;
+            grace.SetValue(window, 0);
+            Call("CloseIdleBuffers"); Call("CloseIdleBuffers");
+            Check(ReferenceEquals(Field("streamCache"), cache) && cache!.Accepting, "a buffer the player is reading from is never closed for waiting");
+            grace.SetValue(window, 5000);
             await Wait(() => host.Snapshot!.People.Any(p => p.Id == guest.Identity!.Peer && p.Ready));
             Check(true, "the retained player reports readiness again after host readmission");
             await Wait(() => player.IsPlaying && player.Time > priorPosition + 250);
@@ -133,16 +140,29 @@ static class GuestRecoveryChecks
             await host.DisposeAsync();
             await Wait(() => guest.Snapshot?.Media is null && Field("loadedMedia") is null);
             Check(!guest.IsPeerRecovering, "an actual host departure clears playback instead of retaining a disconnected movie");
+            // The streamer may only have lost the connection, and then starts the video again within moments: what was
+            // buffered waits for that, and is closed when the video has not come back.
+            await Wait(() => Field("bridge") is null);
+            Check(ReferenceEquals(Field("streamCache"), cache) && cache!.Accepting, "with the room's video gone, what was buffered waits for it to come back");
             await Wait(() => Field("streamCache") is null);
-            Check(cache!.StoredBytes > 0 && !cache.Accepting, "the cache file closes once the room's video is gone");
-            // As after a reconnect that returns once the video has ended: nothing loads or ends a video to close the buffer.
+            Check(cache!.StoredBytes > 0 && !cache.Accepting, "the cache file closes when the video has stayed away");
+            // While this app is itself reconnecting to the room, the wait has not begun: what it returns to decides.
             var kept = StreamCache.TryCreate(Path.Combine(directory, "kept-stream-cache"), new SharedMedia("kept", "Recovery video", 4096, ".avi"))!;
-            typeof(MainWindow).GetField("streamCache", flags)!.SetValue(window, kept);
-            await ((Task)Call("CloseUnusedStreamCache", guest)!).WaitAsync(TimeSpan.FromSeconds(40));
-            Check(Field("streamCache") is null && !kept.Accepting, "a buffer kept across a reconnect is closed when the room it returns to has no video");
+            var reconnecting = typeof(MainWindow).GetField("roomReconnect", flags)!;
+            using (var retry = new CancellationTokenSource())
+            {
+                grace.SetValue(window, 0); reconnecting.SetValue(window, retry);
+                typeof(MainWindow).GetField("streamCache", flags)!.SetValue(window, kept);
+                Call("CloseIdleBuffers"); Call("CloseIdleBuffers");
+                Check(ReferenceEquals(Field("streamCache"), kept) && kept.Accepting, "a buffer is kept for as long as this app is reconnecting to the room");
+                reconnecting.SetValue(window, null);
+            }
+            Call("CloseIdleBuffers"); Call("CloseIdleBuffers");
+            Check(Field("streamCache") is null && !kept.Accepting, "and closed when the room it returns to does not play that video");
         }
         finally
         {
+            typeof(MainWindow).GetField("bufferGraceMs", flags)!.SetValue(window, 120000);
             await (Task)Call("Disconnect", false, false)!;
             if (!server.HasExited) { server.Kill(true); await server.WaitForExitAsync(); }
             await File.WriteAllTextAsync(Path.Combine(directory, "guest-recovery-errors.log"), await errors);

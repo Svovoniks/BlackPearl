@@ -24,28 +24,62 @@ public partial class MainWindow
     }
 
     private long? readAheadMediaBytes;
-    // The room's video as it downloads. It outlives the bridge, so reopening the same video after a reconnect keeps
-    // what was buffered.
+    // The room's video as it downloads. It outlives the bridge, so reopening the same video keeps what was buffered:
+    // after this app reconnects to the room, and after whoever plays the video reconnects and starts it again.
     private StreamCache? streamCache;
     private static string StreamCacheDirectory => Path.Combine(Path.GetTempPath(), "BlackPearl", "stream-cache");
+    // The same for a converted stream: its pieces as they download, and the stream they belong to. A stream's pieces
+    // never change, so they are good for as long as the room offers that stream.
+    private (string StreamId, SegmentStore Store)? streamPieces;
     private StreamCache? StreamCacheFor(SharedMedia media)
     {
         if (streamCache?.Matches(media) == true) return streamCache;
-        CloseStreamCache();
+        CloseFileCache();
         return streamCache = StreamCache.TryCreate(StreamCacheDirectory, media);
     }
-    private void CloseStreamCache() { streamCache?.Dispose(); streamCache = null; }
-    // A reconnect keeps the buffered video for the room's video to continue from. When the room it returns to plays
-    // something else or nothing, no video load or video end comes along to close it, so it is closed here, once whoever
-    // is streaming has said what the room is playing. The room service's first list of members says nothing about that.
-    private async Task CloseUnusedStreamCache(RoomClient client)
+    private SegmentStore? StreamPiecesFor(RoomStream stream)
     {
-        try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30), lifetime.Token); }
-        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException) { }
-        if (room == client && streamCache is { } kept && (client.Identity?.Host == true || client.Snapshot?.Media is not { } media || !kept.Matches(media))) CloseStreamCache();
+        if (streamPieces is { } kept && kept.StreamId == stream.Id && kept.Store.Segments == stream.Segments) return kept.Store;
+        CloseStreamPieces();
+        var store = SegmentStore.TryCreate(StreamCacheDirectory, stream.Segments);
+        if (store is not null) streamPieces = (stream.Id, store);
+        return store;
+    }
+    private void CloseFileCache() { streamCache?.Dispose(); streamCache = null; }
+    // Closing the file deletes it, which takes long enough for gigabytes that it happens on another thread.
+    private void CloseStreamPieces() { if (streamPieces is { } kept) { streamPieces = null; _ = Task.Run(kept.Store.Dispose); } }
+    private void CloseStreamCache() { CloseFileCache(); CloseStreamPieces(); }
+    // A buffer the player is not reading from waits this long for its video to come back, and is then closed. Whoever
+    // plays the video takes a few seconds to return from a lost connection, and up to a minute or two when the first
+    // attempts fail; the room's video is gone meanwhile, and a streamer who starts it again offers the same stream.
+    private int bufferGraceMs = 120000;
+    private long fileCacheIdleSince, streamPiecesIdleSince;
+    // Runs with every playback tick. The time this app spends reconnecting to the room itself does not count: what it
+    // returns to decides, as it would have before the connection was lost.
+    private void CloseIdleBuffers()
+    {
+        if (roomReconnect is not null) { fileCacheIdleSince = streamPiecesIdleSince = 0; return; }
+        var now = Environment.TickCount64;
+        // Null while nothing from the room is open.
+        var playsStream = bridge?.PlaysConvertedStream;
+        if (streamCache is null || playsStream == false) fileCacheIdleSince = 0;
+        else if (fileCacheIdleSince == 0) fileCacheIdleSince = now;
+        else if (now - fileCacheIdleSince >= bufferGraceMs) { fileCacheIdleSince = 0; CloseFileCache(); }
+        if (streamPieces is null || playsStream == true) streamPiecesIdleSince = 0;
+        else if (streamPiecesIdleSince == 0) streamPiecesIdleSince = now;
+        else if (now - streamPiecesIdleSince >= bufferGraceMs) { streamPiecesIdleSince = 0; CloseStreamPieces(); }
     }
     // Begin read-ahead once the first frames are playing, so it never competes with startup for the streamer's
     // bandwidth. From then on the rest of the video downloads continuously, also while paused.
+    // How far the room's video is held ahead of the position, drawn on the timeline in a lighter grey. A video played
+    // from this PC has nothing to buffer and draws none.
+    private void RefreshBufferedBar()
+    {
+        var length = bridge is not null && player is not null ? player.Length : 0;
+        var buffered = length > 0 ? Math.Clamp((double)bridge!.BufferedUntilMs(player!.Time, length) / length, 0, 1) : 0;
+        if (Math.Abs(SliderBuffer.GetFraction(Timeline) - buffered) > 0.0005 || buffered is 0 or 1) SliderBuffer.SetFraction(Timeline, buffered);
+    }
+
     private void StartReadAhead()
     {
         if (bridge is null || readAheadMediaBytes is not { } mediaBytes || !ready || player is not { } native ||
@@ -130,7 +164,6 @@ public partial class MainWindow
                     RememberCurrentRoom();
                     if (ConnectedSavedRoom is { } saved) PublishRoomSession(candidate, saved);
                     RoomSubtitle.Text = "Reconnected";
-                    _ = CloseUnusedStreamCache(candidate);
                     // This app was playing for the room: carry on from where it stopped, unless someone else started a
                     // video meanwhile. Theirs stays.
                     if (identity.Host && source is not null && File.Exists(source.LocalPath))
@@ -140,7 +173,8 @@ public partial class MainWindow
                         if (room == candidate && candidate.Snapshot?.Media is null)
                         {
                             if (resumedItem is not null) playingItem = items.FirstOrDefault(item => item.Id == resumedItem.Id) ?? resumedItem;
-                            await candidate.StartStreamAsync(RoomClient.PrepareHostedFile(source.LocalPath, source.Media.Title), playback?.Playing == true, position, retry.Token);
+                            // The same video under the same id: a conversion kept through the reconnect is still its stream.
+                            await candidate.StartStreamAsync(RoomClient.PrepareHostedFile(source.LocalPath, source.Media.Title, source.Media.Id), playback?.Playing == true, position, retry.Token);
                         }
                     }
                     SetStatus("Room connection restored."); UpdateSessionControls(); return;

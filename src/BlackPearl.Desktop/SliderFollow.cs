@@ -5,6 +5,30 @@ using System.Windows.Input;
 
 namespace BlackPearl.Desktop;
 
+// How much of a player slider's rail is drawn as buffered: a lighter grey from the start to this fraction of its
+// length, under the played part, the way video sites show what has been downloaded.
+public static class SliderBuffer
+{
+    public static readonly DependencyProperty FractionProperty = DependencyProperty.RegisterAttached("Fraction", typeof(double), typeof(SliderBuffer), new PropertyMetadata(0d, FractionChanged));
+    public static double GetFraction(DependencyObject element) => (double)element.GetValue(FractionProperty);
+    public static void SetFraction(DependencyObject element, double value) => element.SetValue(FractionProperty, value);
+
+    // The bar is the template's "Buffered" element, stretched from the rail's start. A binding from the template's
+    // transform to this property is read once and never again, so the bar is set here.
+    private static void FractionChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is not Slider slider) return;
+        if (!Draw(slider)) { slider.Loaded -= Loaded; slider.Loaded += Loaded; }
+    }
+    private static void Loaded(object sender, RoutedEventArgs e) => Draw((Slider)sender);
+    private static bool Draw(Slider slider)
+    {
+        if (slider.Template?.FindName("Buffered", slider) is not FrameworkElement bar) return false;
+        bar.RenderTransform = new System.Windows.Media.ScaleTransform(Math.Clamp(GetFraction(slider), 0, 1), 1);
+        return true;
+    }
+}
+
 // Pressing anywhere on a slider moves its knob there, and the knob keeps following the pointer until the button is released.
 public static class SliderFollow
 {

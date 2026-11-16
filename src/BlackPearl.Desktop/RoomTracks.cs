@@ -10,8 +10,10 @@ public partial class MainWindow
     private CancellationTokenSource? roomSubtitleCancellation;
     private bool roomSubtitlesLoading;
     private long roomSubtitleRetryAt;
+    // A converted stream carries one audio track and has its subtitles drawn in, so its viewers have nothing to choose from.
+    private bool PlaysConvertedStream => room is not null && room.Identity?.Host != true && loadedStream is not null;
     private bool CanChangeRoomTracks => nativeStopCount == 0 && (room is null || ready && loadedMedia == room.Snapshot?.Media?.Id &&
-        room.IsConnected && (room.Identity?.Host == true || room.Snapshot?.SharedControls == true));
+        room.IsConnected && !PlaysConvertedStream && (room.Identity?.Host == true || room.Snapshot?.SharedControls == true));
     private string RoomSubtitleName(int id, string fallback) => room?.Snapshot?.Media?.Subtitles?
         .FirstOrDefault(asset => roomSubtitleIds.TryGetValue(asset.Id, out var trackId) && trackId == id)?.Title ?? fallback;
 
@@ -43,7 +45,7 @@ public partial class MainWindow
 
     private void SynchronizeRoomTracks(TrackChoice[] audio, TrackChoice[] subtitles)
     {
-        if (room?.Snapshot?.Media is not { } media || player is null || !ready || loadedMedia != media.Id) return;
+        if (room?.Snapshot?.Media is not { } media || player is null || !ready || loadedMedia != media.Id || PlaysConvertedStream) return;
         var assetsReady = !(media.Subtitles ?? []).Any(asset => !roomSubtitleIds.ContainsKey(asset.Id));
         if (!assetsReady)
         {

@@ -247,13 +247,17 @@ at the previous position. Canceled seeks stop transfers that have no
 remaining consumers. VLC's network cache is chosen per movie from the measured
 round trip (1.5–5 s), so starting and seeking wait only for that short buffer.
 A viewer keeps the room's video in a temporary file
-(`%TEMP%\BlackPearl\stream-cache\*.stream`), deleted when the video ends, the
-viewer leaves the room, or the app exits. Once the first frames play, read-ahead
+(`%TEMP%\BlackPearl\stream-cache\*.stream`), deleted two minutes after the
+player stops reading from it, or when the viewer leaves the room or the app exits. Once the first frames play, read-ahead
 downloads the rest of the video past the playback position, also while paused,
 with up to 16 reads in flight. It starts no read while the player is itself
 waiting for video. A seek outside the buffered video cancels its reads; it
 continues from the new position once playback advances, or after a second when
-the video is paused. A reconnect that returns to the same video keeps the file.
+the video is paused. The two minutes are for the video to come back
+(`CloseIdleBuffers`): the same video opened again continues with the file. That
+covers a viewer's own reconnect to the room, during which the time does not
+count, and a streamer who lost the connection, left the room with it, and starts
+the video again on returning.
 While the drive has less than 4 GB free, or the file cannot be created, the
 buffer is held in memory instead: 30 seconds of video (estimated from the
 average bitrate plus 25%, capped at 256 MiB) plus 16 MiB of recently read data.
@@ -262,6 +266,77 @@ lasts. Local-file playback bypasses network buffering. The diagnostics log
 records `stream-cache` events and, in each `sample`, the bytes buffered ahead.
 `dotnet run --project tests/BlackPearl.Smoke -c Release -- --buffer-run <video>`
 measures buffering of a real video through real peer connections and the player.
+Whoever plays a room's video chooses its **stream quality** in the player's
+Quality pill: Original, 1080p, 720p or 480p. Original streams the file as above.
+A lower quality converts the video on the streamer's PC while it plays, with the
+bundled `ffmpeg\ffmpeg.exe` (GPL build, a separate program; version and hash are
+pinned in `BlackPearl.Desktop.csproj` and it is cached under
+`.tools\models\ffmpeg-<version>`). The choice is saved in the `streamQuality`
+setting and applies to the next video. The converted stream carries the
+selected audio track as stereo AAC and the selected subtitles drawn into the
+picture; HDR is tone mapped. A video is offered the qualities of the 16:9 frame
+it is cut from, so a 1920x800 film is offered 1080p, and it is never enlarged. A
+file whose bitrate is already at or below the chosen quality's is streamed as its
+file, whatever its size, and the menu says so. The picture is HEVC where the streamer's graphics hardware encodes it, and H.264
+otherwise. HEVC shows the same picture in about a third fewer bits, so with it
+1080p, 720p and 480p take at most 3.2, 1.9 and 1.0 Mbps of video instead of 5.0,
+2.8 and 1.4; the menu and `RoomStream.VideoKbps` say which. Only hardware HEVC
+encoders are used (NVIDIA, Intel Quick Sync, AMD, in that order):
+`Ffmpeg.HevcEncoderAsync` finds one once per run by encoding a second of video
+with each, and `BLACKPEARL_STREAM_CODEC=h264` leaves HEVC unused. One that passes
+that check and then converts nothing is replaced by the H.264 encoders, and
+streams after that are planned without it. H.264 comes from the first encoder
+that works: NVIDIA, Intel Quick Sync, AMD, x264, Windows' own. Every encoder
+stops at a picture quality where the video needs less than the bitrate, and at
+the bitrate where it would need more. Intel's does that only when given a target
+with a peak above it (its QVBR mode, with plain VBR as the fallback for hardware
+without it); given a quality and a peak alone it ignores the peak. The peak is
+one kbit above the target, because Intel's HEVC encoder stays at its peak for as
+long as the video is hard.
+The stream is offered in the room state (`RoomSnapshot.Stream`, sent with the
+`stream` command) as four-second pieces. Viewers read
+`stream/<id>/<piece>/size` and `stream/<id>/<piece>` over the media channel, keep
+the pieces in `%TEMP%\BlackPearl\stream-cache\*.segments`, read ahead to the end
+as with a file, and play them from a local playlist. ffmpeg runs from the piece
+somebody asks for, so a seek converts from there; it holds five minutes ahead of
+the furthest request. Changing the quality, audio track or subtitles makes a new
+stream, which viewers reopen at the room's position. As a video that will be
+converted starts, the streamer first offers a stream marked `Preparing`, within
+1.5 seconds of the video: viewers wait for the stream instead of opening the
+file and switching a moment later. If the stream is not ready 5 seconds after
+the video started, the announcement is withdrawn and they open the file. Music
+is neither announced nor converted, and has no Quality pill. A file the converter
+cannot read, or a converter that does not start, leaves the file streamed as it
+is, with the reason in the menu. Apps from before converted
+streams ignore the offer and are served the file. Viewers of a converted stream
+cannot change tracks. A viewer's pieces belong to the stream's id and wait two
+minutes for it like the file's buffer, so a viewer who reconnects to the room
+continues with what it had downloaded. A streamer who reconnects keeps its
+conversion meanwhile, starts the video again under the id it had, and offers the
+same stream, so viewers continue with their pieces then too.
+The menu shows what sending the file takes (its size over its length) beside
+Original. Each viewer's app measures **how fast the video reaches it**: the bytes
+that arrive over the time it has at least eight reads under way (`TransferMeter`),
+which is when the connection, not the video's bitrate, sets the pace. It needs
+four such seconds within the last twenty. Every two seconds it sends a fresh
+measurement to whoever plays the video as `receive-rate`, only if that app said it
+takes it (`HostRoomState.Features`); the report changes nothing in the room. The
+streamer's menu names the slowest viewer measured in the last minute. When a
+measurement from the last ten seconds stays below what is sent plus 20% for ten
+seconds, the player offers the best quality that fits (`StreamQuality.Suggest`),
+or the smallest when none does, once per video; the card leaves after 45 seconds.
+Nothing is measured while nobody else is in the room, or once a viewer has the
+whole video buffered.
+A viewer's timeline draws how far the video is **buffered** as a lighter grey
+(`SliderBuffer.Fraction`, from `MediaBridge.BufferedUntilMs`). A converted
+stream's pieces give the time exactly; for a file the buffered bytes are taken as
+spread evenly over its length, so the bar is an estimate there. A video played
+from this PC draws none.
+The diagnostics log records `stream-quality`, `stream-convert` and
+`stream-quality-offer` events on the streaming side and `piece-read` on the viewer's.
+`dotnet run --project tests/BlackPearl.Smoke -c Release -- --buffer-run <video> --quality 720p`
+measures it on a real video, and `-- --stream-frame <video> <seconds> <quality> <picture.png>`
+saves the frame viewers get.
 Buffering recovery requires 750 ms of stable full cache.
 Every member of a room holds a direct connection to every other. A lost one is
 replaced while the room service is reachable: the member whose id sorts first

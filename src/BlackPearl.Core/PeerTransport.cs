@@ -131,7 +131,9 @@ public sealed class PeerTransport : IDisposable
         }
     }
     private readonly ConcurrentDictionary<string, PendingRange> pending = new();
-    private readonly ConcurrentDictionary<string, byte> serving = new();
+    // A request the reader gave up on is canceled here too, so a read that is waiting, such as for video still being
+    // converted, does not hold up the ones behind it.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> serving = new();
     private readonly SemaphoreSlim window = new(MediaStreaming.Window);
     // Canceled HTTP seeks can leave earlier ranges queued at the host. They leave
     // the queue lazily, so only active requests count toward the busy limit.
@@ -145,6 +147,8 @@ public sealed class PeerTransport : IDisposable
     internal bool IsInterrupted => Volatile.Read(ref disposed) != 0 || Volatile.Read(ref controlClosed) != 0 || Volatile.Read(ref mediaInterrupted) != 0;
     private int disposed;
     public Func<string, IMediaSource?>? ResolveMedia { get; set; }
+    // How fast what this app reads from the other member arrives.
+    public TransferMeter Received { get; } = new();
     public event Action<string, string>? Signal;
     public event Action<string>? Status;
     public event Action<WireMessage>? ControlMessage;
@@ -312,10 +316,15 @@ public sealed class PeerTransport : IDisposable
                     var req = Wire.Read<RangeRequest>(message.Data!);
                     if (req.Count is < 1 or > 32768 || req.Offset < 0 || !Guid.TryParseExact(req.Id, "N", out _)) throw new InvalidDataException("Invalid media range");
                     if (serving.Count >= MediaStreaming.Window * 4) { SendReply(new(req.Id, null, BusyError)); return; }
-                    if (!serving.TryAdd(req.Id, 0)) return;
-                    if (!requests.Writer.TryWrite(req)) { serving.TryRemove(req.Id, out _); SendReply(new(req.Id, null, BusyError)); }
+                    var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+                    if (!serving.TryAdd(req.Id, cancellation)) { cancellation.Dispose(); return; }
+                    if (!requests.Writer.TryWrite(req)) { serving.TryRemove(req.Id, out _); cancellation.Dispose(); SendReply(new(req.Id, null, BusyError)); }
                 }
-                else if (message.Type == "cancel-read") serving.TryRemove(message.Data ?? "", out _);
+                else if (message.Type == "cancel-read")
+                {
+                    // The serving loop disposes it once the read has ended.
+                    if (serving.TryRemove(message.Data ?? "", out var canceled)) try { canceled.Cancel(); } catch (ObjectDisposedException) { }
+                }
                 else if (message.Type == "bytes")
                 {
                     var reply = Wire.Read<RangeReply>(message.Data!);
@@ -394,21 +403,29 @@ public sealed class PeerTransport : IDisposable
         try
         {
             // Read a few queued ranges ahead so disk latency overlaps with sending; replies still go out in request order.
-            var reading = new Queue<(RangeRequest Request, Task<byte[]?> Bytes)>();
-            async Task<byte[]?> Read(RangeRequest request)
+            var reading = new Queue<(RangeRequest Request, CancellationTokenSource? Cancellation, Task<byte[]?> Bytes)>();
+            async Task<byte[]?> Read(RangeRequest request, CancellationTokenSource? cancellation)
             {
-                if (!serving.ContainsKey(request.Id)) return null;
+                if (cancellation is null) return null;
                 if (request.Count is < 1 or > 32768) throw new InvalidDataException();
                 var source = ResolveMedia?.Invoke(request.Media) ?? throw new UnauthorizedAccessException();
-                return await source.ReadAsync(request.Offset, request.Count, lifetime.Token);
+                return await source.ReadAsync(request.Offset, request.Count, cancellation.Token);
             }
             while (true)
             {
                 if (reading.Count == 0 && !await requests.Reader.WaitToReadAsync(lifetime.Token)) break;
-                while (reading.Count < 4 && requests.Reader.TryRead(out var queued)) reading.Enqueue((queued, Read(queued)));
+                while (reading.Count < 4 && requests.Reader.TryRead(out var queued))
+                {
+                    var active = serving.GetValueOrDefault(queued.Id);
+                    reading.Enqueue((queued, active, Read(queued, active)));
+                }
                 if (reading.Count == 0) continue;
-                var (request, read) = reading.Dequeue();
-                if (!serving.ContainsKey(request.Id)) { _ = read.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default); continue; }
+                var (request, cancellation, read) = reading.Dequeue();
+                if (!serving.ContainsKey(request.Id))
+                {
+                    _ = read.ContinueWith((t, state) => { _ = t.Exception; (state as IDisposable)?.Dispose(); }, cancellation, TaskScheduler.Default);
+                    continue;
+                }
                 try
                 {
                     if (await read is not { } bytes) continue;
@@ -428,12 +445,16 @@ public sealed class PeerTransport : IDisposable
                     }
                     else SendReply(new(request.Id, bytes));
                 }
+                // The reader gave up on this range while it was being read.
+                catch (OperationCanceledException) when (!lifetime.IsCancellationRequested && cancellation?.IsCancellationRequested == true) { }
+                // The range is not available yet, as with video still being converted: the reader asks again.
+                catch (PeerBusyException) when (!lifetime.IsCancellationRequested) { try { SendReply(new(request.Id, null, BusyError)); } catch { } }
                 catch (Exception ex) when (!lifetime.IsCancellationRequested)
                 {
                     PlaybackDiagnostics.Record("host-range-failed", new { transport = DiagnosticId, offset = request.Offset, count = request.Count, error = ex.GetType().Name });
                     try { SendReply(new(request.Id, null, "Media unavailable or not authorized")); } catch { }
                 }
-                finally { serving.TryRemove(request.Id, out _); }
+                finally { serving.TryRemove(request.Id, out _); cancellation?.Dispose(); }
             }
         }
         // Disposal closes the channels while a range may still be sending.
@@ -447,7 +468,7 @@ public sealed class PeerTransport : IDisposable
         await window.WaitAsync(ct);
         var id = Guid.NewGuid().ToString("N");
         var range = new PendingRange(count);
-        pending[id] = range;
+        pending[id] = range; Received.Started();
         try
         {
             // Old hosts ignore this optional field and return their JSON reply.
@@ -464,6 +485,7 @@ public sealed class PeerTransport : IDisposable
         finally
         {
             pending.TryRemove(id, out _); window.Release();
+            Received.Finished(range.Completion.Task.IsCompletedSuccessfully ? count : 0);
             if (!range.Completion.Task.IsCompleted && channel?.IsOpen == true)
                 try { channel.Send(Wire.Serialize(new WireMessage("cancel-read", Data: id))); } catch { }
         }

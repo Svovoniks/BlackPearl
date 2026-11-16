@@ -353,7 +353,8 @@ public static class ContentAcquisition
             try { await process.WaitForExitAsync(timeout.Token); }
             catch (OperationCanceledException)
             {
-                try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+                // A plugin that exits at this very moment makes stopping it fail in any of these ways.
+                try { process.Kill(entireProcessTree: true); } catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) { }
                 ct.ThrowIfCancellationRequested();
                 return new(false, $"{plugin.Name} didn't finish within {plugin.TimeoutSeconds} seconds.");
             }

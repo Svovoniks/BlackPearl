@@ -34,25 +34,22 @@ internal sealed class CachedMediaSource(IMediaSource source, int capacityBytes =
     public long ReadAheadBytes { get { lock (gate) return readAhead; } }
     // True while read-ahead has no window and continues to the end of the movie.
     public bool Unbounded => disk?.Accepting == true;
-    public long CachedAheadBytes
+    public long CachedAheadBytes { get { lock (gate) return anchor < 0 ? 0 : Math.Max(0, Math.Min(CachedUntil(), Media.Length) - anchor); } }
+    // True once everything from the playback position to the end of the video is held.
+    public bool CachedToEnd { get { lock (gate) return anchor >= 0 && CachedUntil() >= Media.Length; } }
+    // Where the video held from the playback position stops. Called with the lock held.
+    private long CachedUntil()
     {
-        get
+        var block = Align(anchor);
+        if (disk is not null)
         {
-            lock (gate)
-            {
-                if (anchor < 0) return 0;
-                var block = Align(anchor);
-                if (disk is not null)
-                {
-                    var start = block;
-                    if (start >= diskRunFrom && start <= diskRunTo) block = diskRunTo; else diskRunFrom = start;
-                    while (block < Media.Length && disk.Contains(block)) block += MediaStreaming.ChunkBytes;
-                    diskRunTo = block;
-                }
-                while (block < Media.Length && Has(block)) block += MediaStreaming.ChunkBytes;
-                return Math.Max(0, Math.Min(block, Media.Length) - anchor);
-            }
+            var start = block;
+            if (start >= diskRunFrom && start <= diskRunTo) block = diskRunTo; else diskRunFrom = start;
+            while (block < Media.Length && disk.Contains(block)) block += MediaStreaming.ChunkBytes;
+            diskRunTo = block;
         }
+        while (block < Media.Length && Has(block)) block += MediaStreaming.ChunkBytes;
+        return block;
     }
     public async Task<byte[]> ReadAsync(long offset, int count, CancellationToken ct)
     {

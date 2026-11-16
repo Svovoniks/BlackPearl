@@ -93,6 +93,20 @@
     <VerifyFileHash File="$(LanguageModelDirectory)$(SpeechModelName).download" Hash="$(SpeechModelSha256)" Algorithm="SHA256" />
     <Move SourceFiles="$(LanguageModelDirectory)$(SpeechModelName).download" DestinationFiles="$(LanguageModelDirectory)$(SpeechModelName)" />
   </Target>
+  <!-- ffmpeg (GPL-3.0 "essentials" build by gyan.dev) converts a room's video to a lower quality while it plays; see StreamConverter.
+       It is a separate program the app starts, shipped under ffmpeg/ with its license. Downloaded once per checkout from a pinned
+       release and verified. -->
+  <PropertyGroup><FfmpegVersion>9.0.2</FfmpegVersion><FfmpegSha256>60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba</FfmpegSha256><FfmpegPackage>ffmpeg-$(FfmpegVersion)-essentials_build</FfmpegPackage><FfmpegDirectory>$(MSBuildThisFileDirectory)../../.tools/models/ffmpeg-$(FfmpegVersion)/</FfmpegDirectory></PropertyGroup>
+  <ItemGroup><None Include="$(FfmpegDirectory)ffmpeg.exe" Link="ffmpeg/ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" /><None Include="$(FfmpegDirectory)LICENSE" Link="ffmpeg/LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" /></ItemGroup>
+  <Target Name="FetchFfmpeg" BeforeTargets="AssignTargetPaths;PrepareForBuild" Condition="!Exists('$(FfmpegDirectory)ffmpeg.exe')">
+    <DownloadFile SourceUrl="https://github.com/GyanD/codexffmpeg/releases/download/$(FfmpegVersion)/$(FfmpegPackage).zip" DestinationFolder="$(FfmpegDirectory)" DestinationFileName="ffmpeg.zip" Retries="3" RetryDelayMilliseconds="2000" />
+    <VerifyFileHash File="$(FfmpegDirectory)ffmpeg.zip" Hash="$(FfmpegSha256)" Algorithm="SHA256" />
+    <Exec Command="tar -xf ffmpeg.zip $(FfmpegPackage)/bin/ffmpeg.exe $(FfmpegPackage)/LICENSE" WorkingDirectory="$(FfmpegDirectory)" />
+    <Copy SourceFiles="$(FfmpegDirectory)$(FfmpegPackage)/LICENSE" DestinationFolder="$(FfmpegDirectory)" />
+    <Move SourceFiles="$(FfmpegDirectory)$(FfmpegPackage)/bin/ffmpeg.exe" DestinationFiles="$(FfmpegDirectory)ffmpeg.exe" />
+    <RemoveDir Directories="$(FfmpegDirectory)$(FfmpegPackage)/" />
+    <Delete Files="$(FfmpegDirectory)ffmpeg.zip" />
+  </Target>
   <Target Name="FetchEchoCanceller" BeforeTargets="AssignTargetPaths;PrepareForBuild" Condition="!Exists('$(VoiceNativeDirectory)webrtc-apm.dll')">
     <DownloadFile SourceUrl="$(EchoPackageUrl)" DestinationFolder="$(VoiceNativeDirectory)apm/" DestinationFileName="apm.zip" Retries="3" RetryDelayMilliseconds="2000" />
     <VerifyFileHash File="$(VoiceNativeDirectory)apm/apm.zip" Hash="$(EchoPackageSha256)" Algorithm="SHA256" />

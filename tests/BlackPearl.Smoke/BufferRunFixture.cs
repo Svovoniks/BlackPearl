@@ -6,11 +6,13 @@ using BlackPearl.Core;
 
 // Measures buffering of a real video through real peer connections and the real player:
 //   --buffer-run <video> [seconds] [--mbps <limit>] [--relay <room server>] [--memory]
+//                [--quality 1080p|720p|480p [--audio <track>] [--subtitle <track>]] [--seek <seconds>]
 // The video plays for a third of the time, is paused for a third, and plays again. Every five
 // seconds it prints the playback position, the video buffered ahead of it, what was downloaded,
 // and how much of that had been downloaded before. --mbps limits what the streaming side sends,
 // like a slow uplink; --relay sends the video through the room server's relay; --memory runs
-// without a cache file.
+// without a cache file. --quality converts the video while it plays, as a room does when a quality below
+// Original is chosen, with that audio track and those subtitles drawn in; --seek jumps there in the last third.
 static class BufferRunFixture
 {
     public static async Task Run(string[] args)
@@ -21,6 +23,8 @@ static class BufferRunFixture
         var limit = double.TryParse(Option("--mbps"), System.Globalization.CultureInfo.InvariantCulture, out var mbps) ? mbps : 0;
         var server = Option("--relay");
         var useFile = !args.Contains("--memory");
+        var quality = StreamQuality.Find(Option("--quality"));
+        var seek = double.TryParse(Option("--seek"), System.Globalization.CultureInfo.InvariantCulture, out var seekSeconds) ? seekSeconds : -1;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds + 120));
 
         string[] ice = [];
@@ -36,7 +40,8 @@ static class BufferRunFixture
         try
         {
             var file = new FileMediaSource(path);
-            var sent = new LimitedSource(file, limit);
+            var limiter = new Limiter(limit);
+            var sent = new LimitedSource(file, limiter);
             using var host = new PeerTransport(ice, relayOnly: server is not null);
             using var guest = new PeerTransport(ice, relayOnly: server is not null);
             var signals = Channel.CreateUnbounded<(PeerTransport Peer, string Type, string Data)>();
@@ -52,9 +57,38 @@ static class BufferRunFixture
             await Task.WhenAll(host.Ready, guest.Ready, host.ControlReady, guest.ControlReady).WaitAsync(TimeSpan.FromSeconds(35), timeout.Token);
 
             var received = new CountingSource(new RemoteMediaSource(guest, file.Media));
-            using var cache = useFile ? StreamCache.TryCreate(directory, file.Media) : null;
+            using var cache = useFile && quality is null ? StreamCache.TryCreate(directory, file.Media) : null;
             await using var bridge = new MediaBridge();
-            var url = await bridge.StartAsync(received, cache);
+            StreamConverter? converter = null; SegmentStore? converted = null, viewerPieces = null; RoomStream? stream = null; long streamBytes = 0;
+            Uri url;
+            if (quality is null) url = await bridge.StartAsync(received, cache);
+            else
+            {
+                var ffmpeg = StreamQualityFixture.FindFfmpeg() ?? throw new IOException("ffmpeg was not found.");
+                var probe = await VideoProbe.ReadAsync(ffmpeg, path, timeout.Token) ?? throw new IOException("The video could not be read.");
+                var prepare = Stopwatch.StartNew();
+                var subtitle = int.TryParse(Option("--subtitle"), out var track) ? await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), Directory.CreateDirectory(Path.Combine(directory, "convert")).FullName, timeout.Token) : null;
+                var hevcEncoder = await Ffmpeg.HevcEncoderAsync(ffmpeg);
+                var plan = StreamQuality.Plan(probe, file.Media.Length, quality, hevcEncoder is not null); var chosen = plan.Quality;
+                var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
+                stream = new RoomStream(Guid.NewGuid().ToString("N"), file.Media.Id, chosen.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+                converted = SegmentStore.TryCreate(Path.Combine(directory, "convert"), segments) ?? throw new IOException("No room for the converted video.");
+                converter = new StreamConverter(ffmpeg, new StreamInput(path, probe, probe.AudioTracks == 0 ? null : int.TryParse(Option("--audio"), out var audio) ? audio : 0, subtitle), stream, converted, hevcEncoder);
+                converter.Failed += message => Console.WriteLine("CONVERSION FAILED: " + message);
+                host.ResolveMedia = id => id == file.Media.Id ? sent : converter.Resolve(id) is { } piece ? new LimitedSource(piece, limiter) : null;
+                viewerPieces = SegmentStore.TryCreate(Path.Combine(directory, "viewer"), segments);
+                var remote = new RemoteStream(stream, async (resource, offset, count, ct) =>
+                {
+                    while (true)
+                    {
+                        try { var bytes = await guest.ReadAsync(resource, offset, count, ct); Interlocked.Add(ref streamBytes, bytes.Length); return bytes; }
+                        catch (PeerBusyException) { await Task.Delay(100, ct); }
+                    }
+                }, viewerPieces);
+                url = await bridge.StartAsync(remote);
+                Console.WriteLine($"source {probe.Width}x{probe.Height}{(probe.Hdr ? " HDR" : "")}, {probe.AudioTracks} audio, {probe.Subtitles.Length} subtitle tracks; converting to {chosen.Name}, {stream.Height} high, at up to {(plan.VideoKbps + StreamQuality.AudioKbps) / 1000.0:0.#} Mbps (file {plan.FileKbps / 1000.0:0.0} Mbps{(plan.Smaller ? "" : ", which the app would stream as it is")})" +
+                    (subtitle is null ? "" : $"; subtitles {(subtitle.ImageTrack is null ? "text" : "picture")}, prepared in {prepare.Elapsed.TotalSeconds:F1} s"));
+            }
             Core.Initialize();
             using var vlc = new LibVLC("--vout=dummy", "--no-video-title-show", "--quiet");
             using var player = new MediaPlayer(vlc);
@@ -66,11 +100,13 @@ static class BufferRunFixture
             using var media = new Media(vlc, url);
             media.AddOption($":network-caching={MediaStreaming.NetworkCacheForRtt(50)}");
             media.AddOption(":sub-autodetect-file=0");
-            Console.WriteLine($"{Path.GetExtension(path)} {file.Media.Length / 1e9:F2} GB; {(server is null ? "direct" : "relay")}; {(limit > 0 ? limit + " Mbps limit" : "no limit")}; {(cache is null ? "memory window" : "cache file")}");
+            Console.WriteLine($"{Path.GetExtension(path)} {file.Media.Length / 1e9:F2} GB; {(server is null ? "direct" : "relay")}; {(limit > 0 ? limit + " Mbps limit" : "no limit")}; {(quality is not null ? "converted" : cache is null ? "memory window" : "cache file")}");
+            long Downloaded() => quality is null ? received.Bytes : Interlocked.Read(ref streamBytes);
+            var sought = false; Stopwatch? seeking = null;
             var clock = Stopwatch.StartNew();
             player.Play(media);
             var readAhead = false; long lastBytes = 0, lastAt = 0, played = 0, lastTime = -1;
-            Console.WriteLine("   t  state    position  buffered-ahead  downloaded  again   rate");
+            Console.WriteLine("   t  state    position  buffered-ahead  downloaded  again   rate" + (quality is null ? "" : "   converted"));
             for (var tick = 1; clock.ElapsedMilliseconds < seconds * 1000L; tick++)
             {
                 await Task.Delay(250, timeout.Token);
@@ -78,22 +114,31 @@ static class BufferRunFixture
                 if (!readAhead && player.IsPlaying && player.Time > 500 && player.Length > 0)
                 {
                     readAhead = true;
-                    bridge.SetReadAhead(StreamingBufferOptions.ReadAheadBytes(file.Media.Length, player.Length));
+                    bridge.SetReadAhead(Math.Max(1, StreamingBufferOptions.ReadAheadBytes(file.Media.Length, player.Length)));
                     Console.WriteLine($"{now / 1000.0,4:F0}  duration {TimeSpan.FromMilliseconds(player.Length):h\\:mm\\:ss}, average {file.Media.Length * 8.0 / player.Length / 1000:F1} Mbps; read-ahead started");
                 }
                 if (now >= seconds * 1000L / 3 && now < seconds * 2000L / 3) { if (player.IsPlaying) player.SetPause(true); }
                 else if (readAhead && player.State == VLCState.Paused) player.SetPause(false);
+                if (seek >= 0 && !sought && now >= seconds * 2000L / 3 + 3000) { sought = true; seeking = Stopwatch.StartNew(); player.Time = (long)(seek * 1000); }
+                if (seeking is not null && player.Time >= seek * 1000 + 1000 && player.Time < seek * 1000 + 60000)
+                { Console.WriteLine($"{now / 1000.0,4:F0}  seek to {seek:F0} s: playing a second past it {seeking.ElapsedMilliseconds} ms later"); seeking = null; }
                 if (player.Time != lastTime && lastTime >= 0 && player.IsPlaying) played += 250;
                 lastTime = player.Time;
                 if (tick % 20 != 0) continue;
-                var bytes = received.Bytes;
-                Console.WriteLine($"{now / 1000.0,4:F0}  {player.State,-8} {TimeSpan.FromMilliseconds(Math.Max(0, player.Time)):mm\\:ss}     {bridge.BufferedAheadBytes / 1e6,8:F1} MB   {bytes / 1e6,7:F1} MB  {received.RepeatedBytes / 1e6,5:F1}  {(bytes - lastBytes) * 8.0 / (now - lastAt) / 1000,5:F1} Mbps");
+                var bytes = Downloaded();
+                Console.WriteLine($"{now / 1000.0,4:F0}  {player.State,-8} {TimeSpan.FromMilliseconds(Math.Max(0, player.Time)):mm\\:ss}     {bridge.BufferedAheadBytes / 1e6,8:F1} MB   {bytes / 1e6,7:F1} MB  {received.RepeatedBytes / 1e6,5:F1}  {(bytes - lastBytes) * 8.0 / (now - lastAt) / 1000,5:F1} Mbps" +
+                    (converter is null ? "" : $"   {converter.ConvertedSegments * StreamConverter.SegmentMs / 1000 / 60.0,5:F1} min ({converter.Encoder})") +
+                    // What the viewer's app would report to whoever plays the video.
+                    $"   bar to {TimeSpan.FromMilliseconds(bridge.BufferedUntilMs(player.Time, player.Length)):h\\:mm\\:ss}" +
+                    $"   measured {(guest.Received.Rate is { } measured ? $"{measured.Kbps / 1000.0:F1} Mbps{(measured.AgeMs > 3000 ? $", {measured.AgeMs / 1000} s ago" : "")}" : "nothing yet")}");
                 lastBytes = bytes; lastAt = now;
             }
-            var total = received.Bytes;
+            var total = Downloaded();
             Console.WriteLine($"RESULT downloaded {total / 1e6:F1} MB in {clock.Elapsed.TotalSeconds:F0} s ({total * 8.0 / clock.ElapsedMilliseconds / 1000:F1} Mbps average); downloaded again {received.RepeatedBytes / 1e6:F1} MB; " +
                 $"buffered ahead at the end {bridge.BufferedAheadBytes / 1e6:F1} MB; position {TimeSpan.FromMilliseconds(Math.Max(0, player.Time)):mm\\:ss}; buffering events {stalls}; cache file {(cache?.StoredBytes ?? 0) / 1e6:F1} MB");
+            if (converter is not null) Console.WriteLine($"CONVERTED {converter.ConvertedSegments * StreamConverter.SegmentMs / 1000 / 60.0:F1} min of video in {clock.Elapsed.TotalSeconds:F0} s with {converter.Encoder}, {converted!.StoredBytes / 1e6:F1} MB; failure: {converter.Failure ?? "none"}");
             player.Stop();
+            converter?.Dispose(); converted?.Dispose(); viewerPieces?.Dispose();
             timeout.Cancel(); await pump;
         }
         finally
@@ -121,26 +166,33 @@ static class BufferRunFixture
     }
 
     // A streamer whose connection carries no more than the limit.
-    private sealed class LimitedSource(IMediaSource inner, double mbps) : IMediaSource
+    private sealed class Limiter(double mbps)
     {
         private readonly object gate = new();
         private readonly Stopwatch clock = Stopwatch.StartNew();
         private double nextMs;
+        public async Task Wait(int count, CancellationToken ct)
+        {
+            if (mbps <= 0) return;
+            double wait;
+            lock (gate)
+            {
+                var now = clock.Elapsed.TotalMilliseconds;
+                nextMs = Math.Max(nextMs, now) + count * 8 / (mbps * 1000);
+                wait = nextMs - now;
+            }
+            if (wait > 1) await Task.Delay((int)wait, ct);
+        }
+    }
+    private sealed class LimitedSource(IMediaSource inner, Limiter limiter) : IMediaSource
+    {
         public SharedMedia Media => inner.Media;
         public async Task<byte[]> ReadAsync(long offset, int count, CancellationToken ct)
         {
-            if (mbps > 0)
-            {
-                double wait;
-                lock (gate)
-                {
-                    var now = clock.Elapsed.TotalMilliseconds;
-                    nextMs = Math.Max(nextMs, now) + count * 8 / (mbps * 1000);
-                    wait = nextMs - now;
-                }
-                if (wait > 1) await Task.Delay((int)wait, ct);
-            }
-            return await inner.ReadAsync(offset, count, ct);
+            // The answer comes first: a piece still being converted is waited for before it uses up the connection.
+            var bytes = await inner.ReadAsync(offset, count, ct);
+            await limiter.Wait(count, ct);
+            return bytes;
         }
     }
 }
