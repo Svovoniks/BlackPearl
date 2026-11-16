@@ -66,6 +66,14 @@ static class GuestLibraryPeerFixture
         guest.Send(new("catalog-browse", Number: 1002, Data: Wire.Serialize(new LibraryBrowseRequest(Home: true, Seed: 5))));
         await AwaitDirect(() => homePage?.Entries.Any(entry => entry.HomeSection == "continue" && entry.PositionMs == 15000) == true &&
             homePage.Entries.Any(entry => entry.HomeSection == "mystery"), "guest Home receives host resume progress and a mystery pick over the peer connection");
+        LibraryDraw? drawn = null;
+        guest.Message += message => { if (message.Type == "catalog-drawn" && message.Number == 1007) drawn = Wire.Read<LibraryDraw>(message.Data!); };
+        check(guest.StreamerDrawsTitles && !host.StreamerDrawsTitles, "the streamer tells the browsing guest it draws Home's random pick");
+        host.SetHostedLibrary([new MediaItem("direct-video", video, "Direct browsing fixture", "Movie"), new MediaItem("unstarted-video", video + ".copy", "Unstarted fixture", "Movie", 2001)]);
+        guest.Send(new("catalog-draw", Number: 1007, Data: Wire.Serialize(new LibraryDrawRequest("Movie"))));
+        await AwaitDirect(() => drawn is { Entry: { Id: "unstarted-video", Year: 2001, HomeSection: "draw" }, Matches: 1, Unseen: 1 },
+            "the guest's random pick is drawn from the streamer's unstarted titles over the peer connection");
+        host.SetHostedLibrary([new MediaItem("direct-video", video, "Direct browsing fixture", "Movie")]);
         var directView = new LibraryBrowseView(new(), 1, .25, "direct-video", "direct-video");
         guest.Send(new("catalog-follow", Data: Wire.Serialize(directView)));
         await AwaitDirect(() => host.Snapshot?.LibraryActivity?.View == directView, "guest scroll, hover, and selected video reach the host mirror");

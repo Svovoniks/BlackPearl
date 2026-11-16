@@ -3,8 +3,12 @@ namespace BlackPearl.Core;
 public record LibraryBrowseRequest(string Query = "", int Category = 0, string? ParentId = null, int? Season = null, int Page = 0, bool Home = false, int Seed = 0);
 public record SharedLibraryEntry(string Id, string Title, string Caption, string Level, int? Season, string Overview,
     string? Thumbnail = null, string Kind = "Movie", int? Episode = null, int? RuntimeMinutes = null,
-    string? HomeSection = null, long PositionMs = 0);
+    string? HomeSection = null, long PositionMs = 0, int? Year = null, int Episodes = 0);
 public record LibraryBrowsePage(SharedLibraryEntry[] Entries, int Total, int Page, string Location);
+// Home's random pick in someone else's library: Current is the entry id shown now, kept while it still matches unless Redraw.
+public record LibraryDrawRequest(string? Kind = null, MysteryLength Length = MysteryLength.Any, int Seed = 0, string? Current = null, bool Redraw = false);
+// Matches counts the unstarted titles that fit the filters, Unseen all unstarted titles; with none, Home shows its unfiltered pick.
+public record LibraryDraw(SharedLibraryEntry? Entry, int Matches, int Unseen);
 public record LibraryBrowseView(LibraryBrowseRequest Browse, int LoadedCount, double ScrollFraction = 0, string? HoveredId = null, string? SelectedId = null);
 // Where the browsing guest's mouse is: X and Y within the library grid, and CardX and CardY within the card it is over, all from 0 to 1.
 public record LibraryPointer(double X, double Y, string? CardId = null, double CardX = 0, double CardY = 0)
@@ -80,13 +84,15 @@ public static class SharedLibrary
         // All lists videos; music has its own category. An album opened from it keeps browsing within it.
         var visible = publicItems.Where(x => request.Category switch { 1 => x.Kind == "Movie", 2 => x.Kind == "Show", 3 => x.Kind == "Anime",
             LibraryCatalog.Music => x.IsMusic, _ => parent is not null || !x.IsMusic });
-        var home = request.Home ? LibraryHome.Browse(all, playback, request.Seed) : null;
+        var overview = request.Home ? LibraryHome.Overview(all, playback, request.Seed) : null;
+        var home = overview?.Entries;
+        // A series' episode count describes it on Home, as in the host's own.
+        var episodes = overview?.Unseen.ToDictionary<HomeTitle, LibraryCard, int>(title => title.Card, title => title.Episodes, ReferenceEqualityComparer.Instance);
         var cards = home?.Select(entry => entry.Card).ToList() ?? LibraryCatalog.Search(visible, request.Query, parent is null ? null : LibraryIdentity.ShowKey(publicItems.First(x => x.Id == parent.Id)), parent?.Kind, request.Season);
         var page = Math.Min(request.Page, Math.Max(0, (cards.Count - 1) / PageSize));
-        var result = new LibraryBrowsePage(cards.Skip(page * PageSize).Take(PageSize).Select((c, index) => new SharedLibraryEntry(c.Media.Id,
-            Limit(string.IsNullOrWhiteSpace(c.DisplayTitle) ? c.Media.Title : c.DisplayTitle, 180), Limit(c.Caption, 240), c.Level, c.Season, Limit(c.Media.DetailOverview, 400),
-            thumbnail?.Invoke(c.Poster) is { Length: <= 5400 } image ? image : null, c.Media.Kind, c.Media.Episode, c.Media.RuntimeMinutes,
-            home?[page * PageSize + index].Section, home?[page * PageSize + index].PositionMs ?? 0)).ToArray(), cards.Count, page, Limit(location, 240));
+        var result = new LibraryBrowsePage(cards.Skip(page * PageSize).Take(PageSize).Select((c, index) => Entry(c, thumbnail) with
+            { HomeSection = home?[page * PageSize + index].Section, PositionMs = home?[page * PageSize + index].PositionMs ?? 0,
+              Episodes = episodes?.GetValueOrDefault(c) ?? 0 }).ToArray(), cards.Count, page, Limit(location, 240));
         // The data JSON is nested in the wire envelope: escaped Unicode counts twice.
         // Preserve posters and titles, shortening optional summaries to fit the channel.
         for (var limit = 200; limit >= 0; limit = limit == 0 ? -1 : limit / 2)
@@ -101,5 +107,20 @@ public static class SharedLibrary
             System.Text.Encoding.UTF8.GetByteCount(Wire.Serialize(new WireMessage("catalog-page", Number: long.MaxValue, Data: Wire.Serialize(result)))) >= 62000; index--)
             result.Entries[index] = result.Entries[index] with { Thumbnail = null };
         return result;
+    }
+    private static SharedLibraryEntry Entry(LibraryCard c, Func<string?, string?>? thumbnail) => new(c.Media.Id,
+        Limit(string.IsNullOrWhiteSpace(c.DisplayTitle) ? c.Media.Title : c.DisplayTitle, 180), Limit(c.Caption, 240), c.Level, c.Season, Limit(c.Media.DetailOverview, 400),
+        thumbnail?.Invoke(c.Poster) is { Length: <= 5400 } image ? image : null, c.Media.Kind, c.Media.Episode, c.Media.RuntimeMinutes, Year: c.Media.Year);
+    // Draws Home's random pick from the host's unstarted titles, the same way the host's own Home does.
+    public static LibraryDraw Draw(IEnumerable<MediaItem> source, LibraryDrawRequest request, Func<string?, string?>? thumbnail = null,
+        IReadOnlyDictionary<string, string>? playback = null)
+    {
+        if (request.Kind is not null && !LibraryHome.Kinds.Contains(request.Kind) || !Enum.IsDefined(request.Length) || request.Current?.Length > 128)
+            throw new InvalidDataException("Invalid random pick");
+        var unseen = LibraryHome.Overview(source, playback).Unseen;
+        var current = unseen.FirstOrDefault(title => title.Card.Media.Id == request.Current) is { } shown ? LibraryIdentity.TitleKey(shown.Card.Media) : null;
+        var pick = LibraryHome.Pick(unseen, request.Kind, request.Length, request.Seed, current, request.Redraw);
+        return new(pick is null ? null : Entry(pick.Card, thumbnail) with { HomeSection = "draw", Episodes = pick.Episodes },
+            unseen.Count(title => LibraryHome.Matches(title, request.Kind, request.Length)), unseen.Length);
     }
 }

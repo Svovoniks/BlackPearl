@@ -14,7 +14,7 @@ public sealed partial class RoomClient
     private bool HandleLibraryInteraction(string sender, WireMessage message)
     {
         if (message.Type == "session-artwork") { SendSessionArtwork(sender, message); return true; }
-        if (message.Type is not ("catalog-follow" or "catalog-artwork" or "catalog-watch")) return false;
+        if (message.Type is not ("catalog-follow" or "catalog-artwork" or "catalog-watch" or "catalog-draw")) return false;
         void Fail(Exception ex, string fallback)
         {
             PlaybackDiagnostics.Record("library-interaction-error", new { room = diagnosticId, command = message.Type, error = ex.GetType().Name });
@@ -33,6 +33,17 @@ public sealed partial class RoomClient
                     if (!source.Any(item => item.Id == id && item.Available && !item.IsVirtual && !item.IsExtra)) throw new InvalidDataException("Title is no longer shared");
                 coordinator!.DescribeLibrary(page.Location, view.Browse.Query, clock.Now);
                 coordinator.DescribeLibraryView(view, clock.Now); PublishHostState();
+            }
+            else if (message.Type == "catalog-draw")
+            {
+                var request = Wire.Read<LibraryDrawRequest>(message.Data ?? "{}");
+                var (thumbnail, store) = (LibraryThumbnail, settings);
+                // Watch progress reads SQLite and thumbnails read files; draw off the control loop.
+                if (!Offload(() => SharedLibrary.Draw(source, request, thumbnail, store?.PlaybackSettings()), draw =>
+                {
+                    if (!coordinator!.LibraryBrowsing || coordinator.LibraryActivity?.Peer != sender) throw new InvalidDataException("Library browsing ended. Try again.");
+                    SendPeer(sender, new("catalog-drawn", Number: message.Number, Data: Wire.Serialize(draw)));
+                }, ex => Fail(ex, "Their library could not be loaded."))) Fail(new IOException("Library work queue is full"), "Their app is busy. Try again shortly.");
             }
             else if (message.Type == "catalog-artwork")
             {

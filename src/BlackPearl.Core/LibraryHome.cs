@@ -80,6 +80,13 @@ public static class LibraryHome
             _ => true
         };
     }
+    // Keeps the current pick while it still matches, unless another is asked for; a new draw avoids the current pick.
+    public static HomeTitle? Pick(IEnumerable<HomeTitle> pool, string? kind, MysteryLength length, int seed, string? current, bool redraw)
+    {
+        var titles = pool as IReadOnlyCollection<HomeTitle> ?? pool.ToArray();
+        return (redraw || current is null ? null : titles.FirstOrDefault(title => LibraryIdentity.TitleKey(title.Card.Media) == current && Matches(title, kind, length)))
+            ?? Draw(titles, kind, length, seed, redraw ? current : null);
+    }
     // Draws one unstarted title, avoiding the current pick when another match exists.
     public static HomeTitle? Draw(IEnumerable<HomeTitle> pool, string? kind, MysteryLength length, int seed, string? avoid = null)
     {
