@@ -216,6 +216,17 @@ static class HostLibraryBrowseChecks
             Check(follow.Visibility == Visibility.Collapsed && activityText.Text == "People in the room can browse your library", "Stop following ends a follow that is waiting");
             Activity(withOther, snapshot.LibraryActivity! with { View = guestView });
             Check(follow.Content.ToString() == "Follow Guest", "a stopped follow does not pick up again when the guest comes back");
+            // The streaming role moving away and back ends following, whether or not a refresh ran while it was away.
+            void Role(bool host) => typeof(RoomClient).GetProperty("Identity")!.SetValue(client, new Welcome("fixture", "host", host, [], false));
+            Call("BrowseWithGuest", window, new RoutedEventArgs()); Activity(withOther, null);
+            Role(false); Activity(withOther, null); Role(true); Activity(withOther, null);
+            Check(follow.Visibility == Visibility.Collapsed && activityText.Text == "People in the room can browse your library", "losing the streaming role ends following");
+            Activity(withOther, snapshot.LibraryActivity! with { View = guestView });
+            Check(follow.Content.ToString() == "Follow Guest" && !Field<bool>("followGuest"),
+                "a follow does not resume after the streaming role comes back");
+            Call("BrowseWithGuest", window, new RoutedEventArgs()); Activity(withOther, null);
+            Call("OnRoleChanged", client, true); Activity(withOther, snapshot.LibraryActivity! with { View = guestView });
+            Check(follow.Content.ToString() == "Follow Guest" && !Field<bool>("followGuest"), "a role change ends a waiting follow even without a refresh in between");
         }
         finally
         {

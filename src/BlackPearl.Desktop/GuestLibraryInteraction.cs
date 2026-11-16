@@ -240,10 +240,12 @@ public partial class MainWindow
     private LibraryBrowseView? mirroredView;
     private readonly LibraryCardCollection mirroredCards = [];
     private bool FollowingGuest => room?.Identity?.Host == true && room.Snapshot?.LibraryActivity?.View is not null && followGuest;
-    private void ResetGuestMirror() { followGuest = false; followedPeer = null; mirroredView = null; mirroredPointer = null; mirroredCards.Clear(); ClearHostArtworkRequests(); PlaceGuestPointer(); }
+    private void ResetGuestMirror() { EndGuestFollowing(); mirroredCards.Clear(); ClearHostArtworkRequests(); PlaceGuestPointer(); }
+    // Following belongs to one turn holding the streaming role: a member who gets the role back later starts unfollowed.
+    private void EndGuestFollowing() { followGuest = false; followedPeer = followedName = null; mirroredView = null; mirroredPointer = null; }
     private void RefreshGuestMirror(LibraryBrowseActivity? activity)
     {
-        if (room?.Identity?.Host != true) return;
+        if (room?.Identity?.Host != true) { EndGuestFollowing(); return; }
         // A followed guest who steps out of the library, to Settings or the player, gives up the browsing slot. Following
         // waits for them and picks up again when they browse again; it ends if someone else takes the slot, browsing is
         // turned off, or they leave the room.
