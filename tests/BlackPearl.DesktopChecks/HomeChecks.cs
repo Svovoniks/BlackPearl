@@ -231,6 +231,23 @@ static class HomeChecks
                 Sent("catalog-draw").Count == 0, "a failed guest draw keeps the card and Home, and is not asked again on every refresh");
             Control<RadioButton>("MysteryAnything").IsChecked = true;
             await Answer();
+            // A draw that cannot be sent, here because the room's control queue is full, is not waited on for 15 seconds.
+            var writer = events.GetType().GetProperty("Writer")!.GetValue(events)!;
+            var filler = typeof(RoomClient).GetNestedType("RoomEvent", BindingFlags.NonPublic)!.GetConstructors().Single();
+            var tryWrite = writer.GetType().GetMethod("TryWrite")!;
+            while ((bool)tryWrite.Invoke(writer, [filler.Invoke(filler.GetParameters().Select(p => p.Name == "Kind" ? "filler" : p.DefaultValue).ToArray())])!) { }
+            var beforeFull = Field<LibraryCardView?>("homeMystery");
+            ((Panel)Control<RadioButton>("MysteryAnime").Parent).Children.OfType<RadioButton>().Single(choice => choice.Tag as string == "Show").IsChecked = true;
+            Check(typeof(MainWindow).GetField("guestDrawPending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window) is null &&
+                ReferenceEquals(Field<LibraryCardView?>("homeMystery"), beforeFull) && Control<Button>("HomeMysteryPlay").IsEnabled,
+                "a guest draw that cannot be sent keeps the card instead of waiting on an answer");
+            Sent("catalog-draw");
+            Call("RenderGuestHome");
+            var resent = await Answer();
+            Check(Wire.Read<LibraryDrawRequest>(resent.Data!) is { Kind: "Show" } && Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches",
+                "the next refresh sends the draw that could not be sent");
+            Control<RadioButton>("MysteryAnything").IsChecked = true;
+            await Answer();
             Call("OpenHomeTitle", paused);
             Check(Field<string>("currentPage") == "Details" && Field<bool>("guestHomeResume") && Control<Button>("DetailPlay").Content.Equals("Play in room"),
                 "guest continue watching opens room playback details with resume intent");

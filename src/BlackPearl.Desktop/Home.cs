@@ -269,8 +269,13 @@ public partial class MainWindow
             animate || guestDrawPending?.Animate == true, Environment.TickCount64);
         guestDrawPending = request;
         // A new draw number is Draw another; a new filter or visit keeps the current pick while it still fits.
-        TryLibraryCommand(new("catalog-draw", Number: request.Number, Data: Wire.Serialize(new LibraryDrawRequest(mysteryKind, mysteryLength, mysteryDraw,
-            guestDraw?.Pick?.Card.Media.Id, guestDraw is { } previous && previous.Seed != mysteryDraw))));
+        // One that could not be sent is not waited on: the card shows what it had, and the next refresh asks again.
+        try
+        {
+            room.Send(new("catalog-draw", Number: request.Number, Data: Wire.Serialize(new LibraryDrawRequest(mysteryKind, mysteryLength, mysteryDraw,
+                guestDraw?.Pick?.Card.Media.Id, guestDraw is { } previous && previous.Seed != mysteryDraw))));
+        }
+        catch (System.IO.IOException ex) { guestDrawPending = null; SetStatus(ex.Message); }
     }
     private void ReceiveGuestDraw(WireMessage message)
     {
