@@ -135,11 +135,12 @@ public sealed partial class RoomClient : IAsyncDisposable
     {
         ApplyHostedFile(PrepareHostedFile(path, title));
     }
-    public static HostedFileSelection PrepareHostedFile(string path, string title)
+    // id: the id the video had, when the same video is started again after a reconnect.
+    public static HostedFileSelection PrepareHostedFile(string path, string title, string? id = null)
     {
         using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read)) { }
         var preparedAssets = new Dictionary<string, IMediaSource>();
-        var file = new FileMediaSource(path, title);
+        var file = new FileMediaSource(path, title, id);
         if (file.Media.Length <= 0) throw new InvalidDataException("Video file is empty");
         var stem = Path.GetFileNameWithoutExtension(path);
         foreach (var sidecar in Directory.EnumerateFiles(Path.GetDirectoryName(Path.GetFullPath(path))!))

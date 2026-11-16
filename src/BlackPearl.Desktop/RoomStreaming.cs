@@ -103,7 +103,7 @@ public partial class MainWindow
             oldBridge?.CancelPendingReads();
             await Task.WhenAll(StopNativePlayback(), oldBridge is null ? Task.CompletedTask : oldBridge.DisposeAsync().AsTask());
             if (room != client || client.Snapshot?.Media is not null) return;
-            CloseStreamCache();
+            // What was buffered stays a while: a streamer who lost the connection starts the video again (CloseIdleBuffers).
             ResetRoomTracks();
             if (pictureInPicture) SetPictureInPicture(false, openPlayer: false);
             SetAudioPlayback(false);

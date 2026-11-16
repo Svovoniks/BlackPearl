@@ -247,13 +247,17 @@ at the previous position. Canceled seeks stop transfers that have no
 remaining consumers. VLC's network cache is chosen per movie from the measured
 round trip (1.5–5 s), so starting and seeking wait only for that short buffer.
 A viewer keeps the room's video in a temporary file
-(`%TEMP%\BlackPearl\stream-cache\*.stream`), deleted when the video ends, the
-viewer leaves the room, or the app exits. Once the first frames play, read-ahead
+(`%TEMP%\BlackPearl\stream-cache\*.stream`), deleted two minutes after the
+player stops reading from it, or when the viewer leaves the room or the app exits. Once the first frames play, read-ahead
 downloads the rest of the video past the playback position, also while paused,
 with up to 16 reads in flight. It starts no read while the player is itself
 waiting for video. A seek outside the buffered video cancels its reads; it
 continues from the new position once playback advances, or after a second when
-the video is paused. A reconnect that returns to the same video keeps the file.
+the video is paused. The two minutes are for the video to come back
+(`CloseIdleBuffers`): the same video opened again continues with the file. That
+covers a viewer's own reconnect to the room, during which the time does not
+count, and a streamer who lost the connection, left the room with it, and starts
+the video again on returning.
 While the drive has less than 4 GB free, or the file cannot be created, the
 buffer is held in memory instead: 30 seconds of video (estimated from the
 average bitrate plus 25%, capped at 256 MiB) plus 16 MiB of recently read data.
@@ -298,10 +302,11 @@ somebody asks for, so a seek converts from there; it holds five minutes ahead of
 the furthest request. Changing the quality, audio track or subtitles makes a new
 stream, which viewers reopen at the room's position. Apps from before converted
 streams ignore the offer and are served the file. Viewers of a converted stream
-cannot change tracks. A viewer's pieces belong to the stream's id and outlive the
-player's connection to it, so a viewer who reconnects to the room continues with
-what it had downloaded. When the streamer reconnects, its conversion starts again
-as a new stream, and viewers download that one from the start.
+cannot change tracks. A viewer's pieces belong to the stream's id and wait two
+minutes for it like the file's buffer, so a viewer who reconnects to the room
+continues with what it had downloaded. A streamer who reconnects keeps its
+conversion meanwhile, starts the video again under the id it had, and offers the
+same stream, so viewers continue with their pieces then too.
 The menu shows what sending the file takes (its size over its length) beside
 Original. Each viewer's app measures **how fast the video reaches it**: the bytes
 that arrive over the time it has at least eight reads under way (`TransferMeter`),

@@ -1613,6 +1613,7 @@ public partial class MainWindow : Window
             PlayerOverlay.Cursor = Cursors.None;
         }
         UpdateRoomPlaybackStatus();
+        CloseIdleBuffers();
         if (player is null || nativeStopCount > 0) return;
         FitPictureInPictureToVideo();
         PollBufferedRecovery();
@@ -2045,7 +2046,8 @@ public partial class MainWindow : Window
         pendingSeek = null; seeking = false; playbackPause.Clear(); playbackIntent.Clear(); appliedGeneration = readyGeneration = -1; ++loadGeneration; var old = room; room = null; target = null; loadedMedia = null; ready = false;
         mediaLoadCancellation?.Cancel();
         bridge?.CancelPendingReads();
-        StopConversion();
+        // A conversion is kept while this app reconnects, to be offered again as the same stream.
+        if (!reconnecting) StopConversion();
         ResetRoomTracks();
         var disconnect = old is null ? Task.CompletedTask : Task.Run(async () => await old.DisposeAsync());
         playingItem = null;

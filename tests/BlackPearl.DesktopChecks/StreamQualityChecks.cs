@@ -136,6 +136,20 @@ static class StreamQualityChecks
             var head = await riley.ReadStreamAsync(first, StreamConverter.Resource(first.Id, 2), 0, 376, limit.Token);
             check(size > 20000 && size % 188 == 0 && head[0] == 0x47 && head[188] == 0x47, $"a viewer reads a converted piece from the app that plays the video ({size / 1000} KB)");
 
+            // Sam's own connection to the room drops and comes back. The conversion is kept and offered again as the
+            // stream it was, so Riley, who stayed, continues with the pieces already downloaded.
+            var conversion = (StreamConverter)Field("streamConverter")!; var convertedBefore = conversion.ConvertedSegments;
+            await ((Task)Call("ReconnectRoomAsync", own)!).WaitAsync(TimeSpan.FromSeconds(60));
+            await Wait(() => Field("room") is RoomClient { IsConnected: true } back && back != own && (bool)Field("ready")! && back.Snapshot?.Stream == first && ReferenceEquals(Field("streamConverter"), conversion) && back.HostedStream == conversion,
+                "after the streamer's own reconnect, the conversion it kept is offered again as the same stream", 45);
+            own = (RoomClient)Field("room")!;
+            await Wait(() => riley.Snapshot?.Stream == first && riley.Snapshot.Media?.Id == first.MediaId, "a viewer who stayed is offered the stream it already had");
+            var again = await riley.ReadStreamAsync(first, StreamConverter.Resource(first.Id, 2), 0, 376, limit.Token);
+            await Task.Delay(2500); Call("PlaybackTickCore");
+            Console.WriteLine($"Streamer reconnect: {convertedBefore} pieces converted before, {conversion.ConvertedSegments} after; stream {(own.Snapshot?.Stream?.Id == first.Id ? "kept" : "replaced")}");
+            check(again.AsSpan().SequenceEqual(head) && conversion.ConvertedSegments >= convertedBefore && conversion.Failure is null && own.Snapshot?.Stream == first && ReferenceEquals(Field("streamConverter"), conversion),
+                "the pieces served after the reconnect are the ones converted before it, and the stream stays once the tracks have settled");
+
             // Changing the quality replaces the stream; Original goes back to the file.
             Choose("720p");
             await Wait(() => own.Snapshot?.Stream is { Quality: "720p", Height: 720 } replaced && replaced.Id != first.Id && riley.Snapshot?.Stream?.Id == replaced.Id, "choosing another quality replaces the stream for everyone");
@@ -307,6 +321,24 @@ static class StreamQualityChecks
                 "the pieces downloaded before the reconnect are the ones played after it");
             host.HostedStream = converter;
 
+            // Riley's connection drops: Riley leaves the room and the film goes with it. Sam keeps what was downloaded.
+            // Riley returns, starts the film again and offers the same stream, serving none of it.
+            var roomCode = host.Identity!.Room;
+            await host.DisposeAsync(); others.Remove(host);
+            await Wait(() => Field("bridge") is null && Field("loadedMedia") is null, "when the streamer leaves, the player empties", 20);
+            check(Field("streamPieces") is ValueTuple<string, SegmentStore> waiting && ReferenceEquals(waiting.Item2, pieces) && pieces.Accepting && pieces.Count == before.Count,
+                "what was downloaded waits for the streamer to come back");
+            host = new RoomClient(); others.Add(host);
+            await host.ConnectAsync(url, "Riley", roomCode);
+            await host.StartStreamAsync(RoomClient.PrepareHostedFile(film, "Riley's film", offered.MediaId), true, 20000);
+            host.Send(new("stream", Data: Wire.Serialize(offered)));
+            await Wait(() => Field("bridge") is MediaBridge { PlaysConvertedStream: true } && (bool)Field("ready")! && (string?)Field("loadedStream") == offered.Id, "when the streamer returns with the same stream, the viewer opens it", 45);
+            HostReady();
+            await Wait(() => player.IsPlaying && player.Time is > 20500 and < 40000 && SliderBuffer.GetFraction(timeline) == 1, "and plays on from what it kept, shown as buffered to the end, with nobody serving it", 45);
+            check(Field("streamPieces") is ValueTuple<string, SegmentStore> returned && ReferenceEquals(returned.Item2, pieces) && pieces.Count == before.Count && pieces.StoredBytes == before.Bytes,
+                "the pieces downloaded before the streamer left are the ones played after it returns");
+            host.HostedStream = converter;
+
             // The room seeks, and the viewer follows on the converted stream.
             host.Send(new("playback", Data: Wire.Serialize(new PlaybackState(0, offered.MediaId, true, 40000, 0, Seek: true))));
             await Task.Delay(300); HostReady();
@@ -315,7 +347,14 @@ static class StreamQualityChecks
             // The streamer goes back to the file: the viewer reopens it and carries on from the room's position.
             host.HostedStream = null; host.Send(new("stream"));
             await Wait(() => Field("bridge") is MediaBridge { PlaysConvertedStream: false } && (bool)Field("ready")! && Field("loadedStream") is null, "when the stream is withdrawn the viewer opens the file");
-            check(Field("streamPieces") is null && !pieces.Accepting, "and the stream's pieces are let go");
+            // The pieces of the stream that was withdrawn wait a while like any buffer, in case it is offered again.
+            check(Field("streamPieces") is ValueTuple<string, SegmentStore> idle && ReferenceEquals(idle.Item2, pieces), "the stream's pieces wait in case it is offered again");
+            typeof(MainWindow).GetField("bufferGraceMs", flags)!.SetValue(window, 0);
+            Call("CloseIdleBuffers"); Call("CloseIdleBuffers");
+            typeof(MainWindow).GetField("bufferGraceMs", flags)!.SetValue(window, 120000);
+            check(Field("streamPieces") is null && Field("streamCache") is StreamCache { Accepting: true }, "and are let go when it is not, while the file's buffer, which is being read, stays");
+            // The file itself is closed on another thread, because deleting gigabytes takes a while.
+            await Wait(() => !pieces.Accepting, "the pieces' file is closed", 10);
             HostReady();
             await Wait(() => player.IsPlaying && player.Time is > 40000 and < 59000, "and playback continues from where the room is");
             Call("PlaybackTickCore");

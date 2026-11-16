@@ -51,9 +51,11 @@ public partial class MainWindow
         PillStrip.SetShown(QualityPill, streaming || stream is not null);
         // The bar is as wide as its other pills need. Where the window has room it grows by this pill's width, so the
         // pills that were there keep their place; where it has none, this pill is the first to fold.
+        // This app's own connection to the room is being replaced. The conversion waits for the video to be started again.
+        var returning = roomReconnect is not null || room is { IsConnected: false };
         var dockWidth = PlaybackDockWidth + (PillStrip.GetShown(QualityPill) ? QualityPill.DesiredSize.Width > 0 ? Math.Ceiling(QualityPill.DesiredSize.Width) : 100 : 0);
         if (PlaybackDock.MaxWidth != dockWidth) PlaybackDock.MaxWidth = dockWidth;
-        if (media is null) { if (convertedFrom is not null || streamPreparation is not null) StopConversion(); RefreshQualityOffer(null, null); return; }
+        if (media is null) { if (!returning && (convertedFrom is not null || streamPreparation is not null)) StopConversion(); RefreshQualityOffer(null, null); return; }
         var notice = qualityNotice is { } said && said.MediaId == media.Id ? said : ((string, string Text, bool Failed)?)null;
 
         var hostedPath = streaming ? (room!.HostedMedia as ILocalMediaSource)?.LocalPath : null;
@@ -100,7 +102,14 @@ public partial class MainWindow
                 "A lower quality is converted on this PC while the video plays. Everyone else receives the picture with the selected audio track, and the selected subtitles drawn into it.") + speed;
         RefreshQualityOffer(media, Advise(10000));
 
-        if (!streaming) { if (convertedFrom is not null || streamPreparation is not null) StopConversion(); return; }
+        if (!streaming) { if (!returning && (convertedFrom is not null || streamPreparation is not null)) StopConversion(); return; }
+        // A conversion kept through this app's reconnect is offered again as the stream it was, so viewers continue
+        // with the pieces they have. If the tracks turn out different this time, a new conversion replaces it below.
+        if (stream is null && streamConverter is { Failure: null } keptConversion && streamPreparation is null && convertedFrom?.MediaId == media.Id && room!.HostedStream != keptConversion)
+        {
+            room.HostedStream = keptConversion; SendStream(room, keptConversion.Stream);
+            PlaybackDiagnostics.Record("stream-quality", new { state = "offered again", quality = keptConversion.Stream.Quality, converted = keptConversion.ConvertedSegments });
+        }
         var now = Environment.TickCount64;
         if (streamedVideo.MediaId != media.Id) streamedVideo = (media.Id, now, false);
         // As a video starts, viewers are told a converted stream is coming, so they wait for it instead of starting on
