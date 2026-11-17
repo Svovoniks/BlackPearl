@@ -92,8 +92,10 @@ public sealed partial class RoomClient : IAsyncDisposable
     // The converted copy of the hosted video that viewers are offered instead of the file, if any.
     public StreamConverter? HostedStream { get; set; }
     // What this app accepts from viewers while it plays the room's video, told to them with the room's state.
-    private const int ReceiveRateFeature = 1, HostFeatures = ReceiveRateFeature;
+    // DrawFeature: draws Home's random pick from its library for the browsing viewer (catalog-draw).
+    private const int ReceiveRateFeature = 1, DrawFeature = 2, HostFeatures = ReceiveRateFeature | DrawFeature;
     private int hostFeatures;
+    public bool StreamerDrawsTitles => Identity?.Host == false && (Volatile.Read(ref hostFeatures) & DrawFeature) != 0;
     private readonly ConcurrentDictionary<string, (int Kbps, long At)> receiveRates = new();
     // How fast the room's video reaches this viewer, measured while the app was asking for more than arrived.
     public (int Kbps, long AgeMs)? ReceiveRate => Identity?.Host == false && hostPeer is { } playing && peers.TryGetValue(playing, out var source) ? source.Received.Rate : null;
@@ -283,7 +285,7 @@ public sealed partial class RoomClient : IAsyncDisposable
             QueueDiscovery(message.Type == "room-name" ? new("rename", Text: message.Text) : message);
             return;
         }
-        if (message.Type is "tracks" or "catalog-follow" or "catalog-pointer" or "catalog-artwork" or "catalog-watch" or "catalog-view" or "catalog-browse" or "catalog-release" or "catalog-renew" or "catalog-permission" or "media" or "stream" or "controls" or "last-session" or "session-artwork" or "artwork-ack" or "queue" or "playback" or "ready" or "buffering")
+        if (message.Type is "tracks" or "catalog-follow" or "catalog-pointer" or "catalog-artwork" or "catalog-watch" or "catalog-view" or "catalog-draw" or "catalog-browse" or "catalog-release" or "catalog-renew" or "catalog-permission" or "media" or "stream" or "controls" or "last-session" or "session-artwork" or "artwork-ack" or "queue" or "playback" or "ready" or "buffering")
         {
             if (Identity?.Host != true && !directConnected.Task.IsCompletedSuccessfully)
                 throw new IOException("Still connecting to whoever is streaming. Try again in a moment.");
@@ -738,7 +740,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                         Status?.Invoke("Connection to the stream restored");
                     }
                     break;
-                case "catalog-artwork-chunk": case "session-artwork-chunk": case "catalog-started": case "catalog-page": case "catalog-error": case "notice": case "error": Message?.Invoke(message); break;
+                case "catalog-artwork-chunk": case "session-artwork-chunk": case "catalog-started": case "catalog-page": case "catalog-drawn": case "catalog-error": case "notice": case "error": Message?.Invoke(message); break;
             }
         }
     }

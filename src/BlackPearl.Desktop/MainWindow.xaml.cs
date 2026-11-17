@@ -1368,7 +1368,8 @@ public partial class MainWindow : Window
                 // Someone looking through this library picked a title, and this app started it for the room.
                 if (room.Identity?.Host == true) selected = playingItem = items.FirstOrDefault(item => item.Id == message.Target);
                 ShowPage("Room"); break;
-            case "catalog-page": case "catalog-error": if (!ReceiveArtworkError(message)) ReceiveHostLibrary(message); break;
+            case "catalog-page": case "catalog-error": if (!ReceiveArtworkError(message) && !ReceiveGuestDrawError(message)) ReceiveHostLibrary(message); break;
+            case "catalog-drawn": ReceiveGuestDraw(message); break;
             case "welcome": RememberCurrentRoom(); RefreshPlayerEmpty(); break;
             // The streaming role moved to this app, or away from it.
             case "role": OnRoleChanged(room, message.Number == 1); break;

@@ -50,6 +50,8 @@ public sealed class LibraryCardView : INotifyPropertyChanged
     public bool IsAlbum => IsMusic && Card.Level == "series";
     public bool HasPlaybackProgress => !IsRemote && PlaybackLabel.Length > 0;
     public bool IsRemote { get; private set; }
+    // A series' episode count, from a host's Home; this app's own titles count theirs on Home.
+    public int RemoteEpisodes { get; private set; }
     public string? HomeSection { get; set; }
     public long HomePosition { get; set; }
     // Home shows a show's name on its next episode; the description lines are set by Home.
@@ -91,10 +93,10 @@ public sealed class LibraryCardView : INotifyPropertyChanged
     public LibraryCardView(LibraryCard card) { Card = card; posterVersion = Version(card.Poster); }
     public static LibraryCardView FromSharedEntry(SharedLibraryEntry entry) => new(entry);
     private LibraryCardView(SharedLibraryEntry entry) : this(new LibraryCard(entry.Title, entry.Caption, null,
-        new MediaItem(entry.Id, "", entry.Title, entry.Kind, Season: entry.Season, Episode: entry.Episode,
+        new MediaItem(entry.Id, "", entry.Title, entry.Kind, entry.Year, Season: entry.Season, Episode: entry.Episode,
             Overview: entry.Overview, RuntimeMinutes: entry.RuntimeMinutes), entry.Level, entry.Season))
     {
-        IsRemote = true;
+        IsRemote = true; RemoteEpisodes = entry.Episodes;
         HomeSection = entry.HomeSection; HomePosition = entry.PositionMs;
         SetPlayback(entry.PositionMs, false);
         if (entry.HomeSection == "continue" && entry.PositionMs < 10000) SetPlaybackLabel("Next episode");

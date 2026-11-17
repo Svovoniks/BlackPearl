@@ -127,6 +127,7 @@ internal sealed class HostRoomCoordinator(string host)
             case "catalog-artwork" when LibraryActivity?.Peer == sender && LibraryBrowsing:
             case "catalog-watch" when LibraryActivity?.Peer == sender && LibraryBrowsing:
             case "catalog-view" when LibraryActivity?.Peer == sender && LibraryBrowsing:
+            case "catalog-draw" when LibraryActivity?.Peer == sender && LibraryBrowsing:
                 return true;
             case "catalog-browse" when sender != host && LibraryBrowsing:
                 if (LibraryActivity is not null && LibraryActivity.Peer != sender) return false;

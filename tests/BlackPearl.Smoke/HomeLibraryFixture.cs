@@ -63,6 +63,28 @@ static class HomeLibraryFixture
             "mystery draws respect type and length, and offer the only match again rather than nothing");
         var draws = Enumerable.Range(0, 20).Select(seed => LibraryHome.Draw(pool, null, MysteryLength.Any, seed, LibraryIdentity.ShowKey(many[0]))).ToArray();
         check(draws.All(title => title is not null && title.Card.Media.Id != "film0"), "drawing another card avoids the current pick");
+        // A guest's draw in the host's library: the host's own unstarted titles, the same filters and the same pick as the host's Home.
+        var shared = SharedLibrary.Draw(many, new(Kind: "Anime", Length: MysteryLength.Evening, Seed: 3));
+        check(shared is { Entry.HomeSection: "draw", Entry.Kind: "Anime", Matches: 7, Unseen: 30 } && shared.Entry.RuntimeMinutes <= 120 &&
+            shared.Entry.Id == LibraryHome.Draw(pool, "Anime", MysteryLength.Evening, 3)?.Card.Media.Id,
+            "a guest's draw matches the host's own draw for the same filters and draw number");
+        check(SharedLibrary.Draw(many, new(Kind: "Anime", Seed: 99, Current: shared.Entry!.Id)).Entry?.Id == shared.Entry.Id &&
+            SharedLibrary.Draw(many, new(Kind: "Anime", Length: MysteryLength.Evening, Seed: 99, Current: shared.Entry.Id, Redraw: true)).Entry?.Id is { } redrawn && redrawn != shared.Entry.Id,
+            "a guest's pick stays while it still fits a new filter, and Draw another changes it");
+        check(SharedLibrary.Draw(items, new(Kind: "Movie", Length: MysteryLength.LongNight), playback: playback) is { Entry: null, Matches: 0, Unseen: 3 } &&
+            SharedLibrary.Draw([], new()) is { Entry: null, Unseen: 0 }, "a guest's draw says when nothing matches, and when nothing is unstarted");
+        var series = SharedLibrary.Draw(items, new(Kind: "Show"), playback: playback);
+        check(series.Entry is { Id: "new", Level: "series", Episodes: 1 } && !Wire.Serialize(series).Contains("private"),
+            "a guest's drawn series carries its episode count and no host paths");
+        check(SharedLibrary.Browse(items, request, playback: playback).Entries.Single(entry => entry.HomeSection == "suggestions" && entry.Id == "new").Episodes == 1 &&
+            SharedLibrary.Browse(many, request).Entries.All(entry => entry.Year is null) && SharedLibrary.Browse([new("dated", "", "Dated", "Movie", 1999)], request).Entries[0].Year == 1999,
+            "guest Home entries carry episode counts and years like the host's Home");
+        foreach (var invalid in new LibraryDrawRequest[] { new(Kind: "Music"), new(Length: (MysteryLength)9), new(Current: new string('x', 129)) })
+        {
+            var rejected = false;
+            try { SharedLibrary.Draw(many, invalid); } catch (InvalidDataException) { rejected = true; }
+            check(rejected, "an invalid draw request is rejected: " + invalid);
+        }
         var pageCount = (int)Math.Ceiling((LibraryHome.Kinds.Length * LibraryHome.SuggestionsPerKind + 1) / (double)SharedLibrary.PageSize);
         var pages = Enumerable.Range(0, pageCount).Select(page => SharedLibrary.Browse(many, request with { Page = page })).ToArray();
         check(pages.Sum(page => page.Entries.Length) == LibraryHome.Kinds.Length * LibraryHome.SuggestionsPerKind + 1 && pages.SelectMany(page => page.Entries).Count(entry => entry.HomeSection == "mystery") == 1,
