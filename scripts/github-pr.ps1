@@ -1,8 +1,5 @@
 # Pull request, check record and build cache helpers shared by ship.ps1 and review-pr.ps1. Dot-source only.
-# The repository was Svovoniks/WatchRoom before it became Svovoniks/BlackPearl. Use-Repository picks whichever name
-# exists, so the scripts work on both sides of the rename. GitHub redirects the old name for reads only.
 $repository = 'Svovoniks/BlackPearl'
-$formerRepository = 'Svovoniks/WatchRoom'
 $apiRoot = "https://api.github.com/repos/$repository"
 $buildWorkflow = 'Build and release'
 # Review verdicts are PR comments carrying this marker. Every account here is the same
@@ -75,17 +72,6 @@ function Restore-BuildCache {
             Remove-Item -LiteralPath $entry.Path -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-}
-function Use-Repository {
-    $name = $repository
-    try { $name = (Get-PublicJson "https://api.github.com/repos/$repository").full_name }
-    catch {
-        if ($_.Exception.Response.StatusCode.value__ -ne 404) { throw }
-        $name = (Get-PublicJson "https://api.github.com/repos/$formerRepository").full_name
-    }
-    if ($name -cnotin @($repository, $formerRepository)) { throw "Unexpected repository $name." }
-    $script:repository = $name
-    $script:apiRoot = "https://api.github.com/repos/$name"
 }
 function Get-PublicJson {
     param([string]$Url)

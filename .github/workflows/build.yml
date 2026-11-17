@@ -156,8 +156,7 @@ jobs:
       - name: Publish Windows app
         shell: pwsh
         env:
-          # The secret may still have its name from before the app was renamed from Watchroom.
-          BLACKPEARL_TMDB_API_KEY: ${{ secrets.BLACKPEARL_TMDB_API_KEY || secrets.WATCHROOM_TMDB_API_KEY }}
+          BLACKPEARL_TMDB_API_KEY: ${{ secrets.BLACKPEARL_TMDB_API_KEY }}
         run: |
           $keyFile = Join-Path $env:RUNNER_TEMP "blackpearl-tmdb-key.txt"
           if ([string]::IsNullOrWhiteSpace($env:BLACKPEARL_TMDB_API_KEY)) { throw "BLACKPEARL_TMDB_API_KEY repository secret is required for packaged builds." }
@@ -260,16 +259,6 @@ jobs:
         run: |
           $files = @("artifacts/BlackPearl-Setup-$env:APP_VERSION-win-x64.exe", "artifacts/BlackPearl-files-$env:APP_VERSION-win-x64.txt") +
             @(Get-ChildItem "artifacts/BlackPearl-Update-*-to-$env:APP_VERSION-win-x64.exe" | ForEach-Object { $_.FullName })
-          # Installations from before the rename (Watchroom 0.3.90 and older) look for Watchroom-Setup-* and accept
-          # downloads only from Svovoniks/WatchRoom, so while the repository still has that name, the full installer is
-          # also published under its old name for them to update to BlackPearl. No update installer is built from a
-          # version that old any more, so they take the full installer. After the rename they cannot update anyway.
-          if ($env:GH_REPO -ceq 'Svovoniks/WatchRoom') {
-            $setup = $files[0]
-            $legacy = Join-Path (Split-Path $setup -Parent) ((Split-Path $setup -Leaf) -replace '^BlackPearl-', 'Watchroom-')
-            Copy-Item $setup $legacy
-            $files += $legacy
-          }
           $files | ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } | Set-Content artifacts/SHA256SUMS.txt
           gh release create $env:GITHUB_REF_NAME @files artifacts/SHA256SUMS.txt --verify-tag --draft --title "BlackPearl $env:APP_VERSION" --generate-notes
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

@@ -352,15 +352,6 @@ function Assert-ReleaseMetadata {
     # The file list lets later releases build update installers from this one and lets the app check its files.
     $files = @($Release.assets | Where-Object name -CEQ "BlackPearl-files-$ExpectedVersion-win-x64.txt")
     if ($files.Count -ne 1 -or $files[0].size -le 0 -or $files[0].digest -cnotmatch '^sha256:[a-f0-9]{64}$') { throw 'Missing file list, size, or SHA-256 digest.' }
-    # Until the repository is renamed, installations from before the app was renamed update from a Watchroom-* copy of
-    # the full installer; it must be the same file.
-    if ($repository -ceq $formerRepository) {
-        foreach ($asset in @($installer[0])) {
-            $legacy = @($Release.assets | Where-Object name -CEQ ($asset.name -creplace '^BlackPearl-', 'Watchroom-'))
-            if ($legacy.Count -ne 1 -or $legacy[0].size -ne $asset.size -or $legacy[0].digest -cne $asset.digest) { throw "Missing Watchroom-named copy of $($asset.name)." }
-            $files += $legacy[0]
-        }
-    }
     $updates = @($updates) + $files
     foreach ($asset in @($installer[0], $checksums[0]) + $updates) {
         $expected = "https://github.com/$repository/releases/download/v$ExpectedVersion/$($asset.name)"
@@ -449,8 +440,9 @@ try {
         return
     }
     $remote = Invoke-Native git @('remote', 'get-url', 'origin')
-    Use-Repository
-    if ($remote.Trim() -notmatch '^(https://github\.com/|git@github\.com:)Svovoniks/(?:BlackPearl|WatchRoom)(?:\.git)?$') { throw 'origin must be the public Svovoniks/BlackPearl repository (Svovoniks/WatchRoom before its rename).' }
+    # The repository was Svovoniks/WatchRoom before its rename. GitHub still redirects that name, but only as long as no
+    # new repository takes it, so a clone must name the repository releases are published to.
+    if ($remote.Trim() -notmatch '^(https://github\.com/|git@github\.com:)Svovoniks/BlackPearl(?:\.git)?$') { throw 'origin must be the public Svovoniks/BlackPearl repository. A clone made before the rename needs: git remote set-url origin https://github.com/Svovoniks/BlackPearl.git' }
     Invoke-Native git @('fetch', '--no-recurse-submodules', 'origin', '--tags')
     $deadline = [datetime]::UtcNow.AddMinutes($TimeoutMinutes)
     if ($VerifyOnly) {
