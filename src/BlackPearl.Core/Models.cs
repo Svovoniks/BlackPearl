@@ -30,7 +30,9 @@ public record MediaItem(string Id, string Path, string Title, string Kind, int? 
     // What a bonus clip is: "special", "opening", "ending" or "trailer"; null for any other clip.
     string? BonusKind = null,
     // A film's name from its metadata provider, in the metadata language. Title keeps the name its file gave it, which matching uses.
-    string? ProviderTitle = null)
+    string? ProviderTitle = null,
+    // The width and height of a video's picture as its file header records them; 0 once read and found absent. See LibraryPictures.
+    int? FileVideoWidth = null, int? FileVideoHeight = null)
 {
     public bool IsMusic => Kind == MusicFiles.Kind;
     public string Caption => IsMusic ? string.Join(" · ", new[] { Artist, Series, DurationSeconds is > 0 ? MusicFiles.Duration(DurationSeconds.Value) : null }.Where(x => !string.IsNullOrWhiteSpace(x))) : IsBonus ? Series is null ? BonusLabel : $"{Series} · {BonusLabel}" : Series is not null ? $"{Series} · {(Season is null ? "Season unknown" : $"S{Season:00}")} {(Episode is null ? "Episode unknown" : $"E{Episode:00}" + (EpisodeEnd > Episode ? $"–E{EpisodeEnd:00}" : ""))}" : $"{Kind} · {Year?.ToString() ?? "Local video"}";

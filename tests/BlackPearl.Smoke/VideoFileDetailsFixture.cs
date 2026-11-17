@@ -115,15 +115,15 @@ static class VideoFileDetailsFixture
     }
 
     // RIFF 'AVI ': hdrl (avih, a video strl with Xvid, an audio strl with MP3), INFO with ISFT, and an empty movi.
-    private static byte[] Avi()
+    internal static byte[] Avi(uint width = 720, uint height = 400)
     {
         static byte[] Chunk(string id, params byte[][] parts) { var body = parts.SelectMany(p => p).ToArray(); return [.. Encoding.ASCII.GetBytes(id), .. U32((uint)body.Length), .. body, .. body.Length % 2 == 1 ? new byte[1] : []]; }
         static byte[] List(string type, params byte[][] parts) => Chunk("LIST", [Encoding.ASCII.GetBytes(type), .. parts]);
         static byte[] U32(uint value) { var bytes = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(bytes, value); return bytes; }
         static byte[] U16(ushort value) { var bytes = new byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(bytes, value); return bytes; }
-        var avih = Chunk("avih", U32(40000), U32(0), U32(0), U32(0x110), U32(250), U32(0), U32(2), U32(0), U32(720), U32(400), new byte[16]);
+        var avih = Chunk("avih", U32(40000), U32(0), U32(0), U32(0x110), U32(250), U32(0), U32(2), U32(0), U32(width), U32(height), new byte[16]);
         var video = List("strl", Chunk("strh", Encoding.ASCII.GetBytes("vids"), Encoding.ASCII.GetBytes("XVID"), U32(0), U16(0), U16(0), U32(0), U32(1), U32(25), U32(0), U32(250), new byte[20]),
-            Chunk("strf", U32(40), U32(720), U32(400), U16(1), U16(12), Encoding.ASCII.GetBytes("XVID"), new byte[20]));
+            Chunk("strf", U32(40), U32(width), U32(height), U16(1), U16(12), Encoding.ASCII.GetBytes("XVID"), new byte[20]));
         var audio = List("strl", Chunk("strh", Encoding.ASCII.GetBytes("auds"), new byte[4], U32(0), U16(0), U16(0), U32(0), U32(1), U32(24000), U32(0), U32(0), new byte[20]),
             Chunk("strf", U16(0x55), U16(2), U32(44100), U32(24000), U16(1), U16(0), U16(0)));
         var info = List("INFO", Chunk("ISFT", Encoding.ASCII.GetBytes("Fixture encoder\0")));

@@ -110,7 +110,9 @@ if (args.FirstOrDefault() == "--metadata-diagnostics")
 
 if (args.FirstOrDefault() == "--file-details")
 {
-    VideoFileDetailsFixture.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }); return;
+    void FileDetailsCheck(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }
+    VideoFileDetailsFixture.Run(FileDetailsCheck);
+    await LibraryPicturesFixture.Run(Path.GetFullPath("artifacts/library-pictures-" + Guid.NewGuid().ToString("N")), FileDetailsCheck); return;
 }
 
 if (args.FirstOrDefault() == "--track-languages")
@@ -452,6 +454,7 @@ if (part != 2)
     await MetadataLanguageFixture.Run(Path.Combine(root, "metadata-language"), Check);
     TrackLanguageFixture.Run(Check);
     VideoFileDetailsFixture.Run(Check);
+    await LibraryPicturesFixture.Run(Path.Combine(root, "library-pictures"), Check);
     EpisodePlaybackFixture.Run(Check);
     OpenedFileFixture.Run(Check);
     await DiagnosticLogFixture.Run(Path.Combine(root, "diagnostic-log"), Check);
