@@ -544,8 +544,35 @@ public partial class MainWindow : Window
         RefreshLibraryFromItems(loaded);
         BackfillRuntimes();
     }
+    // The details line shows how sharp the video is as a mark rather than in words.
+    private void ShowDetailQuality(string? label)
+    {
+        DetailQuality.Text = QualityMark.Short(label);
+        DetailQuality.Visibility = label is null ? Visibility.Collapsed : Visibility.Visible;
+        DetailQuality.SetResourceReference(QualityMark.FillProperty, QualityPlates.FirstOrDefault(plate => plate.Label == label).Key ?? "Muted");
+    }
+    // Each sharpness has a metal of its own, sharpest first: amethyst 8K, gold 4K, platinum QHD, silver Full HD, bronze HD.
+    // SD keeps the line's gray. Light mode uses deeper shades, since the letters are cut out of the plate and show the page.
+    private static readonly (string Label, string Key, string DarkTop, string DarkBottom, string LightTop, string LightBottom)[] QualityPlates =
+    [
+        ("8K", "QualityPlate8K", "#DCC6FF", "#A283E0", "#8E6BD0", "#6A47AE"),
+        ("4K", "QualityPlate4K", "#F8DE80", "#D6A73A", "#D2A12C", "#A47610"),
+        ("QHD", "QualityPlateQHD", "#D8E8F7", "#97B7D4", "#6F94BA", "#4C7096"),
+        ("Full HD", "QualityPlateFullHD", "#F0F2F5", "#AFB7C0", "#89929C", "#5E6772"),
+        ("HD", "QualityPlateHD", "#EBB78C", "#B3774A", "#C27F4E", "#93562B"),
+    ];
+    private static void ApplyQualityPlates(ResourceDictionary resources, bool light)
+    {
+        static Color Parse(string value) => (Color)ColorConverter.ConvertFromString(value);
+        foreach (var plate in QualityPlates)
+        {
+            var brush = new LinearGradientBrush(Parse(light ? plate.LightTop : plate.DarkTop), Parse(light ? plate.LightBottom : plate.DarkBottom), 90);
+            brush.Freeze(); resources[plate.Key] = brush;
+        }
+    }
     private bool runtimeBackfillRunning, runtimeBackfillAgain;
-    // Reads video lengths from file headers in the background; they replace provider runtimes, and Home's length filters need them.
+    // Reads video lengths and picture sizes from file headers in the background. Lengths replace provider runtimes, and Home's
+    // length filters need them; picture sizes give the details page its "4K" or "FHD" mark.
     private async void BackfillRuntimes()
     {
         if (runtimeBackfillRunning) { runtimeBackfillAgain = true; return; }
@@ -555,12 +582,12 @@ public partial class MainWindow : Window
             do
             {
                 runtimeBackfillAgain = false;
-                var candidates = items.Where(LibraryRuntimes.NeedsRuntime).ToArray();
+                var candidates = items.Where(item => LibraryRuntimes.NeedsRuntime(item) || LibraryPictures.NeedsPicture(item)).ToArray();
                 if (candidates.Length == 0 || closing) break;
                 using var stop = new CancellationTokenSource();
                 void Stop(object? sender, EventArgs e) => stop.Cancel();
                 Closed += Stop;
-                try { await Task.Run(() => LibraryRuntimes.Backfill(library, candidates, stop.Token)); }
+                try { await Task.Run(() => { LibraryRuntimes.Backfill(library, candidates, stop.Token); LibraryPictures.Backfill(library, candidates, stop.Token); }); }
                 catch (OperationCanceledException) { }
                 catch (Exception ex) { PlaybackDiagnostics.Record("runtime-backfill-failed", new { ex.Message }); }
                 finally { Closed -= Stop; }
@@ -868,6 +895,7 @@ public partial class MainWindow : Window
         var version = versions.Length > 1 ? LibraryCatalog.VersionLabel(item, versions) : null;
         DetailMeta.Text = item.Caption + (item.IsVirtual ? "" : " · " + Path.GetExtension(item.Path).TrimStart('.').ToUpperInvariant()) + (string.IsNullOrWhiteSpace(item.AirDate) ? "" : " · " + item.AirDate) + (item.RuntimeMinutes is > 0 ? $" · {item.RuntimeMinutes} min" : "") +
             (version is null ? "" : " · " + version);
+        ShowDetailQuality(LibraryPictures.Label(item));
         ShowDetailVersions(item, versions);
         _ = UpdateDetailPosterAsync(item);
         if (item.ExtraOf is not null && !ArtworkCache.IsUsable(item.GeneratedEpisodePoster)) _ = ImproveClipArtwork(item);
@@ -2391,6 +2419,7 @@ public partial class MainWindow : Window
         var fadeLeft = new LinearGradientBrush(canvas, Alpha(canvas, 0), 0); fadeLeft.Freeze(); resources["EdgeFadeLeft"] = fadeLeft;
         var fadeRight = new LinearGradientBrush(Alpha(canvas, 0), canvas, 0); fadeRight.Freeze(); resources["EdgeFadeRight"] = fadeRight;
         ApplyStoneTheme(resources, colors, light);
+        ApplyQualityPlates(resources, light);
         // The player stays dark in both modes and uses the theme's dark accent.
         var player = palette.Colors(light: false); var playerAccent = player[6];
         resources["PlayerAccent"] = Solid(playerAccent); resources["PlayerAccentInk"] = Solid(player[7]); resources["PlayerAccentSoft"] = Solid(player[9]);

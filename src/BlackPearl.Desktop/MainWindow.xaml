@@ -489,7 +489,11 @@
       <StackPanel Grid.Column="1" Margin="32,6,0,0">
        <TextBlock x:Name="DetailContext" Foreground="{DynamicResource Accent}" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,8"><TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
        <TextBlock x:Name="DetailTitle" FontFamily="{StaticResource DisplayFont}" FontSize="38" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,10"/>
-       <TextBlock x:Name="DetailMeta" Style="{StaticResource MutedText}" FontSize="14" Margin="0,0,0,24"/>
+       <StackPanel Orientation="Horizontal" Margin="0,0,0,24">
+        <TextBlock x:Name="DetailMeta" Style="{StaticResource MutedText}" FontSize="14" VerticalAlignment="Center"/>
+        <!-- How sharp the video is, as a mark in its sharpness's own metal (ShowDetailQuality). -->
+        <local:QualityMark x:Name="DetailQuality" VerticalAlignment="Center" Margin="10,0,0,0" Visibility="Collapsed" IsHitTestVisible="False"/>
+       </StackPanel>
        <!-- The file's audio and subtitles, with languages identified for tracks the file doesn't tag. -->
        <Grid x:Name="DetailTracks" Visibility="Collapsed" Margin="0,-12,0,22" MaxWidth="720" HorizontalAlignment="Left" AutomationProperties.Name="Audio and subtitles">
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>

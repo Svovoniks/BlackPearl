@@ -27,22 +27,7 @@ public static partial class VideoFileDetails
         try { info = new FileInfo(path); if (!info.Exists) return []; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return []; }
         var details = new Details();
-        var complete = true;
-        try
-        {
-            using var file = SubtitleText.Open(path);
-            var head = new byte[12];
-            var read = file.ReadAtLeast(head, head.Length, false);
-            file.Position = 0;
-            if (read >= 4 && BinaryPrimitives.ReadUInt32BigEndian(head) == 0x1a45dfa3) ReadMatroska(file, details, ct);
-            else if (read >= 8 && Encoding.ASCII.GetString(head, 4, 4) is "ftyp" or "moov" or "mdat" or "free" or "wide" or "skip" or "pnot") ReadMp4(file, details, ct);
-            else if (read >= 12 && Encoding.ASCII.GetString(head, 0, 4) == "RIFF" && Encoding.ASCII.GetString(head, 8, 4) == "AVI ") ReadAvi(file, details, ct);
-            else { file.Dispose(); ReadOther(path, details); }
-        }
-        catch (OperationCanceledException) { throw; }
-        // A damaged file keeps what was read before the damage. TagLib throws plain exceptions, KeyNotFoundException and
-        // NullReferenceException on damaged Matroska, Ogg and Windows Media files, so any failure counts as a partial read.
-        catch (Exception ex) when (ex is not OutOfMemoryException) { complete = false; }
+        var complete = Parse(path, details, ct) == Reading.Complete;
 
         var general = new Section("File");
         general.Add("Format", details.Format ?? FormatByExtension(path));
@@ -74,6 +59,46 @@ public static partial class VideoFileDetails
         return groups;
     }
 
+    private enum Reading { Unopened, Partial, Complete }
+    private static Reading Parse(string path, Details details, CancellationToken ct)
+    {
+        FileStream file;
+        try { file = SubtitleText.Open(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return Reading.Unopened; }
+        try
+        {
+            using (file)
+            {
+                var head = new byte[12];
+                var read = file.ReadAtLeast(head, head.Length, false);
+                file.Position = 0;
+                if (read >= 4 && BinaryPrimitives.ReadUInt32BigEndian(head) == 0x1a45dfa3) ReadMatroska(file, details, ct);
+                else if (read >= 8 && Encoding.ASCII.GetString(head, 4, 4) is "ftyp" or "moov" or "mdat" or "free" or "wide" or "skip" or "pnot") ReadMp4(file, details, ct);
+                else if (read >= 12 && Encoding.ASCII.GetString(head, 0, 4) == "RIFF" && Encoding.ASCII.GetString(head, 8, 4) == "AVI ") ReadAvi(file, details, ct);
+                else { file.Dispose(); ReadOther(path, details); }
+            }
+            return Reading.Complete;
+        }
+        catch (OperationCanceledException) { throw; }
+        // A damaged file keeps what was read before the damage. TagLib throws plain exceptions, KeyNotFoundException and
+        // NullReferenceException on damaged Matroska, Ogg and Windows Media files, so any failure counts as a partial read.
+        catch (Exception ex) when (ex is not OutOfMemoryException) { return Reading.Partial; }
+    }
+
+    /// <summary>
+    /// The width and height of the file's first video track, as its headers record them. False when the file can't be opened
+    /// right now (drive offline, file locked), so a caller can try again later; true with null when it holds no picture size.
+    /// </summary>
+    public static bool ReadPicture(string path, out (int Width, int Height)? picture, CancellationToken ct = default)
+    {
+        picture = null;
+        var details = new Details();
+        if (Parse(path, details, ct) == Reading.Unopened) return false;
+        if (details.Tracks.FirstOrDefault(track => track.Kind == Kind.Video && track.Picture is not null)?.Picture is var (width, height))
+            picture = ((int)Math.Min(width, int.MaxValue), (int)Math.Min(height, int.MaxValue));
+        return true;
+    }
+
     /// <summary>The details as plain text, a heading and its lines per group, for copying.</summary>
     public static string Text(IEnumerable<FileDetailGroup> groups) =>
         string.Join(Environment.NewLine + Environment.NewLine, groups.Select(group =>
@@ -95,6 +120,8 @@ public static partial class VideoFileDetails
         public string Title = title;
         public readonly Kind Kind = kind;
         public string? Language;
+        // A video track's stored width and height.
+        public (long Width, long Height)? Picture;
         public readonly List<FileDetail> Rows = [];
         public void Add(string label, string? value)
         {
@@ -275,6 +302,7 @@ public static partial class VideoFileDetails
     private static void AddPicture(Section track, long width, long height, long? displayWidth, long? displayHeight)
     {
         if (width <= 0 || height <= 0) return;
+        track.Picture ??= (width, height);
         track.Add("Resolution", $"{width} × {height}");
         if (displayWidth is > 0 && displayHeight is > 0 && (displayWidth != width || displayHeight != height))
             track.Add("Display size", $"{displayWidth} × {displayHeight}");

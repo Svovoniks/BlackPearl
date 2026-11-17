@@ -542,6 +542,26 @@ public sealed partial class LibraryStore
         MediaSaved?.Invoke(updated);
         return updated;
     }
+    // Records the picture size read from a video's file header, re-reading the entry under the write lock as FillFileRuntime does.
+    public MediaItem? FillFilePicture(string id, int width, int height)
+    {
+        MediaItem updated;
+        lock (writeGate)
+        {
+            using (var db = Open())
+            using (var read = db.CreateCommand())
+            {
+                read.CommandText = "SELECT json FROM media WHERE id=$id"; read.Parameters.AddWithValue("$id", id);
+                if (read.ExecuteScalar() is not string json) return null;
+                var current = Wire.Read<MediaItem>(json);
+                if (!LibraryPictures.NeedsPicture(current)) return null;
+                updated = current with { FileVideoWidth = Math.Max(0, width), FileVideoHeight = Math.Max(0, height) };
+            }
+            Write(updated);
+        }
+        MediaSaved?.Invoke(updated);
+        return updated;
+    }
     private void Write(MediaItem item)
     {
         using var db = Open(); using var c = db.CreateCommand();
@@ -809,6 +829,9 @@ public sealed partial class LibraryStore
                         if (previous is not null && !music && previous.FileSize != parsed.FileSize && previous.FileRuntimeMinutes is not null)
                             item = item with { FileRuntimeMinutes = null, RuntimeMinutes = previous.FileRuntimeMinutes > 0 && previous.RuntimeMinutes == previous.FileRuntimeMinutes &&
                                 LibraryRuntimes.Overrides(previous) ? null : item.RuntimeMinutes };
+                        // A replaced file has its picture read again too.
+                        if (previous is not null && !music && previous.FileSize != parsed.FileSize && previous.FileVideoHeight is not null)
+                            item = item with { FileVideoWidth = null, FileVideoHeight = null };
                         // Records compare collections by reference, so compare the stored form to skip unchanged files.
                         if (previous is null || Wire.Serialize(LibraryIdentity.Ensure(TmdbRetention.TrackLegacy(item))) != Wire.Serialize(previous)) { Save(item); changes++; }
                         if (previous is null) found.Add(item);
