@@ -440,7 +440,8 @@ try {
         return
     }
     $remote = Invoke-Native git @('remote', 'get-url', 'origin')
-    # The repository was Svovoniks/WatchRoom before its rename; GitHub redirects that name, but only for reads.
+    # The repository was Svovoniks/WatchRoom before its rename. GitHub still redirects that name, but only as long as no
+    # new repository takes it, so a clone must name the repository releases are published to.
     if ($remote.Trim() -notmatch '^(https://github\.com/|git@github\.com:)Svovoniks/BlackPearl(?:\.git)?$') { throw 'origin must be the public Svovoniks/BlackPearl repository. A clone made before the rename needs: git remote set-url origin https://github.com/Svovoniks/BlackPearl.git' }
     Invoke-Native git @('fetch', '--no-recurse-submodules', 'origin', '--tags')
     $deadline = [datetime]::UtcNow.AddMinutes($TimeoutMinutes)

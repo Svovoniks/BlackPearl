@@ -233,7 +233,8 @@ release page and assets, and do not use computer use for release verification.
 Install locally only when the user explicitly requests it.
 
 The public release repository is `Svovoniks/BlackPearl` (formerly `Svovoniks/WatchRoom`;
-see "Renaming from Watchroom" in UPDATES.md); its release branch is `master`. Windows x64 installers are built by `.github/workflows/build.yml`.
+see "Renaming from Watchroom" in UPDATES.md); its release branch is `master`. Windows
+x64 installers are built by `.github/workflows/build.yml`.
 Never move an existing version tag or overwrite an installer for a published
 version. Use a higher version for every shipped change.
 
