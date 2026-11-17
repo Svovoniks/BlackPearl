@@ -118,17 +118,6 @@ try {
     $update.browser_download_url = "https://github.com/Svovoniks/BlackPearl/releases/download/v0.3.18/$updateName"
     $update.digest = ''
     Expect-Rejected { Assert-ReleaseMetadata $release '0.3.18' } 'update installer without a GitHub digest prevents verification'
-    # Before the repository rename, installations from before the app rename update from Watchroom-named copies.
-    $repository = $formerRepository
-    $legacyAssets = @(foreach ($name in 'BlackPearl-Setup-0.3.18-win-x64.exe', 'Watchroom-Setup-0.3.18-win-x64.exe', 'BlackPearl-files-0.3.18-win-x64.txt', 'SHA256SUMS.txt') {
-        [pscustomobject]@{ name = $name; size = 4; digest = "sha256:$hash"; browser_download_url = "https://github.com/$formerRepository/releases/download/v0.3.18/$name" } })
-    $legacyRelease = [pscustomobject]@{ tag_name = 'v0.3.18'; draft = $false; prerelease = $false; assets = $legacyAssets }
-    Check (@((Assert-ReleaseMetadata $legacyRelease '0.3.18').Updates | Where-Object name -CEQ 'Watchroom-Setup-0.3.18-win-x64.exe').Count -eq 1) 'before the repository rename the Watchroom-named installer copy is verified too'
-    $legacyRelease.assets = @($legacyAssets) + [pscustomobject]@{ name = $updateName; size = 2; digest = "sha256:$updateHash"; browser_download_url = "https://github.com/$formerRepository/releases/download/v0.3.18/$updateName" }
-    Check (@((Assert-ReleaseMetadata $legacyRelease '0.3.18').Updates | Where-Object name -CEQ $updateName).Count -eq 1) 'before the repository rename update installers need no Watchroom-named copies'
-    $legacyRelease.assets = @($legacyAssets | Where-Object name -CNE 'Watchroom-Setup-0.3.18-win-x64.exe')
-    Expect-Rejected { Assert-ReleaseMetadata $legacyRelease '0.3.18' } 'before the repository rename a release needs a Watchroom-named installer for older installations'
-    $repository = 'Svovoniks/BlackPearl'
     function Get-PublicJson {
         param([string]$Url)
         return @{ workflow_runs = @(

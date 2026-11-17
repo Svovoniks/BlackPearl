@@ -2,8 +2,8 @@
 
 ## Release checklist for agents
 
-The public source and release repository is `Svovoniks/BlackPearl` (`Svovoniks/WatchRoom`
-until it is renamed; see [Renaming from Watchroom](#renaming-from-watchroom)), and the release
+The public source and release repository is `Svovoniks/BlackPearl` (formerly
+`Svovoniks/WatchRoom`; see [Renaming from Watchroom](#renaming-from-watchroom)), and the release
 branch is `master`. The updater uses its public `/releases/latest` endpoint.
 Shipping is authorized when the user asks to ship an update. Complete the whole
 flow below rather than stopping at a pushed branch, an open pull request, or a
@@ -459,13 +459,15 @@ Checksums protect against transfer corruption, not a compromised GitHub account.
 
 Update downloads require a public releases repository. No GitHub token is stored
 in the distributed app. `UpdateRepository` is an MSBuild property baked into the
-Windows assembly; it defaults to `Svovoniks/BlackPearl;Svovoniks/WatchRoom`, a list of the
-repository's names that the updater tries in order.
+Windows assembly; it defaults to `Svovoniks/BlackPearl;Svovoniks/WatchRoom`, a list of names
+the updater tries in order. The second is the repository's former name, which GitHub redirects.
 
 ## Renaming from Watchroom
 
-The app was called Watchroom, and its repository `Svovoniks/WatchRoom`. The code, installers
-and release assets are now BlackPearl. What existing installations rely on keeps working:
+The app was called Watchroom, and its repository `Svovoniks/WatchRoom`. The app became BlackPearl
+in 0.3.91 (November 1, 2026), and the repository became `Svovoniks/BlackPearl` on
+November 17, 2026; 0.3.132 was the first release published under the new name. What existing
+installations rely on keeps working:
 
 - **Installations.** The installer keeps the same Inno Setup `AppId`, so it updates a Watchroom
   installation in place, in its existing `Programs\Watchroom` folder. It removes the old
@@ -480,31 +482,16 @@ and release assets are now BlackPearl. What existing installations rely on keeps
 - **Compatibility with older versions.** The single-instance lock, the peer control channel
   (`watchroom-control-v2`) and the `X-Watchroom-Request-Id` header keep their names, so
   BlackPearl and Watchroom still work together in rooms and on one library.
-- **Updates.** Watchroom 0.3.90 and older look only for `Watchroom-Setup-*` and
-  `Watchroom-Update-*` assets, and accept downloads only from URLs under
-  `Svovoniks/WatchRoom`. While the repository still has that name, the release workflow also
-  publishes the full installer under its Watchroom name, and `ship.ps1` verifies that copy.
-  Update installers are built only from the last 20 releases, all BlackPearl, so they have no
-  Watchroom copies and those installations take the full installer.
-  BlackPearl tries `Svovoniks/BlackPearl` first, then `Svovoniks/WatchRoom`, and accepts
-  downloads under either name.
-
-To rename the repository:
-
-1. Ship the first BlackPearl release while the repository is still `Svovoniks/WatchRoom`.
-2. Wait until every installation that should keep updating runs that release or later. After
-   the rename, GitHub lists downloads under `Svovoniks/BlackPearl`, which Watchroom 0.3.90 and
-   older reject, so they can only be updated by running the full installer by hand.
-3. Rename the repository on GitHub to `BlackPearl`. Never create another repository named
-   `WatchRoom` under the account: GitHub would stop redirecting the old name.
-4. Point local clones at the new name: `git remote set-url origin
-   https://github.com/Svovoniks/BlackPearl.git`. The scripts accept either name, and pick the
-   one that exists through `Use-Repository` in `scripts/github-pr.ps1`.
-5. Optionally rename the `WATCHROOM_TMDB_API_KEY` Actions secret to
-   `BLACKPEARL_TMDB_API_KEY`; the workflow reads either.
-
-From then on releases carry only BlackPearl names, and the workflow stops publishing the
-Watchroom-named copies by itself.
+- **Updates.** BlackPearl 0.3.91 and later try `Svovoniks/BlackPearl` first, then
+  `Svovoniks/WatchRoom`, and accept downloads under either name. Watchroom 0.3.90 and older
+  accept downloads only from URLs under `Svovoniks/WatchRoom` and look only for `Watchroom-*`
+  assets, so they no longer update themselves; run the current full installer by hand on them.
+  Releases now carry only BlackPearl names.
+- **Repository.** Never create another repository named `WatchRoom` under the account: GitHub
+  would stop redirecting the old name, and old links, clones and updaters that fall back to it
+  would break. A clone made before the rename needs `git remote set-url origin
+  https://github.com/Svovoniks/BlackPearl.git`; `ship.ps1` refuses the old remote. The workflow
+  reads the TMDB key only from the `BLACKPEARL_TMDB_API_KEY` Actions secret.
 
 To test: `dotnet run --project tests/BlackPearl.UpdateChecks -c Release`.
 For isolated desktop tests set `BLACKPEARL_DISABLE_UPDATES=1`; normal users do not
