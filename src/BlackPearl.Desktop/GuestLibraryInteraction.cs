@@ -107,7 +107,7 @@ public partial class MainWindow
     {
         guestHomeResume = resume;
         selected = card.Media; ShowPage("Details"); UpdateHostBreadcrumbs();
-        DetailTitle.Text = card.DisplayTitle; DetailMeta.Text = card.Caption; ShowDetailQuality(null); DetailContext.Text = HostLibraryName;
+        DetailTitle.Text = card.DisplayTitle; DetailMeta.Text = card.Caption; DetailContext.Text = HostLibraryName;
         DetailSummary.Text = card.Media.Overview ?? ""; DetailFile.Text = ""; ShowDetailFileInfo(); DetailTracks.Visibility = Visibility.Collapsed;
         DetailAvailability.Visibility = Visibility.Collapsed;
         DetailPlay.Content = "Play in room"; DetailPlay.IsEnabled = OwnsLibrary;

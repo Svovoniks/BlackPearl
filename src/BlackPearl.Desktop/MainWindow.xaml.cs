@@ -544,12 +544,17 @@ public partial class MainWindow : Window
         RefreshLibraryFromItems(loaded);
         BackfillRuntimes();
     }
-    // The details line shows how sharp the video is as a mark rather than in words.
+    // The details line ends with how sharp the video is, as a mark rather than in words. The mark sits in the line's text, so
+    // a long line still wraps and takes the mark with it. Call it after setting DetailMeta.Text, which clears the old mark.
     private void ShowDetailQuality(string? label)
     {
-        DetailQuality.Text = QualityMark.Short(label);
-        DetailQuality.Visibility = label is null ? Visibility.Collapsed : Visibility.Visible;
-        DetailQuality.SetResourceReference(QualityMark.FillProperty, QualityPlates.FirstOrDefault(plate => plate.Label == label).Key ?? "Muted");
+        if (label is null) return;
+        var mark = new QualityMark { Text = QualityMark.Short(label), IsHitTestVisible = false };
+        mark.SetResourceReference(QualityMark.FillProperty, QualityPlates.FirstOrDefault(plate => plate.Label == label).Key ?? "Muted");
+        System.Windows.Automation.AutomationProperties.SetName(mark, label);
+        // Spaces rather than a margin set it apart, so when the line wraps before the mark it starts flush with the text.
+        DetailMeta.Inlines.Add(new System.Windows.Documents.Run(" \u2002"));
+        DetailMeta.Inlines.Add(new System.Windows.Documents.InlineUIContainer(mark) { BaselineAlignment = BaselineAlignment.Center });
     }
     // Each sharpness has a metal of its own, sharpest first: amethyst 8K, gold 4K, platinum QHD, silver Full HD, bronze HD.
     // SD keeps the line's gray. Light mode uses deeper shades, since the letters are cut out of the plate and show the page.
