@@ -206,6 +206,7 @@ public partial class MainWindow
         if (section == "Folders") SelectFirstFolder();
         if (section == "Plugins") ShowPluginsSection();
         if (section == "Downloads") ShowDownloadsSection(); else downloadsRefresh.Stop();
+        if (section == "Profile") RenderPhoneRemote(force: true);
         foreach (Button button in PreferenceSections.Children)
             System.Windows.Automation.AutomationProperties.SetItemStatus(button, (string)button.Tag == section ? "Selected" : "");
     }
@@ -242,6 +243,8 @@ public partial class MainWindow
             DisplaySpecials.IsChecked == true, GroupShows.IsChecked == true).Save(library);
         displaySpecialsWithinSeasons = DisplaySpecials.IsChecked == true;
         library.Setting("name", DisplayNameBox.Text.Trim()); library.Setting("server", ServerBox.Text.Trim().TrimEnd('/'));
+        // Phones reach this PC through the room server, so the phone remote moves with it.
+        SyncPhoneRemote();
         library.Setting("artwork", AutoArtwork.IsChecked == true ? "true" : "false");
         // Missing and upcoming episodes follow their settings now rather than at the next scan.
         if (SavedAutoArtwork && (before.ImportMissing != (ImportMissing.IsChecked == true) || before.ImportUpcoming != (ImportUpcoming.IsChecked == true)))

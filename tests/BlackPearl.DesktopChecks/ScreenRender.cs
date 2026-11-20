@@ -292,6 +292,30 @@ static class ScreenRender
             foreach (var section in new[] { "Plugins", "Downloads", "Profile", "Metadata", "Playback", "Appearance", "Updates" })
             {
                 Call("ShowPreferenceSection", section); await Capture($"{theme}-settings-{section.ToLowerInvariant()}");
+                // The phone remote's pairing window, a separate window, when the library has the phone remote on.
+                if (section == "Profile" && typeof(MainWindow).GetField("phoneRemote", flags)!.GetValue(window) is not null)
+                {
+                    Call("ShowPairing"); await Settle(1500);
+                    if (typeof(MainWindow).GetField("pairingWindow", flags)!.GetValue(window) is Window pairing)
+                    {
+                        // Drawn with the window's own background at the window's scaling, as it shows on screen.
+                        var content = (FrameworkElement)pairing.Content;
+                        var scaleX = VisualTreeHelper.GetDpi(pairing).DpiScaleX; var scaleY = VisualTreeHelper.GetDpi(pairing).DpiScaleY;
+                        var drawing = new DrawingVisual();
+                        using (var context = drawing.RenderOpen())
+                        {
+                            context.DrawRectangle(pairing.Background, null, new Rect(0, 0, content.ActualWidth, content.ActualHeight));
+                            context.DrawRectangle(new VisualBrush(content), null, new Rect(0, 0, content.ActualWidth, content.ActualHeight));
+                        }
+                        var picture = new RenderTargetBitmap((int)Math.Ceiling(content.ActualWidth * scaleX), (int)Math.Ceiling(content.ActualHeight * scaleY), 96 * scaleX, 96 * scaleY, PixelFormats.Pbgra32);
+                        picture.Render(drawing);
+                        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(picture));
+                        await using (var file = File.Create(Path.Combine(output, $"{theme}-settings-pairing.png"))) encoder.Save(file);
+                        Console.WriteLine($"Saved {theme}-settings-pairing ({pairing.ActualWidth:0}x{pairing.ActualHeight:0} DIP window)");
+                        foreach (var finding in BorderAudit.Find(content)) Console.WriteLine($"CLIPPED {theme}-settings-pairing: {finding}");
+                        pairing.Close();
+                    }
+                }
                 var pane = Descendants((DependencyObject)window.Content).OfType<ScrollViewer>().FirstOrDefault(x => x.IsVisible && x.Tag as string == section && x.ScrollableHeight > 0);
                 if (pane is null || !everyEnd && section != "Playback") continue;
                 pane.ScrollToEnd(); await Capture($"{theme}-settings-{section.ToLowerInvariant()}-end", 600); pane.ScrollToHome();

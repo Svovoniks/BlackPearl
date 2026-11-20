@@ -20,6 +20,7 @@ BlackPearl dynamically links the following components. Package versions and cont
 | DeepFilterNet 3 and its Rust dependencies, `deepfilter.dll` built from `src/native/deepfilter` (voice noise removal; MIT or Apache-2.0) | revision d375b2d8 | https://github.com/Rikorose/DeepFilterNet |
 | Silero VAD model `silero_vad.onnx` (voice speech detection; MIT) | 6.2.3 | https://github.com/snakers4/silero-vad |
 | ONNX Runtime (runs the speech detection model; MIT) | 1.31.1 | https://github.com/microsoft/onnxruntime |
+| QRCoder (the phone remote's pairing code; MIT) | 1.6.0 | https://github.com/codebude/QRCoder |
 | SkiaSharp / native Skia (artwork decoding) | 2.88.9 | https://github.com/mono/SkiaSharp |
 | TagLib# (reading music tags and embedded album art; LGPL-2.1) | 2.3.0 | https://github.com/mono/taglib-sharp |
 | Whisper.net / whisper.cpp runtime (spoken-language identification) | 1.9.1 | https://github.com/sandrohanea/whisper.net |
