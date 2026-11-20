@@ -27,6 +27,41 @@ static class PhoneRemoteFixture
         check(PhoneRemoteProtocol.Sign("ffeeddccbbaa99887766554433221100", "pc", "pair", "0123456789abcdef0123456789abcdef", "ice",
             "{\"candidate\":\"candidate:1 1 UDP 2122317823 192.168.1.20 50000 typ host\",\"mid\":\"0\"}") == "bIGb4K6s3ztFQAOUL2Q3Oof397tsk3TiGq_W2ZB3I_I", "phone remote signatures match the protocol's second test vector");
         await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", url => Exercise(url, check));
+        await OtherServers(check);
+    }
+
+    // Servers that aren't BlackPearl room servers with the phone remote: the PC keeps trying and says why.
+    static async Task OtherServers(Action<bool, string> check)
+    {
+        foreach (var (body, expected, name) in new[]
+        {
+            ("\"ok\"", "Can't reach the room server", "a server whose health check isn't a room server's"),
+            ("{\"status\":\"ok\",\"protocol\":2}", "doesn't support the phone remote", "a room server from before the phone remote"),
+        })
+        {
+            using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); listener.Start();
+            var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port; listener.Stop();
+            using var http = new System.Net.HttpListener(); http.Prefixes.Add($"http://localhost:{port}/"); http.Start();
+            _ = Task.Run(async () =>
+            {
+                while (http.IsListening)
+                {
+                    try
+                    {
+                        var context = await http.GetContextAsync();
+                        var health = context.Request.Url!.AbsolutePath == "/health";
+                        context.Response.StatusCode = health ? 200 : 404;
+                        if (health) { var bytes = System.Text.Encoding.UTF8.GetBytes(body); context.Response.ContentType = "application/json"; await context.Response.OutputStream.WriteAsync(bytes); }
+                        context.Response.Close();
+                    }
+                    catch (Exception) { return; }
+                }
+            });
+            using var host = new PhoneRemoteHost(new PhoneRemoteOptions { Server = $"http://localhost:{port}", HostKey = PersistentRooms.NewKey(), PcName = "Test PC", AppVersion = "0.0.0-test", Store = new MemoryStore() });
+            host.Start();
+            check(await Until(() => host.Status.Contains(expected, StringComparison.Ordinal), 10000), $"the phone remote says why it can't use {name}");
+            http.Stop();
+        }
     }
 
     static async Task Exercise(string url, Action<bool, string> check)
@@ -41,7 +76,8 @@ static class PhoneRemoteFixture
         check(await early.Next("remote-welcome") is not null && await early.Next("remote-offline") is not null, "a phone hears that its PC is offline");
 
         var store = new MemoryStore();
-        using var host = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Test PC", AppVersion = "0.0.0-test", Store = store });
+        using var host = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Test PC", AppVersion = "0.0.0-test", Store = store,
+            ReplacedWait = TimeSpan.FromSeconds(8) });
         var commands = Channel.CreateUnbounded<RemoteCommand>();
         host.Command += (_, command) => commands.Writer.TryWrite(command);
         host.CurrentState = () => new RemoteState(true, "Night Signal", "Season 2 · Episode 3", Playing: false, PositionMs: 1000, DurationMs: 60000, Volume: 40);
@@ -125,7 +161,7 @@ static class PhoneRemoteFixture
             await Task.Delay(4000);
             check(twin.ServerReady && !host.ServerReady, "the two copies don't keep replacing each other");
         }
-        check(await Until(() => host.ServerReady, 75000), "the first copy takes the phone remote back once the other has gone");
+        check(await Until(() => host.ServerReady, 15000), "the first copy takes the phone remote back once the other has gone");
 
         await using (var removed = await FakePhone.Connect(url, pcId, phoneId, secret))
             check(await removed.Rejection() == "unknown-phone", "a removed phone is told it was removed");

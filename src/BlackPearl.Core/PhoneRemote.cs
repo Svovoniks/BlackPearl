@@ -75,6 +75,8 @@ public sealed class PhoneRemoteOptions
     public required IPairedPhoneStore Store { get; init; }
     // Whether paired phones may start videos and change queues on their own; sent in welcome.
     public bool CanStart { get; init; } = true;
+    // How long a PC replaced by another copy of its library waits before taking the phone remote back.
+    public TimeSpan ReplacedWait { get; init; } = TimeSpan.FromMinutes(1);
 }
 
 // One phone's link. PhoneId is "pair" until a pairing session pairs.
@@ -248,7 +250,7 @@ public sealed class PhoneRemoteHost : IDisposable
                 else SetStatus("Can't reach the room server. Phones can't connect until it's back.", false);
             }
             catch (ArgumentException ex) { SetStatus(ex.Message, false); refused = true; }
-            try { await Task.Delay(refused ? TimeSpan.FromMinutes(2) : replaced ? TimeSpan.FromMinutes(1) : delay, ct); }
+            try { await Task.Delay(refused ? TimeSpan.FromMinutes(2) : replaced ? options.ReplacedWait : delay, ct); }
             catch (OperationCanceledException) { break; }
             delay = TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 2));
         }
@@ -260,9 +262,10 @@ public sealed class PhoneRemoteHost : IDisposable
         try
         {
             using var json = JsonDocument.Parse(await health.GetStringAsync(RoomAddress.ValidateServer(options.Server) + "/health", ct));
-            return json.RootElement.TryGetProperty("protocol", out _) && !json.RootElement.TryGetProperty("remote", out _);
+            // Any other server answers with whatever it likes, such as "ok"; only a room server's object counts.
+            return json.RootElement.ValueKind == JsonValueKind.Object && json.RootElement.TryGetProperty("protocol", out _) && !json.RootElement.TryGetProperty("remote", out _);
         }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException or OperationCanceledException or ArgumentException) { return false; }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or OperationCanceledException or ArgumentException or InvalidOperationException or UriFormatException) { return false; }
     }
 
     private static async Task WriteAsync(ClientWebSocket socket, Channel<WireMessage> queue, CancellationToken ct)
