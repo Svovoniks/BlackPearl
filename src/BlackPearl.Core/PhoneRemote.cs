@@ -127,8 +127,9 @@ public sealed class PhoneRemoteHost : IDisposable
     public event Action? Changed;
     public event Action<PhoneRemoteSession, RemoteCommand>? Command;
     public event Action<PairedPhone>? Paired;
-    // Called for every phone that opens a link, to send it the current state.
-    public Func<RemoteState>? CurrentState { get; set; }
+    // Called for every phone that opens a link, to send it the current state. Null sends nothing; the caller then
+    // publishes the state itself.
+    public Func<RemoteState?>? CurrentState { get; set; }
 
     public IReadOnlyList<PairedPhone> Phones { get { lock (gate) return phones.ToArray(); } }
     public IReadOnlyList<PhoneRemoteSession> Connected { get { lock (gate) return sessions.Values.Where(s => s.Open && s.PhoneId != "pair").ToArray(); } }

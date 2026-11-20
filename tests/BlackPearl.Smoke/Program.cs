@@ -55,6 +55,8 @@ if (args.FirstOrDefault() == "--hostless-rooms-at")
     Console.WriteLine($"{checks} hostless room checks passed against a running room service."); return;
 }
 
+if (args.FirstOrDefault() == "--phone-remote-try") { await PhoneRemoteFixture.Try(args[1], args[2], args[3], args[4], args[5..]); return; }
+
 if (args.FirstOrDefault() == "--phone-remote")
 {
     var checks = 0;

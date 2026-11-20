@@ -2489,6 +2489,7 @@ public partial class MainWindow : Window
         InitializeCaption(new WindowInteropHelper(this).Handle);
         InitializePictureInPicture(new WindowInteropHelper(this).Handle);
         InitializeMediaControls();
+        SyncPhoneRemote();
         ApplyTitleBarTheme();
         Activated += (_, _) => ApplyTitleBarTheme();
         Deactivated += (_, _) => ApplyTitleBarTheme();
@@ -2520,6 +2521,7 @@ public partial class MainWindow : Window
         ApplyPreferences(); // A setting typed just before closing is still applied.
         OpenFileHandoff.StopListening();
         DisableSystemMediaControls();
+        StopPhoneRemote();
         disconnectToast?.Invoke();
         guestBrowseTimer.Stop(); libraryUpdateTimer.Stop(); updateTimer.Stop(); metadataRetentionTimer.Stop(); downloadsRefresh.Stop(); followTimer.Stop(); library.MediaSaved -= QueueLibraryUpdate;
         library.Setting("volume", ((int)Volume.Value).ToString());

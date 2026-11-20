@@ -100,6 +100,29 @@ static class PhoneRemoteFixture
             check(await newer.Rejection() == "pairing-expired", "a phone without a live pairing code is turned away");
     }
 
+    // Drives a running BlackPearl as a paired phone would, for trying the desktop app by hand: each step is a command
+    // name with an optional value ("toggle", "seek-by=-10000", "volume=30", "wait=2000"), and every state the PC sends
+    // is printed.
+    public static async Task Try(string url, string pcId, string phoneId, string secret, string[] steps)
+    {
+        await using var phone = await FakePhone.Connect(url, pcId, phoneId, secret);
+        if (await phone.Rejection(3000) is { } reason) throw new Exception("Refused: " + reason);
+        if (!await phone.Opened()) throw new Exception("No link to the PC");
+        phone.Send(new { type = "hello", protocol = 1, app = "smoke", device = "Smoke phone" });
+        Console.WriteLine("welcome: " + await phone.Next("welcome"));
+        _ = Task.Run(async () => { while (await phone.Next("", 600000) is { } message) Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {message}"); });
+        await Task.Delay(1500);
+        foreach (var step in steps)
+        {
+            var parts = step.Split('=', 2);
+            if (parts[0] == "wait") { await Task.Delay(int.Parse(parts[1])); continue; }
+            Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} > {step}");
+            if (parts.Length == 1) phone.Send(new { type = "command", action = parts[0] });
+            else phone.Send(new { type = "command", action = parts[0], value = double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) });
+            await Task.Delay(1200);
+        }
+    }
+
     static async Task<bool> Until(Func<bool> condition, int milliseconds)
     {
         for (var waited = 0; waited < milliseconds; waited += 50) { if (condition()) return true; await Task.Delay(50); }
@@ -212,7 +235,7 @@ static class PhoneRemoteFixture
         public async Task<JsonElement?> Next(string type, int milliseconds = 5000)
         {
             using var wait = new CancellationTokenSource(milliseconds);
-            try { while (true) { var message = await messages.Reader.ReadAsync(wait.Token); if (message.GetProperty("type").GetString() == type) return message; } }
+            try { while (true) { var message = await messages.Reader.ReadAsync(wait.Token); if (type.Length == 0 || message.GetProperty("type").GetString() == type) return message; } }
             catch (OperationCanceledException) { return null; }
         }
         public async ValueTask DisposeAsync()

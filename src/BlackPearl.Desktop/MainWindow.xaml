@@ -882,6 +882,8 @@
        <TextBlock x:Name="ServerError" Style="{StaticResource FieldError}"/>
        <TextBlock Text="Change the server only if you host your own." Style="{StaticResource Hint}"/>
       </StackPanel></local:Stone>
+      <!-- The phone remote and paired phones, which reach this PC through the server above. Built in PhoneRemote.cs. -->
+      <ContentControl x:Name="PhoneRemoteContent" Focusable="False"/>
      </StackPanel></ScrollViewer>
      <ScrollViewer x:Name="MetadataPreferences" Tag="Metadata" Visibility="Collapsed" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" Padding="0,0,16,0"><StackPanel MaxWidth="844" Width="{Binding ViewportWidth, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" Margin="0,0,0,12" HorizontalAlignment="Left">
       <local:Stone Style="{StaticResource Card}"><StackPanel>
