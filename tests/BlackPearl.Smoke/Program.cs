@@ -55,6 +55,15 @@ if (args.FirstOrDefault() == "--hostless-rooms-at")
     Console.WriteLine($"{checks} hostless room checks passed against a running room service."); return;
 }
 
+if (args.FirstOrDefault() == "--phone-remote")
+{
+    var checks = 0;
+    await PhoneRemoteFixture.Run(File.Exists(".tools/dotnet/dotnet.exe") ? Path.GetFullPath(".tools/dotnet/dotnet.exe") : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet",
+        Path.GetFullPath(args.ElementAtOrDefault(1) ?? "src/BlackPearl.Server/bin/Release/net10.0/BlackPearl.Server.dll"), Path.GetFullPath(Path.Combine("artifacts", "phone-remote-" + Guid.NewGuid().ToString("N"))), (condition, name) =>
+        { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); checks++; });
+    Console.WriteLine($"{checks} phone remote checks passed."); return;
+}
+
 if (args.FirstOrDefault() == "--hostless-rooms")
 {
     var checks = 0;
@@ -763,6 +772,7 @@ VoiceFixture.RunUnits(Check);
 await VoiceFixture.RunIsolated(sdkPath, start.ArgumentList[0], root, Check);
 await RoomServerFixture.Run(sdkPath, start.ArgumentList[0], Path.Combine(root, "room-server"), Check);
 await HostlessRoomFixture.Run(sdkPath, start.ArgumentList[0], Path.Combine(root, "hostless-rooms"), Check);
+await PhoneRemoteFixture.Run(sdkPath, start.ArgumentList[0], Path.Combine(root, "phone-remote"), Check);
 using var server = externalServer is null ? Process.Start(start)! : null;
 var stdout = server?.StandardOutput.ReadToEndAsync(); var stderr = server?.StandardError.ReadToEndAsync();
 try

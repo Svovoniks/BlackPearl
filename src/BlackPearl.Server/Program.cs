@@ -94,8 +94,10 @@ string[] IceServers(string peer)
     return urls.ToArray();
 }
 bool forceRelay = Config("FORCE_RELAY") == "true";
+var remoteLinks = new RemoteLinks(IceServers, forceRelay);
 // protocol is the newest the service speaks, which newer apps require; protocols lists every one it still serves.
-app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = RoomProtocol.Version, protocols = new[] { 1, RoomProtocol.Version }, persistentRooms = true,
+// remote is the phone remote protocol (PHONE-REMOTE.md) this service introduces phones and PCs with.
+app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = RoomProtocol.Version, protocols = new[] { 1, RoomProtocol.Version }, persistentRooms = true, remote = PhoneRemoteProtocol.Version,
     relayConfigured = cloudflare?.HasRelay == true || !string.IsNullOrEmpty(Config("TURN")),
     stunConfigured = cloudflare is not null || !string.IsNullOrEmpty(Config("STUN")) }));
 // Who is in each room right now, for people who hold its invitation. The app shows it before they enter.
@@ -357,6 +359,39 @@ app.Map("/room", async context =>
             await SocketMessages.SendAsync(socket, new("error", Text: ex.Message), CancellationToken.None);
             // Close properly so the client reads why it was turned away; the connection reset that follows an unclosed
             // socket can discard the unread error on the client's side.
+            try { using var closing = new CancellationTokenSource(TimeSpan.FromSeconds(2)); await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, null, closing.Token); }
+            catch (Exception) { }
+        }
+    }
+    catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or IOException) { }
+    finally
+    {
+        leave?.Invoke();
+        lifetime.Cancel(); socket.Abort();
+    }
+});
+// Phones running BlackPearl Mobile and the PCs they control find each other here (RemoteLinks).
+app.Map("/remote", async context =>
+{
+    if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
+    using var socket = await context.WebSockets.AcceptWebSocketAsync();
+    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+    // As with rooms, a connection ends before the relay credentials it was given can; the app connects again.
+    lifetime.CancelAfter(TimeSpan.FromHours(6));
+    Connection? connection = null; Action? leave = null;
+    try
+    {
+        using var handshake = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); handshake.CancelAfter(TimeSpan.FromSeconds(10));
+        var first = await SocketMessages.ReadAsync(socket, handshake.Token);
+        if (first?.Type is not ("remote-pc" or "remote-phone")) throw new InvalidDataException("Expected remote-pc or remote-phone");
+        await remoteLinks.ServeAsync(socket, lifetime, first, (entered, leaving) => { connection = entered; leave = leaving; });
+    }
+    catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException or FormatException)
+    {
+        if (connection is not null) { try { await connection.SendAndWaitAsync(new("error", Text: ex.Message)); } catch (Exception) { } }
+        else if (socket.State == WebSocketState.Open)
+        {
+            await SocketMessages.SendAsync(socket, new("error", Text: ex.Message), CancellationToken.None);
             try { using var closing = new CancellationTokenSource(TimeSpan.FromSeconds(2)); await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, null, closing.Token); }
             catch (Exception) { }
         }
