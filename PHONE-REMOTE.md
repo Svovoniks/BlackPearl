@@ -125,7 +125,7 @@ UTF-8 JSON text messages, at most 64 KiB, each with a `type`.
 
 ```json
 {"type":"state",
- "media":true,                 // false when nothing is loaded in the player; the other playback fields are then absent
+ "media":true,                 // false when nothing is loaded in the player; the other playback fields are then null or absent
  "title":"Night Signal",
  "detail":"Season 2 · Episode 3 · Low Tide",
  "playing":true,
