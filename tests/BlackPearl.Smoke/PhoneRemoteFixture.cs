@@ -54,6 +54,27 @@ static class PhoneRemoteFixture
         check(link.StartsWith("blackpearl://pair?v=1&", StringComparison.Ordinal) && query["pc"] == pcId && query["server"] == url && query["name"] == "Test PC", "the pairing link names the PC, its server and its name");
         var code = query["code"]!;
 
+        // Anyone who knows the PC's id can send it signals. Missing fields, text that isn't JSON, and offers signed with the
+        // live pairing code that the native library can't read must not stop the PC from serving phones.
+        await using (var junk = await ServerSocket.Open(url, pcId))
+        {
+            var session = PhoneRemoteProtocol.NewHex(16);
+            await junk.Send(new("signal", Data: $"{{\"session\":\"{session}\",\"kind\":\"sdp\"}}"));
+            await junk.Send(new("signal", Data: "{}"));
+            await junk.Send(new("signal", Data: "not json"));
+            await junk.Send(new("signal", Data: $"{{\"phone\":\"pair\",\"session\":\"{session}\",\"kind\":\"sdp\",\"payload\":null,\"auth\":null}}"));
+            foreach (var payload in new[] { "{\"type\":\"offer\",\"sdp\":\"not an sdp\"}", "{\"type\":\"offer\"}", "{\"mid\":\"0\"}", "[]" })
+            {
+                var signed = PhoneRemoteProtocol.NewHex(16);
+                foreach (var kind in new[] { "sdp", "ice" })
+                    await junk.Send(new("signal", Data: Wire.Serialize(new RemoteSignal("pair", signed, kind, payload, PhoneRemoteProtocol.Sign(code, "phone", "pair", signed, kind, payload)))));
+            }
+            await Task.Delay(1500);
+        }
+        // Status alone can't tell: a PC whose reading stopped still shows Ready. A phone it doesn't know must get its answer.
+        await using (var stranger = await FakePhone.Connect(url, pcId, PhoneRemoteProtocol.NewHex(16), PhoneRemoteProtocol.NewHex(32)))
+            check(host.ServerReady && host.PairingOpen && await stranger.Rejection() == "unknown-phone", "malformed and unreadable signals leave the PC answering phones and the pairing code unused");
+
         string phoneId, secret;
         await using (var pairing = await FakePhone.Connect(url, pcId, "pair", code))
         {
@@ -94,6 +115,18 @@ static class PhoneRemoteFixture
             host.Forget(phoneId);
             check(await phone.Closed(), "removing a phone closes its link");
         }
+        // A copy of this library running elsewhere, with the same host key, takes the phone remote over. The first one
+        // says why and waits, rather than the two replacing each other every second.
+        using (var twin = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Copy", AppVersion = "0.0.0-test", Store = new MemoryStore() }))
+        {
+            twin.Start();
+            check(await Until(() => twin.ServerReady, 10000) && await Until(() => host.Status.StartsWith("Another BlackPearl", StringComparison.Ordinal), 5000),
+                "a second BlackPearl with the same library takes the phone remote, and the first says so");
+            await Task.Delay(4000);
+            check(twin.ServerReady && !host.ServerReady, "the two copies don't keep replacing each other");
+        }
+        check(await Until(() => host.ServerReady, 75000), "the first copy takes the phone remote back once the other has gone");
+
         await using (var removed = await FakePhone.Connect(url, pcId, phoneId, secret))
             check(await removed.Rejection() == "unknown-phone", "a removed phone is told it was removed");
         await using (var newer = await FakePhone.Connect(url, pcId, "pair", "00000000000000000000000000000000"))
