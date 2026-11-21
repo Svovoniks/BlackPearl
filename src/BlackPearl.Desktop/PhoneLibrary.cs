@@ -541,4 +541,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         library.Setting("queue", Wire.Serialize(resolved));
         library.Setting("queuePosition", PhoneQueues.PlaybackIndex(saved, byId, place).ToString(CultureInfo.InvariantCulture));
     }
+
+    // Play on the PC outside a queue while BlackPearl is closed: the video plays on its own, as it does when BlackPearl
+    // is open, rather than as part of a queue the player last had it in.
+    public void SaveNoQueueHandOver() => library.Setting("queuePosition", "-1");
 }

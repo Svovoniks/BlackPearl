@@ -223,6 +223,7 @@ internal sealed class PhoneHostProcess(LibraryStore library)
         if (phoneLibrary!.Playable(message, fail) is not { } item) return Task.FromResult(false);
         phoneLibrary.SaveHandOver(item, PhoneLibrary.Position(message));
         if (phoneLibrary.QueuePlace(message, item.Id) is ({ } fromQueue, var place)) phoneLibrary.SaveQueueHandOver(fromQueue, place);
+        else phoneLibrary.SaveNoQueueHandOver();
         dispatcher.BeginInvoke(() => PhoneHost.OpenApp(item.Id), DispatcherPriority.Background);
         return Task.FromResult(true);
     }

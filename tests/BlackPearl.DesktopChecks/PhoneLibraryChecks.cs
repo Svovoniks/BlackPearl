@@ -126,6 +126,8 @@ static class PhoneLibraryChecks
             if (handed is not null) library.SaveQueueHandOver(handed, place);
             Check(store.Setting("activeQueue") == "evening" && store.Setting("queuePosition") == "2" &&
                 store.Setting("queue") == Wire.Serialize(new[] { "harbor-3", "night-signal", "harbor-1", "harbor-3" }), "a queue handed to the PC is saved as its player's queue at the video's place");
+            library.SaveNoQueueHandOver();
+            Check(store.Setting("queuePosition") == "-1", "a video handed to the PC outside a queue plays on its own, not from the queue it was last in");
             phone.Send(new { type = "watch", request = 16, id = "night-signal", quality = StreamQuality.OriginalId, network = "home" });
             await phone.Next("stream", 15000);
 
