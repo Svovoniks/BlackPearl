@@ -10,7 +10,8 @@
 # - closing or replacing the user's installed app (never closed here; the script stops and says to ask);
 # - two copies of BlackPearl on one library;
 # - a build without the bundled TMDB key on the real library, where a refresh re-matched titles to TVmaze and Wikipedia;
-# - a dev build updating itself over the installed app, or pointing auto-download's Windows task at itself.
+# - a dev build updating itself over the installed app, or pointing auto-download's Windows task at itself;
+# - a dev build leaving its phone host (PhoneHost.cs) running on the library, or adding it to Windows sign-in.
 [CmdletBinding()]
 param(
     [string]$Exe = '',
@@ -24,6 +25,9 @@ param(
     [switch]$CloseOtherDevBuilds,
     # Let the dev build register auto-download's task, link and notification identity with Windows (off by default).
     [switch]$FollowSystem,
+    # Let the dev build start its phone host when it closes (off by default). It never changes the sign-in entry for a
+    # library other than the installed app's own folder.
+    [switch]$PhoneHost,
     [switch]$Stop,
     [ValidateRange(5, 120)][int]$WaitSeconds = 30
 )
@@ -43,11 +47,21 @@ function Close-DevBuild($Process) {
     if (!$Process.WaitForExit(20000)) { Write-Warning "Dev build $($Process.Id) did not close within 20 s; ending it."; $Process.Kill($true); $null = $Process.WaitForExit(5000) }
 }
 
+# A phone host has no window and ends by itself once a BlackPearl opens its library; this checkout's own are ended here,
+# since they hold the build's files.
+$commandLines = @{}
+Get-CimInstance Win32_Process -Filter "Name='BlackPearl.exe' OR Name='Watchroom.exe'" -ErrorAction SilentlyContinue | ForEach-Object { $commandLines[[int]$_.ProcessId] = $_.CommandLine }
 $running = @(Get-Process -Name BlackPearl, Watchroom -ErrorAction SilentlyContinue | ForEach-Object {
     $path = try { $_.Path } catch { $null }
-    [pscustomobject]@{ Process = $_; Path = $path; Installed = (Test-Under $path $programs); Mine = (Test-Under $path $root) }
+    $isHost = [string]$commandLines[$_.Id] -match '--phone-host'
+    [pscustomobject]@{ Process = $_; Path = $path; Installed = (Test-Under $path $programs); Mine = (Test-Under $path $root); PhoneHost = $isHost }
 })
-foreach ($dev in $running | Where-Object Mine) { Close-DevBuild $dev.Process }
+foreach ($dev in $running | Where-Object { $_.Mine -and !$_.PhoneHost }) { Close-DevBuild $dev.Process }
+# After the app, since an app that closes starts its phone host.
+Get-CimInstance Win32_Process -Filter "Name='BlackPearl.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match '--phone-host' -and (Test-Under $_.ExecutablePath $root) } |
+    ForEach-Object { Write-Host "Ending this checkout's phone host $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Wait-Process -Id $_.ProcessId -Timeout 5 -ErrorAction SilentlyContinue }
+$running = @($running | Where-Object { !$_.PhoneHost })
 if ($Stop) { return }
 
 # The newest build in this checkout: the Release output, or a self-contained publish under artifacts.
@@ -120,6 +134,7 @@ if (!$keyed) {
 
 $variables = @{ BLACKPEARL_DATA = $Data; BLACKPEARL_DISABLE_UPDATES = '1' }
 if (!$FollowSystem) { $variables.BLACKPEARL_FOLLOW_SYSTEM = 'off' }
+if (!$PhoneHost) { $variables.BLACKPEARL_PHONE_HOST = 'off' }
 $saved = @{}
 foreach ($name in $variables.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $variables[$name]) }
 $started = Get-Date

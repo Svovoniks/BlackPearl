@@ -135,6 +135,8 @@ Root: HKCU; Subkey: "Software\BlackPearl\Capabilities\FileAssociations"; ValueTy
 ; Auto-download registers these itself when it's turned on (see FollowSystem.cs); uninstalling removes them.
 Root: HKCU; Subkey: "Software\Classes\blackpearl-downloads"; ValueType: none; Flags: uninsdeletekey dontcreatekey
 Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Svovoniks.BlackPearl.Downloads"; ValueType: none; Flags: uninsdeletekey dontcreatekey
+; The phone host's sign-in entry, which Settings › Profile › Phone remote adds when chosen (see PhoneHost.cs).
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "BlackPearl phone access"; Flags: uninsdeletevalue dontcreatekey
 [Run]
 Filename: "{app}\BlackPearl.exe"; Description: "Open BlackPearl"; Flags: nowait postinstall skipifsilent
 [UninstallRun]
@@ -159,6 +161,7 @@ const
   OPEN_EXISTING = 3;
   ERROR_SHARING_VIOLATION = 32;
   CLOSE_WAIT_MS = 60000;
+  WM_CLOSE = $0010;
 
 function CreateFile(FileName: String; Access, Share: DWORD; Security: INT_PTR; Disposition, Flags: DWORD; Template: INT_PTR): INT_PTR;
   external 'CreateFileW@kernel32.dll stdcall';
@@ -211,6 +214,39 @@ begin
   else Log(Format('BlackPearl closed after about %d ms.', [Waited]));
 end;
 
+// While BlackPearl is closed, its phone host (src/BlackPearl.Desktop/PhoneHost.cs) runs from BlackPearl.exe with only a
+// hidden window, so Restart Manager may not close it and the uninstaller never tries. Setup and the uninstaller ask each
+// host to close through that window, then wait until it has let go of the program file.
+procedure ClosePhoneHosts;
+var
+  Window: HWND;
+  Waited: Integer;
+begin
+  Window := FindWindowByWindowName('BlackPearl phone access');
+  if Window = 0 then Exit;
+  Log('Closing the phone host.');
+  Waited := 0;
+  while (Window <> 0) and (Waited < 10000) do
+  begin
+    PostMessage(Window, WM_CLOSE, 0, 0);
+    Sleep(200);
+    Waited := Waited + 200;
+    Window := FindWindowByWindowName('BlackPearl phone access');
+  end;
+  // Its window goes first; the process then writes its log and exits.
+  while AppRunning and (Waited < 15000) do
+  begin
+    Sleep(100);
+    Waited := Waited + 100;
+  end;
+  Log(Format('The phone host closed after about %d ms.', [Waited]));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then ClosePhoneHosts;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 #ifdef UpdateFrom
 var
@@ -230,6 +266,7 @@ begin
   end;
 #endif
   // Setup checks for files in use after this function returns.
+  ClosePhoneHosts;
   if WizardSilent then WaitForClosingApp;
 end;
 procedure CurStepChanged(CurStep: TSetupStep);

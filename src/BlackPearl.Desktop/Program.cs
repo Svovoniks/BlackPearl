@@ -27,6 +27,11 @@ public static class Program
     public static string? OpenedFile { get; private set; }
     // Started from a notification's Review button: the app opens at Settings > Downloads.
     public static bool OpenDownloads { get; private set; }
+    // Continue on the PC while BlackPearl was closed: the phone host opens the app with the library video to play.
+    public const string PlayArgument = "--play-id";
+    public static string? PlayMediaId { get; private set; }
+    private static string? PlayId(string[] args) =>
+        Array.IndexOf(args, PlayArgument) is var index and >= 0 && index + 1 < args.Length && args[index + 1] is { Length: > 0 and <= 128 } id ? id : null;
 
     [STAThread]
     public static void Main(string[] args)
@@ -40,8 +45,13 @@ public static class Program
             OpenDownloads = true;
         }
         else if (args.Contains("--check-episodes")) { BackgroundFollow.Check(); return; }
+        // Paired phones keep the library while BlackPearl is closed; this never becomes the running app either.
+        else if (args.Contains(PhoneHost.Argument)) { PhoneHost.Run(args.Contains(PhoneHost.SignInArgument)); return; }
+        PlayMediaId = PlayId(args);
         OpenedFile = OpenDownloads ? null : OpenFileHandoff.FileArgument(args);
         Primary = OpenFileHandoff.Claim();
+        // The phone host asked for a video just as BlackPearl opened by itself: that copy has the phones now.
+        if (!Primary && PlayMediaId is not null) return;
         if (!Primary && !args.Contains("--updated") && (OpenedFile ?? (OpenDownloads ? OpenFileHandoff.DownloadsRequest : null)) is { } handoff)
         {
             if (OpenFileHandoff.Forward(handoff)) return;

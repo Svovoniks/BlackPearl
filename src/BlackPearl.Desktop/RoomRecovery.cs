@@ -27,7 +27,7 @@ public partial class MainWindow
     // The room's video as it downloads. It outlives the bridge, so reopening the same video keeps what was buffered:
     // after this app reconnects to the room, and after whoever plays the video reconnects and starts it again.
     private StreamCache? streamCache;
-    private static string StreamCacheDirectory => Path.Combine(Path.GetTempPath(), "BlackPearl", "stream-cache");
+    private static string StreamCacheDirectory => PhoneLibrary.StreamCacheDirectory;
     // The same for a converted stream: its pieces as they download, and the stream they belong to. A stream's pieces
     // never change, so they are good for as long as the room offers that stream.
     private (string StreamId, SegmentStore Store)? streamPieces;

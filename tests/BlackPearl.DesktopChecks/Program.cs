@@ -25,6 +25,9 @@ static class Program
         Environment.SetEnvironmentVariable("BLACKPEARL_DESKTOP", desktop);
         if (args.FirstOrDefault() == "--follow-system-probe") { FollowSystemProbe.Run(args[1]); return; }
         Environment.SetEnvironmentVariable("BLACKPEARL_FOLLOW_SYSTEM", "off");
+        // A window closed here never starts the phone host or changes Windows' sign-in entry, even on a scratch copy of a
+        // library with the phone remote on, whose phones would otherwise reach the copy.
+        Environment.SetEnvironmentVariable("BLACKPEARL_PHONE_HOST", "off");
         if (args.FirstOrDefault() == "--video-frames")
         {
             VideoFrameChecks.Run(Path.GetFullPath(args.ElementAtOrDefault(1) ?? Path.Combine("artifacts", "video-frames-" + Guid.NewGuid().ToString("N")))).GetAwaiter().GetResult(); return;
@@ -182,6 +185,17 @@ static class Program
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
             RoomPlaybackStatusChecks.Run(args.Contains("--screenshots")); app.Shutdown(); return;
+        }
+        if (args.FirstOrDefault() == "--phone-library")
+        {
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            app.Dispatcher.BeginInvoke(async () =>
+            {
+                try { await PhoneLibraryChecks.Run(directory); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { app.Shutdown(); }
+            });
+            app.Run(); return;
         }
         if (args.FirstOrDefault() == "--room-tracks")
         {

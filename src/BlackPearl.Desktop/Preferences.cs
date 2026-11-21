@@ -9,6 +9,16 @@ using BlackPearl.Core;
 
 namespace BlackPearl.Desktop;
 
+// The room server's address, read the same way by the app and by the phone host. Saving Settings stores the address
+// shown, so earlier defaults also move to the current one: the retired Sites service, and the VPS's IP-based name, which
+// still answers so saved rooms and older invitations keep working.
+internal static class ServerSettings
+{
+    public const string Default = "https://backrooms.svovolabs.com";
+    private static readonly string[] Retired = ["https://watchroom-rooms.svovoniks.chatgpt.site", "https://31-76-63-229.sslip.io"];
+    public static string Saved(LibraryStore library) => library.Setting("server") is { Length: > 0 } saved && !Retired.Contains(saved) ? saved : Default;
+}
+
 public partial class MainWindow
 {
     private sealed record LocaleChoice(string Code, string Name);
@@ -37,11 +47,7 @@ public partial class MainWindow
     private readonly DispatcherTimer metadataLocaleRefresh = new() { Interval = TimeSpan.FromMilliseconds(1500) };
     private bool HasUnsavedPreferences => preferencesReady &&
         (PreferenceSnapshot() != preferencesBaseline || MetadataToken.Password != savedMetadataToken);
-    // Saving Settings stores the address shown, so earlier defaults also move to the current one: the retired Sites service,
-    // and the VPS's IP-based name, which still answers so saved rooms and older invitations keep working.
-    private const string DefaultServerAddress = "https://backrooms.svovolabs.com";
-    private static readonly string[] RetiredServerAddresses = ["https://watchroom-rooms.svovoniks.chatgpt.site", "https://31-76-63-229.sslip.io"];
-    private string SavedServerAddress => library.Setting("server") is { Length: > 0 } saved && !RetiredServerAddresses.Contains(saved) ? saved : DefaultServerAddress;
+    private string SavedServerAddress => ServerSettings.Saved(library);
     private string SavedDisplayName => library.Setting("name") ?? Environment.UserName;
     private bool SavedAutoArtwork => library.Setting("artwork") != "false";
 
