@@ -242,14 +242,38 @@ public partial class MainWindow
         // The phone left while the video was being prepared: the stream waits for it as for any dropped link.
         if (remote.Connected.All(s => s.PhoneId != session.PhoneId)) ExpirePhoneStream(remote, session.PhoneId);
         var title = PlaybackTitle(item);
-        string? detail = item.Series is not null
-            ? string.Join(" · ", new[] { item.Season is { } season ? $"Season {season}" : null, item.EpisodeDisplayTitle }.OfType<string>())
-            : item.Year?.ToString(CultureInfo.InvariantCulture);
+        var detail = PhoneStreamDetail(item);
+        var (source, version) = (items.ToArray(), PreferredVersion(item));
+        var (back, forward, start) = await Task.Run(() => PhoneEpisodeSteps(source, item, version));
+        // The phone picks its audio and subtitles the way this PC would (Settings › Playback).
+        var tracks = new { audio = audioLanguages, subtitles = subtitleLanguages, rules = subtitleLanguageRules.Select(rule => new { audio = rule.AudioLanguage, languages = rule.Languages }) };
         remote.SendMessage(session, stream.Converter is { } converter
             ? new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "hls", streamId = converter.Stream.Id,
-                segments = converter.Stream.Segments, segmentMs = converter.Stream.SegmentMs, quality = converter.Stream.Quality, qualities, note }
+                segments = converter.Stream.Segments, segmentMs = converter.Stream.SegmentMs, quality = converter.Stream.Quality, qualities, note, previous = back, next = forward, first = start, tracks }
             : (object)new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "file", resource = "file/" + item.Id,
-                length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note });
+                length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note, previous = back, next = forward, first = start, tracks });
+    }
+
+    private static string? PhoneStreamDetail(MediaItem item) => item.Series is not null
+        ? string.Join(" · ", new[] { item.Season is { } season ? $"Season {season}" : null, item.EpisodeDisplayTitle }.OfType<string>())
+        : item.Year?.ToString(CultureInfo.InvariantCulture);
+
+    private record PhoneStep(string Id, string Title, string? Detail);
+
+    // The episodes the phone's Previous and Next play, chosen as this PC's own buttons and up-next countdown choose them,
+    // and the show's first episode, where Loop all starts again after the last one. Null for a film, or at either end.
+    private static (PhoneStep? Previous, PhoneStep? Next, PhoneStep? First) PhoneEpisodeSteps(MediaItem[] source, MediaItem item, string? version)
+    {
+        if (item.Series is null || item.Season is null || item.Episode is null || item.IsMusic) return (null, null, null);
+        static PhoneStep Step(MediaItem episode) => new(episode.Id, PlaybackTitle(episode), PhoneStreamDetail(episode));
+        var episodes = EpisodePlayback.Episodes(source, item, version);
+        var at = Array.FindIndex(episodes, episode => episode.Id == item.Id);
+        MediaItem? previous = null;
+        for (var index = at - 1; at > 0 && index >= 0 && previous is null; index--)
+            if (episodes[index].Available && File.Exists(episodes[index].Path)) previous = episodes[index];
+        var next = EpisodePlayback.Next(source, item, false, episode => File.Exists(episode.Path), version);
+        var first = next is null && FirstPlayable(episodes, item) is { } start && start.Id != item.Id ? start : null;
+        return (previous is null ? null : Step(previous), next is null ? null : Step(next), first is null ? null : Step(first));
     }
 
     // A conversion of the video at the quality asked for, or why there is none: no converter, a file that can't be read,
