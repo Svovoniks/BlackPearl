@@ -41,16 +41,18 @@ public partial class MainWindow
     }
 
     // A phone that loses its link usually reconnects within moments, mid-video, so its stream waits two minutes for it.
-    // Each drop starts the wait over: an earlier drop's wait ends without effect once the phone came back in between.
+    // Each drop starts the wait over: an earlier drop's wait ends without effect once the phone came back in between. A
+    // wait ends only the stream it began with, so one the phone started since, on this link or a restarted one, stays.
     private readonly ConcurrentDictionary<string, int> phoneDrops = new();
     private void ExpirePhoneStream(PhoneRemoteHost remote, string phoneId)
     {
         var drop = phoneDrops.AddOrUpdate(phoneId, 1, (_, count) => count + 1);
+        if (!phoneStreams.TryGetValue(phoneId, out var waiting)) return;
         _ = Task.Run(async () =>
         {
             await Task.Delay(PhoneStreamGrace);
-            if (phoneDrops.GetValueOrDefault(phoneId) != drop || remote.Connected.Any(s => s.PhoneId == phoneId)) return;
-            if (phoneStreams.TryRemove(phoneId, out var stream)) stream.Dispose();
+            if (phoneDrops.GetValueOrDefault(phoneId) != drop || phoneRemote is not { } current || current.Connected.Any(s => s.PhoneId == phoneId)) return;
+            if (phoneStreams.TryRemove(KeyValuePair.Create(phoneId, waiting))) waiting.Dispose();
         });
     }
     private static readonly TimeSpan PhoneStreamGrace = TimeSpan.FromMinutes(2);
@@ -88,8 +90,9 @@ public partial class MainWindow
             PlaybackDiagnostics.Record("phone-request-failed", new { type, error = ex.GetType().Name });
             try
             {
-                Fail("failed", ex is IOException or UnauthorizedAccessException && ex.Message.Length is > 0 and < 200
-                    ? ex.Message : "The PC couldn't do that. Try again.");
+                // Not the exception's own message: those can name the file's path, which phones never see.
+                Fail("failed", ex is IOException or UnauthorizedAccessException
+                    ? "The PC couldn't open that video. Its drive may be disconnected." : "The PC couldn't do that. Try again.");
             }
             catch (Exception) { }
         }
@@ -202,19 +205,24 @@ public partial class MainWindow
         var id = Text(message, "id");
         var item = items.FirstOrDefault(x => x.Id == id && x.Available && !x.IsVirtual);
         if (item is null || !File.Exists(item.Path)) { fail("gone", "That video isn't available on the PC. Its drive may be disconnected."); return; }
+        var wanted = Text(message, "quality") ?? "auto";
+        var home = Text(message, "network") == "home";
+        // At home the file plays as it is, and the probe only lists the qualities the file allows; it starts now, so a
+        // video taken over from the PC isn't left stopped while it runs.
+        var ffmpeg = item.IsMusic ? null : Ffmpeg.Find();
+        if (ffmpeg is not null && (wanted == StreamQuality.OriginalId || wanted == "auto" && home)) _ = ProbeForPhone(ffmpeg, item, TimeSpan.Zero);
         long? takenAt = null;
         if (Flag(message, "takeOver") && room is null && playingItem?.Id == item.Id && HasMediaPlayback && player is not null)
         {
             // Where the PC is now, also for a title watched before, whose saved position stays 0 while it is watched again.
-            takenAt = Math.Max(0, PlaybackPosition());
+            // A video still opening holds its resume point until it plays.
+            takenAt = Math.Max(0, player.Time <= 0 && localResume > 0 ? localResume : PlaybackPosition());
             SavePlaybackPosition();
             if (nativeStopCount == 0) { ready = false; await loading.WaitAsync(); try { await StopNativePlayback(); } finally { loading.Release(); } }
         }
         if (phoneStreams.TryRemove(session.PhoneId, out var previous)) previous.Dispose();
         var resume = takenAt ?? (!WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0);
         var file = new FileMediaSource(item.Path, PlaybackTitle(item), item.Id);
-        var wanted = Text(message, "quality") ?? "auto";
-        var home = Text(message, "network") == "home";
         var qualities = new List<string> { StreamQuality.OriginalId };
         PhoneStream stream = new(item, file);
         string? note = null;
@@ -226,7 +234,7 @@ public partial class MainWindow
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
             else note = why;
         }
-        else if (!item.IsMusic && Ffmpeg.Find() is { } ffmpeg && await ProbeForPhone(ffmpeg, item, TimeSpan.FromSeconds(2)) is { } probe)
+        else if (ffmpeg is not null && await ProbeForPhone(ffmpeg, item, TimeSpan.FromSeconds(2)) is { } probe)
             qualities.AddRange(StreamQuality.For(probe.ClassHeight).Select(q => q.Id));
         if (phoneRemote != remote) { stream.Dispose(); return; }
         if (phoneStreams.TryRemove(session.PhoneId, out var raced)) raced.Dispose();

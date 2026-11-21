@@ -82,12 +82,14 @@ public partial class MainWindow
         RenderPhoneRemote();
     }
 
-    // Whether the video playing is one of the library's, rather than a file opened on its own. Remembered per video: the
-    // state is read four times a second while a phone is connected.
-    private (string Id, bool Known) phoneStateItem;
+    // Whether the video playing is one of the library's, rather than a file opened on its own. Remembered per video and
+    // library list: the state is read four times a second while a phone is connected, and the library can load after a
+    // file opened at startup.
+    private (string Id, List<MediaItem> Items, bool Known) phoneStateItem;
     private bool InLibrary(MediaItem item)
     {
-        if (phoneStateItem.Id != item.Id) phoneStateItem = (item.Id, !string.IsNullOrEmpty(item.Path) && items.Any(x => x.Id == item.Id));
+        if (phoneStateItem.Id != item.Id || !ReferenceEquals(phoneStateItem.Items, items))
+            phoneStateItem = (item.Id, items, !string.IsNullOrEmpty(item.Path) && items.Any(x => x.Id == item.Id));
         return phoneStateItem.Known;
     }
 
