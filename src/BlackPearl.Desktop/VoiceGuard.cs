@@ -378,9 +378,10 @@ internal sealed class DelayLine(int length)
 
 // Keeps peaks below full scale without changing anything quieter. A block that would pass the ceiling is turned down
 // over its first 2 ms and the gain returns over about 200 ms, so loud laughter is lowered smoothly instead of clipping.
+// The ceiling sits just under full scale, so a microphone that is already loud passes untouched.
 internal sealed class PeakLimiter
 {
-    public const float Ceiling = 0.89f;
+    public const float Ceiling = 0.97f;
     private const int Attack = VoicePacket.SampleRate / 500;
     private static readonly float Recover = 1 - (float)Math.Exp(-10 / 200.0);
     private float gain = 1;

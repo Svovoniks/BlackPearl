@@ -226,9 +226,12 @@ internal sealed class VoiceProcessor : IDisposable
     // voice's average over the last ten seconds or so asks for 3 dB more or less, slowly. A voice that stays 15 dB
     // away from what was learned for two seconds is another microphone or another distance, and is learned afresh.
     // The last level learned carries over to the next time voice opens.
+    //
+    // The level aimed for leaves a voice's own peaks below full scale. 2 dB higher, the limiter had to hold peaks
+    // in 2 to 10% of the frames of ordinary speech; here it is under 1%.
     internal sealed class InputLevel
     {
-        public const double TargetDb = -21, MaxGainDb = 30;
+        public const double TargetDb = -23, MaxGainDb = 30;
         public const float Confident = 0.6f;
         private const int SettleBlocks = 100, AverageBlocks = 1000;
         private const double SettleStepDb = 0.5, StepDb = 0.02, StartDb = 3, StopDb = 0.25, AfreshDb = 15;

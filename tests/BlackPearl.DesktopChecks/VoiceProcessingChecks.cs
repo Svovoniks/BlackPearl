@@ -190,7 +190,7 @@ static class VoiceProcessingChecks
         check(same.SequenceEqual(soft), "the limiter does not touch audio below its ceiling");
         var loud = Enumerable.Range(1, 20).Select(i => { var tone = Tone(2, i); limiter.Apply(tone); return tone; }).ToArray();
         var step = loud.Skip(2).Max(tone => Enumerable.Range(1, Block - 1).Max(i => Math.Abs(tone[i] - tone[i - 1])));
-        check(loud.Max(tone => tone.Max(Math.Abs)) <= PeakLimiter.Ceiling + 1e-6f && step < 0.13f, $"a sound twice full scale is held below it smoothly (peak {loud.Max(tone => tone.Max(Math.Abs)):F2}, largest step {step:F3})");
+        check(loud.Max(tone => tone.Max(Math.Abs)) <= PeakLimiter.Ceiling + 1e-6f && step < PeakLimiter.Ceiling * 0.14f, $"a sound twice full scale is held below it smoothly (peak {loud.Max(tone => tone.Max(Math.Abs)):F2}, largest step {step:F3})");
         var after = soft;
         for (var i = 21; i < 121; i++) { after = Tone(0.5, i); limiter.Apply(after); }
         check(Math.Abs(after.Max(Math.Abs) - 0.5f) < 0.01f, $"and the level returns once it is over ({after.Max(Math.Abs):F2} of 0.50)");
@@ -204,7 +204,7 @@ static class VoiceProcessingChecks
         var shouts = Enumerable.Range(0, 3).Select(_ => Enumerable.Range(0, Block).Select(i => (float)(0.7 * Math.Sin(i * 0.1))).ToArray()).ToArray();
         foreach (var shout in shouts) { level.Learn(shout, 1); level.Apply(shout); limiter.Apply(shout); }
         var loudest = shouts.Max(s => s.Max(Math.Abs));
-        check(gain > 20 && loudest <= 0.9f, $"a loud sound after quiet speech is not clipped (gain {gain:F0} dB, peak {loudest:F2})");
+        check(gain > 20 && loudest <= PeakLimiter.Ceiling + 1e-6f, $"a loud sound after quiet speech is not clipped (gain {gain:F0} dB, peak {loudest:F2})");
         check(gain - level.GainDb < 0.5, $"and one loud moment does not change the gain ({gain - level.GainDb:F2} dB)");
         // The next time voice opens the level is already known. Another microphone, 20 dB louder, is then learned
         // afresh within a few seconds instead of over minutes.
