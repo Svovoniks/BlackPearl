@@ -64,7 +64,7 @@ static class VoiceProbe
             VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
             using var processor = new VoiceProcessor(capture, mode);
             processor.Processed = block => processed.AddRange(block);
-            var rows = new System.Text.StringBuilder("frame,heard,cleaned,sent,gain,limiter,restored,echo,similarity,delay\n");
+            var rows = new System.Text.StringBuilder("frame,heard,cleaned,sent,gain,limiter,restored,echo,similarity,delay,cancelled,echoDb,speechDb\n");
             var decoded = new short[Frame];
             for (var frame = 0; frame < frames; frame++)
             {
@@ -79,13 +79,47 @@ static class VoiceProbe
                     if (at >= 0) decoded.CopyTo(sent, at * Frame);
                 }
                 var (heard, cleaned) = processor.SpeechProbability;
-                rows.Append(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{heard:F3},{cleaned:F3},{packets.Count},{processor.InputGainDb:F1},{processor.LimiterDb:F1},{processor.Restored:F2},{(processor.EchoPresent ? 1 : 0)},{processor.EchoEvidence.Similarity:F2},{processor.EchoEvidence.DelayMs}\n");
+                rows.Append(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{heard:F3},{cleaned:F3},{packets.Count},{processor.InputGainDb:F1},{processor.LimiterDb:F1},{processor.Restored:F2},{(processor.EchoPresent ? 1 : 0)},{processor.EchoEvidence.Similarity:F2},{processor.EchoEvidence.DelayMs},{(processor.EchoCancelled ? 1 : 0)},{processor.EchoDb:F1},{processor.SpeechDb:F1}\n");
                 packets.Clear();
             }
             var name = Path.Combine(output, Path.GetFileNameWithoutExtension(file));
             Write(name + ".proc.wav", processed.ToArray());
             Write(name + ".sent.wav", sent);
             File.WriteAllText(name + ".csv", rows.ToString());
+        }
+    }
+    // Watches the processing on a real microphone without keeping or playing any audio:
+    // --voice-live <part of the microphone's name> <seconds> [Standard|Light|Off]. It opens that microphone and
+    // listens to what the default output plays, as voice does, and prints once a second: the processed level, the
+    // speech detector, whether the speakers were found in the microphone and how alike the two were, the input
+    // gain, and the limiter. Name a microphone that is safe to open: a Bluetooth headset's switches it to call mode.
+    public static async Task Live(string microphone, int seconds, string? only)
+    {
+        var mode = only is null ? VoiceAudio.Processing.Standard : Enum.Parse<VoiceAudio.Processing>(only);
+        var (inputs, _) = await VoiceAudio.ListDevicesAsync();
+        var device = inputs.FirstOrDefault(d => d.Name.Contains(microphone, StringComparison.OrdinalIgnoreCase));
+        if (device is null) { Console.WriteLine($"No microphone named like \"{microphone}\". Found: {string.Join("; ", inputs.Select(d => d.Name))}"); Environment.ExitCode = 1; return; }
+        var capture = new VoiceCapture { Transmitting = true };
+        var sent = 0; capture.Frame += _ => Interlocked.Increment(ref sent);
+        VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
+        await using var audio = new VoiceAudio(capture, null, new(device.Id, null, mode));
+        await audio.StartAsync();
+        Console.WriteLine($"Microphone: {audio.InputName}; ready: {audio.MicrophoneReady}; problem: {audio.Problem ?? "none"}");
+        if (!audio.MicrophoneReady || audio.Processor is not { } processor) { Environment.ExitCode = 1; return; }
+        Console.WriteLine($"Echo cancelling available: {processor.EchoCancelling}; denoiser: {processor.DenoiserName}; speech detection: {processor.DetectsSpeech}");
+        Console.WriteLine("second  level dBFS  speech  frames sent  echo found  cancelling  similarity  delay ms  echo dB  voice dB  gain dB  limiter dB  given back");
+        for (var second = 1; second <= seconds; second++)
+        {
+            double peak = -100; float similarity = 0, heard = 0, restored = 0; var delay = 0; double limiter = 0;
+            var before = Volatile.Read(ref sent);
+            for (var tick = 0; tick < 20; tick++)
+            {
+                await Task.Delay(50);
+                peak = Math.Max(peak, capture.LevelDb); heard = Math.Max(heard, processor.SpeechProbability.Heard); restored = Math.Max(restored, processor.Restored);
+                limiter = Math.Min(limiter, processor.LimiterDb);
+                var evidence = processor.EchoEvidence; if (evidence.Similarity > similarity) { similarity = evidence.Similarity; delay = evidence.DelayMs; }
+            }
+            Console.WriteLine(FormattableString.Invariant($"{second,6}  {peak,10:F1}  {heard,6:F2}  {Volatile.Read(ref sent) - before,11}  {(processor.EchoPresent ? "yes" : "no"),10}  {(processor.EchoCancelled ? "yes" : "no"),10}  {similarity,10:F2}  {delay,8}  {processor.EchoDb,7:F1}  {processor.SpeechDb,8:F1}  {processor.InputGainDb,7:F1}  {limiter,10:F1}  {restored,10:F2}"));
         }
     }
     static void Write(string path, short[] samples)

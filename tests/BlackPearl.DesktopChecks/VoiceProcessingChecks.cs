@@ -157,22 +157,29 @@ static class VoiceProcessingChecks
             for (var n = 0; n < Block; n++) { error += Math.Pow(output[n] - blocks[i - 1][n], 2); power += blocks[i - 1][n] * blocks[i - 1][n]; }
         }
         check(error / power < 1e-8, $"the guard returns unchanged audio as it was, one block later (error {10 * Math.Log10(error / power + 1e-20):F0} dB)");
-        // In a pause the denoiser's silence stands; during speech in a quiet room the microphone comes back.
+        // In a pause the denoiser's silence stands; during speech in a quiet room, where the denoiser kept half of a
+        // voice, the microphone comes back.
         guard = new VoiceGuard();
         float[] silence = new float[Block], pause = [], talk = [];
         for (var i = 0; i < 100; i++) { pause = (float[])silence.Clone(); guard.Process(Hiss(0.01), pause, 0); }
+        for (var i = 0; i < 30; i++) { var heard = Hiss(0.2); talk = heard.Select(v => v / 2).ToArray(); guard.Process(heard, talk, 1); }
+        check(pause.Max(Math.Abs) < 1e-4 && Rms(talk) > 0.1, $"the guard leaves pauses silent and gives back what a denoiser took from speech (pause peak {pause.Max(Math.Abs):F5}, speech {Rms(talk):F2} of 0.12)");
+        // A sound the denoiser removed whole, with nothing of the voice near it, stays removed: a door, not a voice.
+        guard = new VoiceGuard();
+        for (var i = 0; i < 100; i++) guard.Process(Hiss(0.01), (float[])silence.Clone(), 0);
         for (var i = 0; i < 30; i++) { talk = (float[])silence.Clone(); guard.Process(Hiss(0.2), talk, 1); }
-        check(pause.Max(Math.Abs) < 1e-4 && Rms(talk) > 0.08, $"the guard leaves pauses silent and gives back what a denoiser took from speech (pause peak {pause.Max(Math.Abs):F5}, speech {Rms(talk):F2} of 0.12)");
-        // With that much noise measured in the pauses, the denoiser may remove that much from speech.
+        check(Rms(talk) < 0.01, $"the guard does not give back a sound the denoiser removed whole ({Rms(talk):F3})");
+        // With that much noise measured in the pauses, the denoiser may remove that much from speech: what it halved
+        // stays halved.
         guard = new VoiceGuard();
         for (var i = 0; i < 100; i++) guard.Process(Hiss(0.2), (float[])silence.Clone(), 0);
-        for (var i = 0; i < 30; i++) { talk = (float[])silence.Clone(); guard.Process(Hiss(0.2), talk, 1); }
-        check(Rms(talk) < 0.01, $"the guard lets a denoiser remove as much as the noise it measured ({Rms(talk):F3})");
+        for (var i = 0; i < 30; i++) { var heard = Hiss(0.2); talk = heard.Select(v => v / 2).ToArray(); guard.Process(heard, talk, 1); }
+        check(Rms(talk) < 0.07, $"the guard lets a denoiser remove as much as the noise it measured ({Rms(talk):F3} of 0.058)");
         // A quiet microphone that is then raised by 20 dB has the same room, 20 dB louder.
         guard = new VoiceGuard();
         for (var i = 0; i < 100; i++) guard.Process(Hiss(0.02), (float[])silence.Clone(), 0);
-        for (var i = 0; i < 30; i++) { talk = (float[])silence.Clone(); guard.Process(Hiss(0.2), talk, 1, 20); }
-        check(Rms(talk) < 0.01, $"the noise the guard measured follows the microphone's gain ({Rms(talk):F3})");
+        for (var i = 0; i < 30; i++) { var heard = Hiss(0.2); talk = heard.Select(v => v / 2).ToArray(); guard.Process(heard, talk, 1, 20); }
+        check(Rms(talk) < 0.07, $"the noise the guard measured follows the microphone's gain ({Rms(talk):F3} of 0.058)");
 
         // The filter in front of everything takes out rumble below the voice and leaves the lowest voices alone.
         double Passes(double hz)

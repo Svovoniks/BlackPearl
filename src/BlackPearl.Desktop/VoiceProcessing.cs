@@ -43,13 +43,20 @@ internal sealed class VoiceProcessor : IDisposable
     private readonly PeakLimiter limiter = new();
     // How much of the output is the echo canceller's, 0 to 1; it moves over 20 ms when echo appears or goes.
     private float cancelling;
+    // An echo this far under the voice, in dB, is not cancelled.
+    public const double FaintEchoDb = -20;
+    private bool loudEcho, echoFound;
     // Below 60 Hz there is no voice, only rumble, hum and the thump of a desk. The denoiser removes far less of any
     // noise when that is left in: in pauses a living room's noise stayed 25 dB louder without this filter.
     private readonly Biquad rumble = Biquad.HighPass(60);
     private SpeechDetector? heard, cleaned;
     public bool EchoCancelling => echo is not null;
-    // Whether the speakers' sound is in the microphone, so the echo canceller's output is the one in use.
+    // Whether the speakers' sound is in the microphone, and whether it is loud enough that the echo canceller's
+    // output is the one in use.
     internal bool EchoPresent => echo is not null && presence.Present;
+    internal bool EchoCancelled => echo is not null && loudEcho;
+    internal double EchoDb => presence.EchoDb;
+    internal double SpeechDb => level.SpeechDb;
     internal (float Similarity, int DelayMs) EchoEvidence => presence.Latest;
     internal float Restored => guard.Restored;
     internal double LimiterDb => limiter.GainDb;
@@ -70,7 +77,7 @@ internal sealed class VoiceProcessor : IDisposable
             denoiser = processing == VoiceAudio.Processing.Standard ? Try<IDenoiser>("deepfilter", () => new DeepFilter()) : null;
             denoiser ??= Try<IDenoiser>("rnnoise", () => new RnNoise());
         }
-        cancelling = presence.Present ? 1 : 0;
+        cancelling = 0;
         heard = Try("speech", () => new SpeechDetector());
         if (heard is not null && denoiser is not null) cleaned = Try("speech", () => new SpeechDetector());
         capture.SpeechDetected = heard is null ? null : false;
@@ -99,6 +106,8 @@ internal sealed class VoiceProcessor : IDisposable
         }
     }
 
+    // Which microphone the samples come from, before the first of them.
+    public void Microphone(string id) { lock (gate) level.Microphone(id); }
     // Microphone samples, from the capture thread.
     public void Write(ReadOnlySpan<short> samples)
     {
@@ -155,7 +164,15 @@ internal sealed class VoiceProcessor : IDisposable
         presence.Microphone(block);
         directDelay.Run(block, direct);
         canceller.ProcessCapture(block);
-        var wanted = presence.Present ? 1f : 0f;
+        // A faint echo is left to the denoiser and the speech gate, which remove it between words: cancelling costs
+        // the voice far more than an echo 20 dB under it does. Only one that rivals the voice is cancelled.
+        // Until an echo is found the speech detector hears the movie's dialogue as speech, so a level learned in
+        // that time may be the movie's and not the voice's.
+        if (presence.Present && !echoFound) level.Doubt();
+        echoFound = presence.Present;
+        var apart = presence.EchoDb - level.SpeechDb;
+        loudEcho = presence.Present && (double.IsNaN(apart) || apart > (loudEcho ? FaintEchoDb - 3 : FaintEchoDb));
+        var wanted = loudEcho ? 1f : 0f;
         if (cancelling == 1 && wanted == 1) return;
         var next = Math.Clamp(cancelling + Math.Sign(wanted - cancelling) * 0.5f, 0, 1);
         for (var i = 0; i < BlockSamples; i++)
@@ -224,8 +241,9 @@ internal sealed class VoiceProcessor : IDisposable
     // The gain is set once and then left alone, so it never rides on words or sentences: loud and soft syllables
     // keep their difference. It follows the first second of speech closely, and after that moves only when the
     // voice's average over the last ten seconds or so asks for 3 dB more or less, slowly. A voice that stays 15 dB
-    // away from what was learned for two seconds is another microphone or another distance, and is learned afresh.
-    // The last level learned carries over to the next time voice opens.
+    // louder than what was learned for two seconds is a closer or hotter microphone, and is learned afresh. Quieter
+    // speech never is: it may be a television or someone across the room, which must not be raised to a voice's
+    // level. The last level learned carries over to the next time voice opens, for the same microphone.
     //
     // The level aimed for leaves a voice's own peaks below full scale. 2 dB higher, the limiter had to hold peaks
     // in 2 to 10% of the frames of ordinary speech; here it is under 1%.
@@ -237,6 +255,9 @@ internal sealed class VoiceProcessor : IDisposable
         private const double SettleStepDb = 0.5, StepDb = 0.02, StartDb = 3, StopDb = 0.25, AfreshDb = 15;
         private const int AfreshBlocks = 200;
         private static double remembered = double.NaN;
+        private static string? microphone;
+        // The voice's level as the microphone delivers it, before any gain; NaN until it has been heard.
+        public double SpeechDb => speechDb;
         private double speechDb = remembered, recentDb = double.NaN;
         private int apart;
         private int learned = double.IsNaN(remembered) ? 0 : AverageBlocks;
@@ -252,7 +273,7 @@ internal sealed class VoiceProcessor : IDisposable
             var db = 10 * Math.Log10(sum / samples.Length + 1e-12);
             if (db < -80) return;
             recentDb = double.IsNaN(recentDb) ? db : recentDb + (db - recentDb) / 50;
-            apart = !double.IsNaN(speechDb) && learned >= SettleBlocks && Math.Abs(recentDb - speechDb) > AfreshDb ? apart + 1 : 0;
+            apart = !double.IsNaN(speechDb) && learned >= SettleBlocks && recentDb - speechDb > AfreshDb ? apart + 1 : 0;
             if (apart >= AfreshBlocks) { speechDb = double.NaN; learned = 0; apart = 0; }
             // Pauses inside speech are not its level.
             if (!double.IsNaN(speechDb) && db < speechDb - 20) return;
@@ -261,7 +282,15 @@ internal sealed class VoiceProcessor : IDisposable
             remembered = speechDb;
         }
         // Forgets the level carried over between sessions, so checks start from the same place.
-        internal static void Forget() => remembered = double.NaN;
+        internal static void Forget() { remembered = double.NaN; microphone = null; }
+        // Starts over unless the level is long established; the gain stays where it is until speech is heard again.
+        public void Doubt() { if (learned < AverageBlocks) { speechDb = recentDb = double.NaN; learned = 0; } }
+        // Another microphone has another level: what was learned from the last one is dropped.
+        public void Microphone(string id)
+        {
+            if (microphone is not null && microphone != id) { speechDb = remembered = recentDb = double.NaN; learned = 0; gainDb = 0; moving = false; }
+            microphone = id;
+        }
         // Rises or falls smoothly across each block. Peaks are the limiter's concern, after noise removal.
         public void Apply(float[] samples)
         {

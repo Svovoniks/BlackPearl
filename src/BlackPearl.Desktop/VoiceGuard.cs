@@ -46,6 +46,10 @@ internal sealed class EchoPresence
     private int sinceCompared, quiet, lastDelay = int.MinValue, earlierDelay = int.MinValue;
     private long lastPlayed;
     public bool Present { get; private set; } = remembered ?? false;
+    // How loud the echo is at the microphone, in dBFS within the compared band: the part of the microphone that the
+    // speakers account for at the echo's delay, which a voice on top does not change. NaN until an echo is found.
+    public double EchoDb => echoPower > 0 ? 10 * Math.Log10(echoPower) : double.NaN;
+    private double echoPower;
     // The latest comparison, for diagnostics and checks: how similar, and at which delay in milliseconds.
     internal (float Similarity, int DelayMs) Latest { get; private set; }
     internal static void Forget() => remembered = null;
@@ -92,12 +96,18 @@ internal sealed class EchoPresence
         var matched = played.AsSpan(bestOffset, Window);
         if (Dot(matched, matched, Window) / Window < PlayingPower) { Skip(); return; }
         var delay = Late - bestOffset;
+        var explained = best * best * heardPower / Window;
         Latest = ((float)best, delay * 1000 / Rate);
         // Windows overlap by half, so the one to agree with is the one before the last.
         var echo = best >= Certain || best >= Likely && Math.Abs(delay - earlierDelay) <= Rate / 1000;
         earlierDelay = lastDelay; lastDelay = best >= Likely ? delay : int.MinValue;
-        if (echo) { quiet = 0; Set(true); }
-        else if (Present && ++quiet >= ForgetWindows) Set(false);
+        if (echo)
+        {
+            quiet = 0;
+            echoPower = echoPower > 0 ? echoPower + (explained - echoPower) * 0.3 : explained;
+            Set(true);
+        }
+        else if (Present && ++quiet >= ForgetWindows) { echoPower = 0; Set(false); }
     }
     private static bool Thin(ReadOnlySpan<float> window, double power)
     {
@@ -172,8 +182,12 @@ internal sealed class Biquad
 // the noise measured in the pauses accounts for, with a margin; where it took more, the microphone's own signal is
 // mixed back until that holds. Pauses keep the denoiser's full suppression, so nothing changes there.
 //
-// In a quiet room that leaves the voice exactly as the microphone heard it; the more noise there is, the more the
-// denoiser is allowed to do. It works on 20 ms windows that overlap by half, and delays the audio by 10 ms.
+// What is given back is in turn limited to what the voice could have put there: a few times the loudest the denoiser
+// itself let through in that band over the last moments. A room's tail and a fading syllable follow the voice and
+// come back; a slammed door in a band where there was no voice does not.
+//
+// In a quiet room that leaves the voice as the microphone heard it; the more noise there is, the more the denoiser
+// is allowed to do. It works on 20 ms windows that overlap by half, and delays the audio by 10 ms.
 internal sealed class VoiceGuard
 {
     public const int Block = VoiceProcessor.BlockSamples, Delay = Block;
@@ -181,6 +195,10 @@ internal sealed class VoiceGuard
     // The denoiser may remove this many times the noise measured in the pauses. Noise is not steady, and the measure
     // already follows its louder moments, so this mostly covers noise that grew since the last pause.
     public const float Margin = 8;
+    // A band is raised to at most what the denoiser kept plus this many times the most it kept there lately, which
+    // fades by 1 dB every 10 ms. On real recordings this brought back most of the noise removal the guard had cost.
+    public const float Tail = 4;
+    private const double Fade = 0.8;
     // Speech is present from this probability, fully at the upper one, for 150 ms after it was last heard. The audio
     // here is 40 ms behind the speech detector, so a word's first sounds are covered as well.
     public const float Maybe = 0.15f, Surely = 0.4f;
@@ -191,7 +209,7 @@ internal sealed class VoiceGuard
     private readonly Fourier fourier = new(Size);
     private readonly float[] noisyLast = new float[Block], cleanLast = new float[Block], overlap = new float[Block];
     private readonly float[] noisyReal = new float[Size], noisyImaginary = new float[Size], cleanReal = new float[Size], cleanImaginary = new float[Size];
-    private readonly double[] noise = new double[Bands];
+    private readonly double[] noise = new double[Bands], lately = new double[Bands];
     private readonly float[] weight = new float[Bands], recent = new float[HoldBlocks + AheadBlocks + 1];
     private int recentAt;
     private double gain;
@@ -237,11 +255,13 @@ internal sealed class VoiceGuard
             }
             if (presence <= 0) noise[band] += (before > noise[band] ? Rise : Fall) * (before - noise[band]);
             var allowed = Margin * noise[band];
+            lately[band] = Math.Max(after, lately[band] * Fade);
             var mix = 0f;
             if (presence > 0 && before - after > allowed)
             {
                 // Mixing the microphone back raises the band's amplitude about linearly from the denoiser's to its own.
-                double from = Math.Sqrt(after), to = Math.Sqrt(before), wanted = Math.Sqrt(Math.Max(before - allowed, 0));
+                double from = Math.Sqrt(after), to = Math.Sqrt(before);
+                var wanted = Math.Sqrt(Math.Min(Math.Max(before - allowed, 0), after + Tail * lately[band]));
                 mix = (float)Math.Clamp((wanted - from) / Math.Max(to - from, 1e-12), 0, 1) * presence;
             }
             weight[band] = Math.Max(Math.Min(mix, weight[band] + Attack), weight[band] * Release);

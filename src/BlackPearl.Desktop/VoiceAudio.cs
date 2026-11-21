@@ -64,6 +64,8 @@ internal sealed class VoiceAudio : IAsyncDisposable
     private MMDeviceNotificationClient? notifications;
     private WasapiRecorder? recorder, loopback;
     private VoiceProcessor? processor;
+    // The processing behind the open microphone, for the live probe.
+    internal VoiceProcessor? Processor => processor;
     private WasapiPlayer? player;
     private Settings settings;
     private int restartQueued;
@@ -166,6 +168,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
         using var device = Find(enumerator, DataFlow.Capture, settings.Input);
         if (device is null) return;
         InputName = device.FriendlyName;
+        processing.Microphone(device.ID);
         WasapiRecorder Build(bool raw)
         {
             var builder = new WasapiRecorderBuilder().WithDevice(device).WithFormat(new WaveFormat(VoicePacket.SampleRate, 16, 1)).WithBufferLength(20);
