@@ -45,6 +45,14 @@ public partial class MainWindow
         if (room?.IsConnected == true) { fail("in-room", "The PC is in a room. Leave the room on the PC to play this there."); return false; }
         if (PhoneLibrary.Playable(message, fail) is not { } item) return false;
         PhoneLibrary.SaveHandOver(item, PhoneLibrary.Position(message));
+        // From one of this PC's queues: it becomes the player's queue, as when played here, and Next goes on through it.
+        // Not while a room is open with its connection dropped: the room keeps its queue, and the video plays on its own.
+        if (room is null && PhoneLibrary.QueuePlace(message, item.Id) is ({ } fromQueue, var place) && savedQueues.FirstOrDefault(q => q.Id == fromQueue.Id) is { } saved)
+        {
+            SelectPlaybackQueue(saved);
+            await PlayQueueAt(PhoneQueues.PlaybackIndex(saved, MediaById(), place));
+            return true;
+        }
         queuePosition = -1;
         await PlayLocalItem(item);
         PublishQueue();
