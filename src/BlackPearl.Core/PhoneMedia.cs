@@ -124,6 +124,7 @@ internal sealed class PhoneMediaServer : IDisposable
                         var count = Math.Min(FrameBytes, bytes.Length - offset);
                         BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(4), offset);
                         bytes.AsSpan(offset, count).CopyTo(frame.AsSpan(HeaderBytes));
+                        await Room(request.Cancellation.Token);
                         channel.Send(frame.AsSpan(0, HeaderBytes + count));
                         offset += count;
                     } while (offset < bytes.Length && !request.Cancellation.IsCancellationRequested);
@@ -148,6 +149,28 @@ internal sealed class PhoneMediaServer : IDisposable
         finally
         {
             foreach (var (request, read) in reading) _ = read.ContinueWith(t => { _ = t.Exception; request.Cancellation.Dispose(); }, TaskScheduler.Default);
+        }
+    }
+
+    // The phone's messages share one link with these bytes, and the WebRTC library sends what it has queued in order:
+    // an answer such as Continue on PC's "done" queued behind megabytes of video reached a phone seconds later, or not
+    // before the link changed. So a frame goes only while little of this channel is still waiting to be sent.
+    public const int MaxBuffered = 256 * 1024;
+    private static readonly System.Reflection.FieldInfo? channelId =
+        typeof(DataChannelDotnet.Impl.RtcDataChannel).GetField("_channelId", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+    private int Buffered()
+    {
+        // The library's wrapper doesn't say how much is queued; its native handle does.
+        if (channelId?.GetValue(channel) is not int id) return 0;
+        var buffered = DataChannelDotnet.Bindings.Rtc.rtcGetBufferedAmount(id);
+        return buffered < 0 ? 0 : buffered;
+    }
+    private async Task Room(CancellationToken ct)
+    {
+        for (var wait = 1; Buffered() > MaxBuffered; wait = Math.Min(wait * 2, 20))
+        {
+            if (!channel.IsOpen) throw new ObjectDisposedException(nameof(PhoneMediaServer));
+            await Task.Delay(wait, ct);
         }
     }
 

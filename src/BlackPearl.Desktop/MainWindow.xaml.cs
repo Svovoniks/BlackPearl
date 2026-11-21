@@ -220,6 +220,14 @@ public partial class MainWindow : Window
             });
             if (closing) return;
             OpenFilesReady();
+            // Continue on the PC from a phone while BlackPearl was closed: the phone host opened it with the video, whose
+            // position it saved. It plays from its details page, as when started from the library.
+            if (!openedFile && Program.PlayMediaId is { } handedOver && items.FirstOrDefault(x => x.Id == handedOver && x.Available && !x.IsVirtual) is { } fromPhone)
+            {
+                Select(fromPhone);
+                queuePosition = -1;
+                _ = Guard(async () => { await PlayLocalItem(fromPhone); PublishQueue(); });
+            }
             // Background work reads files and the whole catalog; while a video opened at launch starts, it waits.
             var housekeeping = openedFile ? Task.WhenAny(firstPlayback.Task, Task.Delay(TimeSpan.FromSeconds(10), lifetime.Token)) : Task.CompletedTask;
             _ = Guard(async () =>
@@ -2489,7 +2497,8 @@ public partial class MainWindow : Window
         InitializeCaption(new WindowInteropHelper(this).Handle);
         InitializePictureInPicture(new WindowInteropHelper(this).Handle);
         InitializeMediaControls();
-        SyncPhoneRemote();
+        SyncPhoneRemote(); SyncPhoneHostStartup();
+        if (Application.Current is { } app) app.SessionEnding += (_, _) => sessionEnding = true;
         ApplyTitleBarTheme();
         Activated += (_, _) => ApplyTitleBarTheme();
         Deactivated += (_, _) => ApplyTitleBarTheme();
@@ -2517,7 +2526,10 @@ public partial class MainWindow : Window
     private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref uint value, int size);
     private async void WindowClosing(object? sender, CancelEventArgs e)
     {
-        if (closing) return; e.Cancel = true; closing = true; lifetime.Cancel(); timer.Stop(); scanDelay.Stop();
+        if (closing) return;
+        // Before closing stops the phone link: the phones' host takes over once this app has let go of the library.
+        var keepPhones = KeepsPhonesAfterClosing;
+        e.Cancel = true; closing = true; lifetime.Cancel(); timer.Stop(); scanDelay.Stop();
         ApplyPreferences(); // A setting typed just before closing is still applied.
         OpenFileHandoff.StopListening();
         DisableSystemMediaControls();
@@ -2538,6 +2550,7 @@ public partial class MainWindow : Window
         {
             // Playback position and the room session are saved; a video opened now can start its own window.
             OpenFileHandoff.Release();
+            if (keepPhones) PhoneHost.Start();
             pictureInPictureWindow?.Close();
             Video.MediaPlayer = null;
             var native = player; var engine = vlc; player = null; vlc = null;

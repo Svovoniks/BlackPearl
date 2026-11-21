@@ -135,6 +135,8 @@ Root: HKCU; Subkey: "Software\BlackPearl\Capabilities\FileAssociations"; ValueTy
 ; Auto-download registers these itself when it's turned on (see FollowSystem.cs); uninstalling removes them.
 Root: HKCU; Subkey: "Software\Classes\blackpearl-downloads"; ValueType: none; Flags: uninsdeletekey dontcreatekey
 Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Svovoniks.BlackPearl.Downloads"; ValueType: none; Flags: uninsdeletekey dontcreatekey
+; The phone host's sign-in entry, which Settings › Profile › Phone remote adds when chosen (see PhoneHost.cs).
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "BlackPearl phone access"; Flags: uninsdeletevalue dontcreatekey
 [Run]
 Filename: "{app}\BlackPearl.exe"; Description: "Open BlackPearl"; Flags: nowait postinstall skipifsilent
 [UninstallRun]
