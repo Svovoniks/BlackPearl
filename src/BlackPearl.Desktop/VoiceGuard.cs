@@ -49,6 +49,8 @@ internal sealed class EchoPresence
     // How loud the echo is at the microphone, in dBFS within the compared band: the part of the microphone that the
     // speakers account for at the echo's delay, which a voice on top does not change. NaN until an echo is found.
     public double EchoDb => echoPower > 0 ? 10 * Math.Log10(echoPower) : double.NaN;
+    // How long after the speakers the echo arrives, in milliseconds, when it was last found.
+    public int EchoDelayMs { get; private set; }
     private double echoPower;
     // The latest comparison, for diagnostics and checks: how similar, and at which delay in milliseconds.
     internal (float Similarity, int DelayMs) Latest { get; private set; }
@@ -105,6 +107,7 @@ internal sealed class EchoPresence
         {
             quiet = 0;
             echoPower = echoPower > 0 ? echoPower + (explained - echoPower) * 0.3 : explained;
+            EchoDelayMs = delay * 1000 / Rate;
             Set(true);
         }
         else if (Present && ++quiet >= ForgetWindows) { echoPower = 0; Set(false); }
@@ -329,7 +332,7 @@ internal sealed class VoiceGuard
     }
 
     // An in-place radix-2 transform of complex data held as two arrays.
-    private sealed class Fourier
+    internal sealed class Fourier
     {
         private readonly int size;
         private readonly int[] reversed;

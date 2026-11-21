@@ -127,6 +127,20 @@ static class VoiceProcessingChecks
         check(doubleTalk.SentAfter(6) > voiceFrames * 0.6, $"speaking over the movie is still sent ({doubleTalk.SentAfter(6)} of {voiceFrames} frames)");
         var level = doubleTalk.Level(6, 12) - Level(voice);
         check(level > -10, $"the voice keeps its level while the canceller removes the movie ({level:F1} dB)");
+        // A longer talk over the movie: once the echo is being subtracted instead of suppressed, the voice comes
+        // through whole. WebRTC's canceller alone leaves a third of it more than 6 dB down.
+        var longMovie = Repeat(speech, Rate * 32);
+        var longHeard = new short[longMovie.Length];
+        for (var i = 0; i < longHeard.Length; i++) longHeard[i] = (short)((i >= 1920 ? longMovie[i - 1920] * 0.5 : 0) + (i >= 3360 ? longMovie[i - 3360] * 0.2 : 0));
+        var longVoice = new short[longMovie.Length];
+        var saying = Film(speech, Rate * 20, music: false);
+        for (var i = Rate * 12; i < longVoice.Length; i++) longVoice[i] = saying[i - Rate * 12];
+        var longTalk = Process(VoiceAudio.Processing.Standard, Mix(longHeard, longVoice), longMovie);
+        var whole = Compare(longVoice[(Rate * 16)..], longTalk.Audio[(Rate * 16)..]);
+        check(longTalk.Subtracted, $"an echo that can be subtracted is subtracted ({longTalk.Echo})");
+        check(whole.Dips < 0.12, $"talking over the movie from speakers keeps the voice whole ({whole.Dips:P0} of frames dip, gain moves {whole.Moves:F1} dB; {longTalk.Echo})");
+        var leftover = Level(longHeard[(Rate * 8)..(Rate * 12)]) - longTalk.Level(8, 12);
+        check(leftover > 20, $"and before anyone talks the movie is still removed ({leftover:F0} dB quieter)");
 
         // Headphones: the movie plays, but none of it reaches the microphone. An echo canceller handed a movie it
         // cannot find suppresses the voice instead, so it has to stand aside.
@@ -222,6 +236,61 @@ static class VoiceProcessingChecks
         var asked = VoiceProcessor.InputLevel.TargetDb - 20 * Math.Log10(0.03 / Math.Sqrt(2));
         check(Math.Abs(level.GainDb - asked) < 1.5, $"a microphone that is suddenly 20 dB louder gets the gain its own level asks for within four seconds ({level.GainDb:F1} of {asked:F1} dB)");
         VoiceProcessor.InputLevel.Forget();
+
+        // Subtracting the echo: the speakers' sound arrives 30 ms later with a reflection behind it, and someone
+        // talks over it half of the time. The echo goes; the talking stays as it was.
+        var subtractor = new EchoSubtractor();
+        var movie = Noise(Rate * 20, 0.05, 21); var talk2 = Noise(Rate * 20, 0.05, 22);
+        double echoIn = 0, echoOut = 0, talkIn = 0, talkOut = 0;
+        var cleaned = new float[Block]; var previous = new float[Block];
+        for (var at = 0; at + Block <= Rate * 20; at += Block)
+        {
+            var playedBlock = new float[Block]; var heardBlock = new float[Block]; var spoken = new float[Block];
+            var talking = at / (Rate / 2) % 2 == 1;
+            for (var i = 0; i < Block; i++)
+            {
+                var n = at + i;
+                playedBlock[i] = movie[n] / 32768f;
+                spoken[i] = talking ? talk2[n] / 32768f : 0;
+                heardBlock[i] = spoken[i] + (n >= 1440 ? 0.5f * movie[n - 1440] / 32768f : 0) + (n >= 4000 ? 0.2f * movie[n - 4000] / 32768f : 0);
+            }
+            subtractor.Process(heardBlock, playedBlock, cleaned);
+            // The output is one block late; the last five seconds are measured, away from where talking starts or stops.
+            var before = at - Block; var steady = before % (Rate / 2) is >= 4800 and < Rate / 2 - 9600;
+            if (at >= Rate * 15 && steady)
+            {
+                var wasTalking = before / (Rate / 2) % 2 == 1;
+                for (var i = 0; i < Block; i++)
+                {
+                    var n = before + i;
+                    double echo = 0.5 * movie[n - 1440] / 32768.0 + 0.2 * movie[n - 4000] / 32768.0, voice = wasTalking ? talk2[n] / 32768.0 : 0;
+                    if (wasTalking) { talkIn += voice * voice; talkOut += cleaned[i] * (double)cleaned[i]; }
+                    else { echoIn += echo * echo; echoOut += cleaned[i] * (double)cleaned[i]; }
+                }
+            }
+        }
+        var removed = 10 * Math.Log10(echoIn / (echoOut + 1e-12)); var keptTalk = 10 * Math.Log10(talkOut / talkIn);
+        check(removed > 15 && Math.Abs(keptTalk) < 1.5 && subtractor.Restarts == 0, $"subtracting takes the echo away and leaves the talking over it ({removed:F0} dB less echo, talking {keptTalk:+0.0;-0.0} dB)");
+        check(subtractor.WorkingDb > 15, $"and it knows that it is working ({subtractor.WorkingDb:F0} dB)");
+        // With the speakers' sound arriving after its echo, there is nothing to subtract, and it says so.
+        var hopeless = new EchoSubtractor();
+        for (var at = Rate; at + Block <= Rate * 8; at += Block)
+        {
+            var playedBlock = new float[Block]; var heardBlock = new float[Block];
+            for (var i = 0; i < Block; i++) { playedBlock[i] = movie[at + i - 4800] / 32768f; heardBlock[i] = 0.5f * movie[at + i] / 32768f; }
+            hopeless.Process(heardBlock, playedBlock, cleaned);
+        }
+        check(hopeless.WorkingDb < 6, $"where it cannot work it says so, and is not used ({hopeless.WorkingDb:F0} dB)");
+        // The speakers' sound is handed over in order, a little kept in hand, with silence when it runs out.
+        var queue = new SpeakerQueue(); var handed = new float[Block];
+        float[] Numbered(int from) => Enumerable.Range(from, Block).Select(v => (float)v).ToArray();
+        queue.Write(Numbered(0));
+        var early = queue.Read(handed, 0);
+        queue.Write(Numbered(Block)); queue.Write(Numbered(2 * Block));
+        var first = queue.Read(handed, 0) && handed[0] == Block;
+        var second = queue.Read(handed, 0) && handed[0] == 2 * Block;
+        var empty = !queue.Read(handed, 0) && handed.All(v => v == 0);
+        check(!early && first && second && empty, "the speakers' sound reaches the subtractor in order, and silence when there is none");
 
         // Whether the speakers reach the microphone: none is assumed until an echo is found, which takes a second or
         // two; it is taken to be gone after ten seconds of the speakers playing without it, and silence from the
@@ -329,7 +398,7 @@ static class VoiceProcessingChecks
     }
     // A movie's sound that has nothing to do with the voice: another, higher and faster voice made from the same
     // speech, over notes of music.
-    static short[] Film(short[] speech, int length)
+    static short[] Film(short[] speech, int length, bool music = true)
     {
         var random = new Random(31);
         var result = new double[length];
@@ -338,7 +407,7 @@ static class VoiceProcessingChecks
             var position = (i * 1.19 + Rate * 3) % (speech.Length - 1); var at = (int)position;
             result[i] = speech[at] + (speech[at + 1] - speech[at]) * (position - at);
         }
-        for (var start = 0; start < length;)
+        for (var start = 0; music && start < length;)
         {
             var note = (int)(Rate * (0.2 + random.NextDouble() * 0.4)); var pitch = 110 * Math.Pow(2, random.Next(24) / 12.0);
             for (var i = 0; i < note && start + i < length; i++)
@@ -352,7 +421,7 @@ static class VoiceProcessingChecks
     }
 
 
-    sealed record Result(double[] Levels, List<int> SentFrames, short[] Audio, bool EchoPresent, float Similarity)
+    sealed record Result(double[] Levels, List<int> SentFrames, short[] Audio, bool EchoPresent, float Similarity, bool Subtracted, string Echo)
     {
         public int Sent => SentFrames.Count;
         public int SentAfter(int seconds) => SentFrames.Count(f => f >= seconds * Rate / Frame);
@@ -374,15 +443,16 @@ static class VoiceProcessingChecks
         var audio = new List<short>(microphone.Length);
         processor.Processed = block => audio.AddRange(block);
         var levels = new double[microphone.Length / Frame];
-        var similarity = 0f;
+        var similarity = 0f; int late = 0, subtracted = 0, suppressed = 0;
         for (frame = 0; frame < levels.Length; frame++)
         {
             if (speakers is not null) processor.Reference(speakers.AsSpan(frame * Frame, Frame));
             processor.Write(microphone.AsSpan(frame * Frame, Frame));
             levels[frame] = capture.LevelDb;
             similarity = Math.Max(similarity, processor.EchoEvidence.Similarity);
+            if (frame >= levels.Length / 2) { late++; if (processor.EchoSubtracted) subtracted++; else if (processor.EchoCancelled) suppressed++; }
         }
-        return new(levels, sent, audio.ToArray(), processor.EchoPresent, similarity);
+        return new(levels, sent, audio.ToArray(), processor.EchoPresent, similarity, processor.EchoSubtracted, FormattableString.Invariant($"echo {processor.EchoDb:F0} dBFS, voice {processor.SpeechDb:F0} dBFS, subtraction working {processor.SubtractionDb:F0} dB; in the second half subtracted {100 * subtracted / Math.Max(late, 1)}% and suppressed {100 * suppressed / Math.Max(late, 1)}% of the time"));
     }
     // The level of the loudest tenth of the samples: what a voice's level means, ignoring its pauses.
     static double ActiveDb(short[] samples)

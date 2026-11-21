@@ -7,8 +7,9 @@ using BlackPearl.Core;
 namespace BlackPearl.Desktop;
 
 // BlackPearl's own microphone processing; Windows' communications pipeline is never used. Every 10 ms of microphone:
-// rumble below the voice is filtered out; WebRTC's echo canceller (AEC3) removes what the speakers are playing, using a loopback recording of the output as
-// its reference, but only while that sound is actually found in the microphone (EchoPresence); a quiet microphone
+// rumble below the voice is filtered out; what the speakers are playing is removed, using a loopback recording of
+// the output, but only while that sound is actually found in the microphone and rivals the voice (EchoPresence): by
+// subtracting it where that works (EchoSubtractor), otherwise by WebRTC's echo canceller (AEC3); a quiet microphone
 // is brought up to a normal level; a neural denoiser removes background noise (DeepFilterNet 3, or the lighter
 // RNNoise), limited while someone speaks to what the noise between words accounts for (VoiceGuard); and a limiter
 // catches peaks. Apart from the noise, the voice is meant to leave as it arrived: nothing here compresses it or
@@ -36,13 +37,21 @@ internal sealed class VoiceProcessor : IDisposable
     private IDenoiser? denoiser;
     // The microphone beside the echo canceller's output, and beside the denoiser's, each delayed to line up with it.
     private readonly float[] direct = new float[BlockSamples], noisy = new float[BlockSamples];
-    private readonly DelayLine directDelay = new(WebRtcApm.CaptureDelay);
+    // Three versions of the microphone, lined up one block late: as it is, with the echo subtracted, and from
+    // WebRTC's canceller.
+    private readonly DelayLine directDelay = new(EchoSubtractor.Delay), cancelledDelay = new(EchoSubtractor.Delay - WebRtcApm.CaptureDelay);
+    private readonly float[] cancelled = new float[BlockSamples], subtracted = new float[BlockSamples], played = new float[BlockSamples], mixed = new float[BlockSamples];
+    private readonly SpeakerQueue speakers = new();
+    private EchoSubtractor? subtractor;
+    private int subtractorLate;
+    private enum Source { Direct, Subtracted, Cancelled }
+    private Source source, former;
+    private float faded = 1;
+    private bool subtracting;
     private DelayLine? noisyDelay;
     private readonly EchoPresence presence = new();
     private readonly VoiceGuard guard = new();
     private readonly PeakLimiter limiter = new();
-    // How much of the output is the echo canceller's, 0 to 1; it moves over 20 ms when echo appears or goes.
-    private float cancelling;
     // An echo this far under the voice, in dB, is not cancelled.
     public const double FaintEchoDb = -20;
     private bool loudEcho, echoFound;
@@ -55,6 +64,9 @@ internal sealed class VoiceProcessor : IDisposable
     // output is the one in use.
     internal bool EchoPresent => echo is not null && presence.Present;
     internal bool EchoCancelled => echo is not null && loudEcho;
+    // Whether the echo is being subtracted rather than suppressed, and how well the subtraction is working, in dB.
+    internal bool EchoSubtracted => source == Source.Subtracted;
+    internal double SubtractionDb => subtractor?.WorkingDb ?? 0;
     internal double EchoDb => presence.EchoDb;
     internal double SpeechDb => level.SpeechDb;
     internal (float Similarity, int DelayMs) EchoEvidence => presence.Latest;
@@ -77,7 +89,6 @@ internal sealed class VoiceProcessor : IDisposable
             denoiser = processing == VoiceAudio.Processing.Standard ? Try<IDenoiser>("deepfilter", () => new DeepFilter()) : null;
             denoiser ??= Try<IDenoiser>("rnnoise", () => new RnNoise());
         }
-        cancelling = 0;
         heard = Try("speech", () => new SpeechDetector());
         if (heard is not null && denoiser is not null) cleaned = Try("speech", () => new SpeechDetector());
         capture.SpeechDetected = heard is null ? null : false;
@@ -157,31 +168,51 @@ internal sealed class VoiceProcessor : IDisposable
         Processed?.Invoke(output);
         capture.Write(output);
     }
-    // The echo canceller always hears the microphone, so it is ready when echo appears; its output is used only then.
+    // WebRTC's canceller always hears the microphone, so it is ready when it is needed.
     private void CancelEcho()
     {
         if (echo is not { } canceller) return;
         presence.Microphone(block);
         directDelay.Run(block, direct);
+        if (echoFound)
+        {
+            // The speakers' sound is given a head start of all but 80 ms of the echo's delay, so the echo falls
+            // inside the 240 ms the subtractor can follow; a delay that has moved on starts it afresh.
+            var late = Math.Max(0, presence.EchoDelayMs - 80) * VoicePacket.SampleRate / 1000;
+            if (subtractor is null || Math.Abs(late - subtractorLate) > VoicePacket.SampleRate * 30 / 1000) { subtractor = new(); subtractorLate = late; subtracting = false; }
+            speakers.Read(played, subtractorLate);
+            subtractor.Process(block, played, subtracted);
+        }
+        else { subtractor = null; subtracting = false; }
         canceller.ProcessCapture(block);
-        // A faint echo is left to the denoiser and the speech gate, which remove it between words: cancelling costs
-        // the voice far more than an echo 20 dB under it does. Only one that rivals the voice is cancelled.
+        cancelledDelay.Run(block, cancelled);
         // Until an echo is found the speech detector hears the movie's dialogue as speech, so a level learned in
         // that time may be the movie's and not the voice's.
         if (presence.Present && !echoFound) level.Doubt();
         echoFound = presence.Present;
+        // Subtracting costs the voice nothing, so it is used whenever what it leaves is a faint echo: one 20 dB or
+        // more under the voice, which the denoiser and the speech gate remove between words. Where it cannot manage
+        // that, an echo that rivals the voice goes to WebRTC's canceller, which costs the voice a great deal, and a
+        // faint one is left alone, which costs less.
         var apart = presence.EchoDb - level.SpeechDb;
         loudEcho = presence.Present && (double.IsNaN(apart) || apart > (loudEcho ? FaintEchoDb - 3 : FaintEchoDb));
-        var wanted = loudEcho ? 1f : 0f;
-        if (cancelling == 1 && wanted == 1) return;
-        var next = Math.Clamp(cancelling + Math.Sign(wanted - cancelling) * 0.5f, 0, 1);
+        var left = apart - (subtractor?.WorkingDb ?? 0);
+        subtracting = presence.Present && subtractor is not null && !double.IsNaN(left) && left < (subtracting ? FaintEchoDb + 3 : FaintEchoDb);
+        var wanted = subtracting ? Source.Subtracted : loudEcho ? Source.Cancelled : Source.Direct;
+        if (wanted != source && faded >= 1) { former = source; source = wanted; faded = 0; }
+        var to = Pick(source);
+        if (faded >= 1) { to.CopyTo(block, 0); return; }
+        // One version gives way to another over 20 ms.
+        var from = Pick(former); var next = Math.Min(1, faded + 0.5f);
         for (var i = 0; i < BlockSamples; i++)
         {
-            var share = cancelling + (next - cancelling) * (i + 1) / BlockSamples;
-            block[i] = direct[i] + share * (block[i] - direct[i]);
+            var share = faded + (next - faded) * (i + 1) / BlockSamples;
+            mixed[i] = from[i] + share * (to[i] - from[i]);
         }
-        cancelling = next;
+        mixed.CopyTo(block, 0);
+        faded = next;
     }
+    private float[] Pick(Source which) => which switch { Source.Subtracted => subtracted, Source.Cancelled => cancelled, _ => direct };
     private void Denoise()
     {
         if (denoiser is not { } active) return;
@@ -218,7 +249,7 @@ internal sealed class VoiceProcessor : IDisposable
                 for (var i = 0; i < count; i++) reference[referenceFilled + i] = samples[i] / 32768f;
                 referenceFilled += count; samples = samples[count..];
                 if (referenceFilled < BlockSamples) continue;
-                referenceFilled = 0; presence.Speakers(reference); canceller.ProcessRender(reference);
+                referenceFilled = 0; presence.Speakers(reference); speakers.Write(reference); canceller.ProcessRender(reference);
             }
         }
     }
