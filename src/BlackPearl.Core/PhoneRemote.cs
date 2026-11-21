@@ -16,6 +16,8 @@ public static class PhoneRemoteProtocol
 {
     public const int Version = 1;
     public const string Label = "remote-v1";
+    // The second channel, for video and picture bytes, so a long read never holds up a command.
+    public const string MediaLabel = "media-v1";
     public static readonly TimeSpan PairingLifetime = TimeSpan.FromMinutes(10);
     public static string PcId(string hostKey) => PersistentRooms.Hash(hostKey)[..32];
     public static string NewHex(int bytes) => Convert.ToHexString(RandomNumberGenerator.GetBytes(bytes)).ToLowerInvariant();
@@ -53,9 +55,11 @@ public record RemoteCommand(string Action, JsonElement? Value)
     public double? Number => Value is { ValueKind: JsonValueKind.Number } value ? value.GetDouble() : null;
 }
 public record RemoteRoom(string Name, int People);
-// What the phone shows. Null fields are left out when nothing is loaded.
+// What the phone shows. Null fields are left out when nothing is loaded. MediaId names the library video the PC plays on
+// its own (not in a room), for the phone to take it over.
 public record RemoteState(bool Media, string? Title = null, string? Detail = null, bool? Playing = null, long? PositionMs = null, long? DurationMs = null,
-    int Volume = 100, bool Muted = false, string Loop = "off", bool Fullscreen = false, bool HasPrevious = false, bool HasNext = false, bool CanControl = true, RemoteRoom? Room = null)
+    int Volume = 100, bool Muted = false, string Loop = "off", bool Fullscreen = false, bool HasPrevious = false, bool HasNext = false, bool CanControl = true, RemoteRoom? Room = null,
+    string? MediaId = null)
 {
     public string Type => "state";
 }
@@ -77,6 +81,8 @@ public sealed class PhoneRemoteOptions
     public bool CanStart { get; init; } = true;
     // How long a PC replaced by another copy of its library waits before taking the phone remote back.
     public TimeSpan ReplacedWait { get; init; } = TimeSpan.FromMinutes(1);
+    // What this PC offers beyond the remote, sent in welcome: "library" (browse), "watch" (play on the phone).
+    public IReadOnlyList<string> Features { get; init; } = [];
 }
 
 // One phone's link. PhoneId is "pair" until a pairing session pairs.
@@ -95,6 +101,7 @@ public sealed class PhoneRemoteSession
     internal string Key { get; }
     internal RtcPeerConnection Peer { get; }
     internal IRtcDataChannel? Channel { get; set; }
+    internal PhoneMediaServer? Media { get; set; }
     internal bool Greeted { get; set; }
     public bool Open => Channel?.IsOpen == true && Greeted;
 }
@@ -129,6 +136,12 @@ public sealed class PhoneRemoteHost : IDisposable
     public event Action? Changed;
     public event Action<PhoneRemoteSession, RemoteCommand>? Command;
     public event Action<PairedPhone>? Paired;
+    // Any other message from a paired phone, such as browse or watch: its type and the whole message.
+    public event Action<PhoneRemoteSession, string, JsonElement>? Request;
+    // A paired phone's link closed.
+    public event Action<PhoneRemoteSession>? Disconnected;
+    // Answers the phone's reads on its media channel. Called on threads other than the UI's.
+    public PhoneResourceResolver? ResolveMedia { get; set; }
     // Called for every phone that opens a link, to send it the current state. Null sends nothing; the caller then
     // publishes the state itself.
     public Func<RemoteState?>? CurrentState { get; set; }
@@ -161,7 +174,7 @@ public sealed class PhoneRemoteHost : IDisposable
             options.Store.Save(phones);
             sessions.Remove(phoneId, out open);
         }
-        if (open is not null) Close(open);
+        if (open is not null) { Close(open); Disconnected?.Invoke(open); }
         Changed?.Invoke();
     }
 
@@ -176,6 +189,14 @@ public sealed class PhoneRemoteHost : IDisposable
 
     public void SendError(PhoneRemoteSession session, string code, string message) =>
         Send(session, Wire.Serialize(new { type = "error", code, message }));
+
+    // Sends a message to one phone. One larger than the channel's 64 KiB limit throws.
+    public void SendMessage(PhoneRemoteSession session, object message)
+    {
+        var text = Wire.Serialize(message);
+        if (Encoding.UTF8.GetByteCount(text) > 65536) throw new InvalidDataException("Phone message is too large");
+        Send(session, text);
+    }
 
     private void Send(PhoneRemoteSession session, string text)
     {
@@ -319,7 +340,7 @@ public sealed class PhoneRemoteHost : IDisposable
             }
             else if (session is not null) session.SignalingPeer = peer;
         }
-        if (replaced is not null) Close(replaced);
+        if (replaced is not null) { Close(replaced); if (replaced.PhoneId != "pair") Disconnected?.Invoke(replaced); }
         if (signal.Kind == "sdp")
         {
             var sdp = Wire.Read<RemoteSdp>(signal.Payload);
@@ -376,6 +397,14 @@ public sealed class PhoneRemoteHost : IDisposable
 
     private void Attach(string sessionKey, PhoneRemoteSession session, IRtcDataChannel channel)
     {
+        if (channel.Label == PhoneRemoteProtocol.MediaLabel && session.Media is null)
+        {
+            var media = session.Media = new PhoneMediaServer(session, channel, (s, resource, ct) =>
+                s.Greeted && s.PhoneId != "pair" && ResolveMedia is { } resolve ? resolve(s, resource, ct) : Task.FromResult<PhoneResource?>(null));
+            // The media channel can close on its own; a new one then takes its place.
+            channel.OnClose += _ => { if (session.Media == media) { session.Media = null; media.Dispose(); } };
+            return;
+        }
         if (channel.Label != PhoneRemoteProtocol.Label || session.Channel is not null) { try { channel.Dispose(); } catch { } return; }
         session.Channel = channel;
         channel.OnClose += _ => Drop(sessionKey, session);
@@ -408,7 +437,7 @@ public sealed class PhoneRemoteHost : IDisposable
                     Close(session); return;
                 }
                 session.Device = Text(message, "device") is { Length: > 0 and <= 80 } device ? device : null;
-                Send(session, Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId = PcId, canStart = options.CanStart }));
+                Send(session, Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId = PcId, canStart = options.CanStart, features = options.Features }));
                 session.Greeted = true;
                 if (session.PhoneId != "pair") { Seen(session.PhoneId); SendState(session); }
                 Changed?.Invoke();
@@ -443,6 +472,9 @@ public sealed class PhoneRemoteHost : IDisposable
                 JsonElement? value = message.TryGetProperty("value", out var v) && v.ValueKind is JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False ? v.Clone() : null;
                 Command?.Invoke(session, new RemoteCommand(action, value));
                 break;
+            case { Length: > 0 and <= 40 } type when session.Greeted && session.PhoneId != "pair" && type is not ("hello" or "pair" or "command"):
+                Request?.Invoke(session, type, message.Clone());
+                break;
         }
     }
 
@@ -470,12 +502,18 @@ public sealed class PhoneRemoteHost : IDisposable
             removed = sessions.TryGetValue(session.PhoneId == "pair" ? sessionKey : session.PhoneId, out var current) && current == session;
             if (removed) sessions.Remove(session.PhoneId == "pair" ? sessionKey : session.PhoneId);
         }
-        if (removed) { Close(session); Changed?.Invoke(); }
+        if (removed)
+        {
+            Close(session);
+            if (session.PhoneId != "pair") Disconnected?.Invoke(session);
+            Changed?.Invoke();
+        }
     }
 
     // Native callbacks can run while their connection is closing; close on the thread pool.
     private static void Close(PhoneRemoteSession session) => _ = Task.Run(() =>
     {
+        session.Media?.Dispose();
         try { session.Channel?.Dispose(); } catch { }
         try { session.Peer.Dispose(); } catch { }
     });

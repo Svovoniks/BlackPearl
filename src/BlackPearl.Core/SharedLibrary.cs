@@ -65,8 +65,9 @@ public static class SharedLibrary
     public const int PageSize = 8;
     private static string Limit(string? value, int length) => value is null ? "" : value[..Math.Min(value.Length, length)];
     public static LibraryBrowsePage Browse(IEnumerable<MediaItem> source, LibraryBrowseRequest request, Func<string?, string?>? thumbnail = null,
-        IReadOnlyDictionary<string, string>? playback = null)
+        IReadOnlyDictionary<string, string>? playback = null, int pageSize = PageSize)
     {
+        if (pageSize is < 1 or > 60) throw new ArgumentOutOfRangeException(nameof(pageSize));
         if (request.Query is null || request.Query.Length > 100 || request.Category is < 0 or > 3 and not LibraryCatalog.Music || request.Page is < 0 or > 100000 || request.ParentId?.Length > 128)
             throw new InvalidDataException("Invalid library search");
         // Keep artwork paths internal; only bounded thumbnail bytes leave the host.
@@ -89,9 +90,9 @@ public static class SharedLibrary
         // A series' episode count describes it on Home, as in the host's own.
         var episodes = overview?.Unseen.ToDictionary<HomeTitle, LibraryCard, int>(title => title.Card, title => title.Episodes, ReferenceEqualityComparer.Instance);
         var cards = home?.Select(entry => entry.Card).ToList() ?? LibraryCatalog.Search(visible, request.Query, parent is null ? null : LibraryIdentity.ShowKey(publicItems.First(x => x.Id == parent.Id)), parent?.Kind, request.Season);
-        var page = Math.Min(request.Page, Math.Max(0, (cards.Count - 1) / PageSize));
-        var result = new LibraryBrowsePage(cards.Skip(page * PageSize).Take(PageSize).Select((c, index) => Entry(c, thumbnail) with
-            { HomeSection = home?[page * PageSize + index].Section, PositionMs = home?[page * PageSize + index].PositionMs ?? 0,
+        var page = Math.Min(request.Page, Math.Max(0, (cards.Count - 1) / pageSize));
+        var result = new LibraryBrowsePage(cards.Skip(page * pageSize).Take(pageSize).Select((c, index) => Entry(c, thumbnail) with
+            { HomeSection = home?[page * pageSize + index].Section, PositionMs = home?[page * pageSize + index].PositionMs ?? 0,
               Episodes = episodes?.GetValueOrDefault(c) ?? 0 }).ToArray(), cards.Count, page, Limit(location, 240));
         // The data JSON is nested in the wire envelope: escaped Unicode counts twice.
         // Preserve posters and titles, shortening optional summaries to fit the channel.

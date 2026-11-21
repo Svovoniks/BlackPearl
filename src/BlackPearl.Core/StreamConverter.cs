@@ -165,6 +165,20 @@ public sealed class StreamConverter : IDisposable
         }
     }
 
+    // A piece for a phone's media channel (PHONE-REMOTE.md). Like a viewer's read, it is answered within a few seconds:
+    // a piece still converting then says so, and the phone asks again.
+    public async Task<PhoneResource> PhonePieceAsync(int index, CancellationToken ct)
+    {
+        int length;
+        using (var limit = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            limit.CancelAfter(AnswerMs);
+            try { length = await LengthAsync(index, limit.Token); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new PhoneResourceBusyException("That part of the stream is still being converted."); }
+        }
+        return new(length, (offset, count, _) => Task.FromResult(Read(index, offset, count) ?? throw new IOException("That part of the stream is unavailable.")));
+    }
+
     public byte[]? Read(int index, long offset, int count)
     {
         if (store.Has(index)) return store.Read(index, offset, count);

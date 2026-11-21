@@ -55,7 +55,7 @@ public partial class MainWindow
         phoneRemoteServer = server;
         phoneRemote = new PhoneRemoteHost(new PhoneRemoteOptions
         {
-            Server = server, HostKey = hostKey, PcName = PcName, Store = new SettingsPhoneStore(library), CanStart = PhonesCanStart,
+            Server = server, HostKey = hostKey, PcName = PcName, Store = new SettingsPhoneStore(library), CanStart = PhonesCanStart, Features = PhoneFeatures,
             AppVersion = typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
         });
         var remote = phoneRemote;
@@ -65,6 +65,7 @@ public partial class MainWindow
         // Asked from a native thread when a phone connects. The state is read on the UI thread, which then sends it to
         // every phone, rather than holding the native thread until it can.
         remote.CurrentState = () => { Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) PublishPhoneRemoteState(force: true); }); return null; };
+        AttachPhonePlayback(remote);
         remote.Start();
         phoneRemoteTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => PublishPhoneRemoteState(), Dispatcher);
         phoneRemoteTimer.Start();
@@ -76,8 +77,20 @@ public partial class MainWindow
         phoneRemoteTimer?.Stop();
         pairingWindow?.Close();
         if (phoneRemote is { } remote) { phoneRemote = null; remote.Dispose(); }
+        ClosePhoneStreams();
         phoneRemoteServer = null; phoneRemoteSentKey = null;
         RenderPhoneRemote();
+    }
+
+    // Whether the video playing is one of the library's, rather than a file opened on its own. Remembered per video and
+    // library list: the state is read four times a second while a phone is connected, and the library can load after a
+    // file opened at startup.
+    private (string Id, List<MediaItem> Items, bool Known) phoneStateItem;
+    private bool InLibrary(MediaItem item)
+    {
+        if (phoneStateItem.Id != item.Id || !ReferenceEquals(phoneStateItem.Items, items))
+            phoneStateItem = (item.Id, items, !string.IsNullOrEmpty(item.Path) && items.Any(x => x.Id == item.Id));
+        return phoneStateItem.Known;
     }
 
     private RemoteState PhoneRemoteState()
@@ -94,7 +107,9 @@ public partial class MainWindow
         var position = Math.Max(0, PlaybackPosition());
         return new RemoteState(true, title, string.IsNullOrWhiteSpace(detail) ? null : detail, WantsMediaPlayback, position, Math.Max(0, player.Length),
             (int)Math.Round(Volume.Value), player.Mute, loopMode switch { LoopMode.All => "all", LoopMode.One => "one", _ => "off" }, fullscreen,
-            PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom);
+            PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom,
+            // Only a video this PC plays on its own can move to the phone; a room's belongs to the room.
+            room is null && item is { IsMusic: false } && InLibrary(item) ? item.Id : null);
     }
 
     // Sends the state when something other than the advancing position changed, after a seek, and every five seconds
@@ -187,7 +202,7 @@ public partial class MainWindow
         }
         var enabled = PhoneRemoteEnabled;
         var main = Card("Phone remote");
-        main.Children.Add(Line("Control playback on this PC from BlackPearl Mobile on your phone, at home or away. The phone connects straight to this PC; your room server only introduces them."));
+        main.Children.Add(Line("Control playback on this PC from BlackPearl Mobile on your phone, at home or away, or browse this library and watch it on the phone, then carry on here from the same moment. The phone connects straight to this PC; your room server only introduces them."));
         var toggle = new CheckBox { IsChecked = enabled, Content = "Allow paired phones to control BlackPearl", Margin = new Thickness(0, 14, 0, 0) };
         toggle.Click += (_, _) => { library.Setting("phoneRemote", toggle.IsChecked == true ? "on" : "off"); SyncPhoneRemote(); RenderPhoneRemote(force: true); };
         main.Children.Add(toggle);

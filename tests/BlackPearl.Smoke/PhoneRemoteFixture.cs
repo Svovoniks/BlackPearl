@@ -26,6 +26,14 @@ static class PhoneRemoteFixture
             "0123456789abcdef0123456789abcdef", "sdp", "{\"type\":\"offer\",\"sdp\":\"v=0\"}") == "AHCUPPyOcWPNmRtEBJ6D5PQUJwF9CV5-GHlhUpfTkX8", "phone remote signatures match the protocol's first test vector");
         check(PhoneRemoteProtocol.Sign("ffeeddccbbaa99887766554433221100", "pc", "pair", "0123456789abcdef0123456789abcdef", "ice",
             "{\"candidate\":\"candidate:1 1 UDP 2122317823 192.168.1.20 50000 typ host\",\"mid\":\"0\"}") == "bIGb4K6s3ztFQAOUL2Q3Oof397tsk3TiGq_W2ZB3I_I", "phone remote signatures match the protocol's second test vector");
+        // A phone's progress saves as the PC's own playback does.
+        check(PhoneProgress.From(754000, 6300000, false, false) == new PhoneProgress(754000, true, false), "a phone's progress saves its position and counts as played");
+        check(PhoneProgress.From(5000, 6300000, false, false) == new PhoneProgress(5000, false, false), "a few seconds on the phone don't count as played");
+        check(PhoneProgress.From(6299000, 6300000, false, false) == new PhoneProgress(0, true, true) && PhoneProgress.From(100, 0, true, false).Ended,
+            "the end of a video, or the phone saying it ended, marks it watched and clears its resume point");
+        check(PhoneProgress.From(600000, 6300000, true, false) == new PhoneProgress(600000, true, false) && PhoneProgress.From(6270000, 6300000, true, false).Ended,
+            "a phone that says it ended in the middle of a video, as when its stream stopped, doesn't mark it watched");
+        check(PhoneProgress.From(900000, 6300000, false, true).ResumeMs == 0, "a title watched before keeps no resume point while it is watched again, as on the PC");
         await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", url => Exercise(url, check));
         await OtherServers(check);
     }
@@ -77,7 +85,19 @@ static class PhoneRemoteFixture
 
         var store = new MemoryStore();
         using var host = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Test PC", AppVersion = "0.0.0-test", Store = store,
-            ReplacedWait = TimeSpan.FromSeconds(8) });
+            ReplacedWait = TimeSpan.FromSeconds(8), Features = ["library", "watch"] });
+        // A made-up video of 600,000 bytes, and a resource that is never ready.
+        var video = Enumerable.Range(0, 600000).Select(i => (byte)(i * 31 % 251)).ToArray();
+        host.ResolveMedia = (_, resource, _) => Task.FromResult(resource switch
+        {
+            "file/test" => new PhoneResource(video.Length, (offset, count, _) => Task.FromResult(video.AsSpan((int)offset, count).ToArray())),
+            "stream/busy/0" => throw new PhoneResourceBusyException("Still converting."),
+            _ => null,
+        });
+        var requests = Channel.CreateUnbounded<(string Type, JsonElement Message)>();
+        host.Request += (session, type, message) => { requests.Writer.TryWrite((type, message)); host.SendMessage(session, new { type = "page", request = message.GetProperty("request").GetInt64(), entries = Array.Empty<object>() }); };
+        var disconnected = 0;
+        host.Disconnected += _ => Interlocked.Increment(ref disconnected);
         var commands = Channel.CreateUnbounded<RemoteCommand>();
         host.Command += (_, command) => commands.Writer.TryWrite(command);
         host.CurrentState = () => new RemoteState(true, "Night Signal", "Season 2 · Episode 3", Playing: false, PositionMs: 1000, DurationMs: 60000, Volume: 40);
@@ -146,10 +166,27 @@ static class PhoneRemoteFixture
             check(seek.Action == "seek-by" && seek.Number == -10000 && toggle.Action == "toggle" && toggle.Value is null, "the phone's commands reach the PC with their values");
             host.Publish(new RemoteState(true, "Night Signal", Playing: true, PositionMs: 5000, DurationMs: 60000));
             check(await phone.Next("state") is { } playing && playing.GetProperty("playing").GetBoolean(), "the PC's state reaches the phone");
+            check(await phone.MediaOpened(), "the phone's media channel opens beside the remote's");
+            var read = await phone.Read("file/test", 100000, 262144);
+            check(read.Length == 600000 && read.Bytes.AsSpan().SequenceEqual(video.AsSpan(100000, 262144)), "the phone reads a range of a video in frames, and learns the whole video's size");
+            var tail = await phone.Read("file/test", 599990, 262144);
+            check(tail.Bytes.AsSpan().SequenceEqual(video.AsSpan(599990)) && (await phone.Read("file/test", 600000, 100)).Bytes.Length == 0, "a read past the end of the video is cut short, and one at its end is empty");
+            check((await phone.Read("file/other", 0, 100)).Error == "gone" && (await phone.Read("stream/busy/0", 0, 100)).Error == "busy", "a resource the PC doesn't offer is refused, and one still being prepared asks the phone to try again");
+            var welcomed = await phone.Welcome;
+            check(welcomed.GetProperty("features").EnumerateArray().Select(f => f.GetString()).SequenceEqual(["library", "watch"]), "the PC's welcome lists the library and watch features");
+            phone.Send(new { type = "browse", request = 7, home = true });
+            using (var waitRequest = new CancellationTokenSource(5000))
+            {
+                var browse = await requests.Reader.ReadAsync(waitRequest.Token);
+                check(browse.Type == "browse" && browse.Message.GetProperty("home").GetBoolean() && await phone.Next("page") is { } page && page.GetProperty("request").GetInt64() == 7,
+                    "a phone's library request reaches the PC with its fields, and the answer reaches the phone");
+            }
             phone.Send(new { type = "pair", name = "again" });
             check(await phone.Next("error") is { } refused && refused.GetProperty("code").GetString() == "pairing" && store.Saved.Count == 1, "a paired phone can't pair again on its link");
+            // The pairing link closing counted too; this counts only the paired phone's.
+            Interlocked.Exchange(ref disconnected, 0);
             host.Forget(phoneId);
-            check(await phone.Closed(), "removing a phone closes its link");
+            check(await phone.Closed() && await Until(() => disconnected == 1, 5000), "removing a phone closes its link and tells the PC it went");
         }
         // A copy of this library running elsewhere, with the same host key, takes the phone remote over. The first one
         // says why and waits, rather than the two replacing each other every second.
@@ -170,8 +207,9 @@ static class PhoneRemoteFixture
     }
 
     // Drives a running BlackPearl as a paired phone would, for trying the desktop app by hand: each step is a command
-    // name with an optional value ("toggle", "seek-by=-10000", "volume=30", "wait=2000"), and every state the PC sends
-    // is printed.
+    // name with an optional value ("toggle", "seek-by=-10000", "volume=30", "wait=2000"), a message to send as it is
+    // ("send={...}"), a read on the media channel ("read=<resource>,<offset>,<count>"), or a timed run of reads
+    // ("fetch=<resource>,<bytes>"). Every message the PC sends is printed, long ones shortened.
     public static async Task Try(string url, string pcId, string phoneId, string secret, string[] steps)
     {
         await using var phone = await FakePhone.Connect(url, pcId, phoneId, secret);
@@ -179,12 +217,44 @@ static class PhoneRemoteFixture
         if (!await phone.Opened()) throw new Exception("No link to the PC");
         phone.Send(new { type = "hello", protocol = 1, app = "smoke", device = "Smoke phone" });
         Console.WriteLine("welcome: " + await phone.Next("welcome"));
-        _ = Task.Run(async () => { while (await phone.Next("", 600000) is { } message) Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {message}"); });
+        _ = Task.Run(async () =>
+        {
+            while (await phone.Next("", 600000) is { } message)
+            {
+                var text = message.ToString();
+                Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {(text.Length > 1500 ? text[..1500] + $"… ({text.Length} characters)" : text)}");
+            }
+        });
+        await phone.MediaOpened();
         await Task.Delay(1500);
         foreach (var step in steps)
         {
             var parts = step.Split('=', 2);
             if (parts[0] == "wait") { await Task.Delay(int.Parse(parts[1])); continue; }
+            if (parts[0] == "send") { Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} > {parts[1]}"); phone.SendText(parts[1]); await Task.Delay(1500); continue; }
+            if (parts[0] is "read" or "fetch")
+            {
+                var fields = parts[1].Split(',');
+                if (parts[0] == "read")
+                {
+                    var started = System.Diagnostics.Stopwatch.StartNew();
+                    var result = await phone.Read(fields[0], long.Parse(fields[1]), int.Parse(fields[2]));
+                    Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} read {fields[0]} @{fields[1]}: {result.Bytes.Length} bytes of {result.Length}, error {result.Error ?? "none"}, {started.ElapsedMilliseconds} ms, first bytes {Convert.ToHexString(result.Bytes.AsSpan(0, Math.Min(8, result.Bytes.Length)))}");
+                    continue;
+                }
+                // Eight reads of 256 KiB in flight, as the phone's proxy keeps them.
+                var total = long.Parse(fields[1]); long received = 0, next = 0; var clock = System.Diagnostics.Stopwatch.StartNew();
+                var inFlight = new Queue<Task<(byte[] Bytes, long Length, string? Error)>>();
+                while (received < total)
+                {
+                    while (inFlight.Count < 8 && next < total) { inFlight.Enqueue(phone.Read(fields[0], next, 262144)); next += 262144; }
+                    var reply = await inFlight.Dequeue();
+                    if (reply.Error is not null || reply.Bytes.Length == 0) { Console.WriteLine("fetch stopped: " + (reply.Error ?? "end")); break; }
+                    received += reply.Bytes.Length;
+                }
+                Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} fetched {received:N0} bytes in {clock.ElapsedMilliseconds} ms: {received * 8 / 1000.0 / Math.Max(1, clock.ElapsedMilliseconds):0.0} Mbps");
+                continue;
+            }
             Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} > {step}");
             if (parts.Length == 1) phone.Send(new { type = "command", action = parts[0] });
             else phone.Send(new { type = "command", action = parts[0], value = double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) });
@@ -242,7 +312,17 @@ static class PhoneRemoteFixture
     {
         ServerSocket server = null!;
         RtcPeerConnection peer = null!;
-        IRtcDataChannel channel = null!;
+        IRtcDataChannel channel = null!, media = null!;
+        readonly TaskCompletionSource mediaOpen = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        readonly ConcurrentDictionary<uint, Pending> reads = new();
+        uint nextRead;
+        public Task<JsonElement> Welcome => welcome.Task;
+        readonly TaskCompletionSource<JsonElement> welcome = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        sealed class Pending
+        {
+            public readonly TaskCompletionSource<(byte[] Bytes, long Length, string? Error)> Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public byte[]? Bytes; public int Received; public long Length;
+        }
         string phone = "", key = "", session = PhoneRemoteProtocol.NewHex(16);
         readonly TaskCompletionSource open = new(TaskCreationOptions.RunContinuationsAsynchronously);
         readonly TaskCompletionSource closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -265,7 +345,20 @@ static class PhoneRemoteFixture
             result.channel = result.peer.CreateDataChannel(new RtcCreateDataChannelArgs { Label = PhoneRemoteProtocol.Label });
             result.channel.OnOpen += _ => result.open.TrySetResult();
             result.channel.OnClose += _ => result.closed.TrySetResult();
-            result.channel.OnTextReceivedSafe += (_, text) => result.messages.Writer.TryWrite(JsonDocument.Parse(text.Text).RootElement.Clone());
+            result.channel.OnTextReceivedSafe += (_, text) =>
+            {
+                var message = JsonDocument.Parse(text.Text).RootElement.Clone();
+                if (message.GetProperty("type").GetString() == "welcome") result.welcome.TrySetResult(message);
+                result.messages.Writer.TryWrite(message);
+            };
+            result.media = result.peer.CreateDataChannel(new RtcCreateDataChannelArgs { Label = PhoneRemoteProtocol.MediaLabel });
+            result.media.OnOpen += _ => result.mediaOpen.TrySetResult();
+            result.media.OnBinaryReceivedSafe += (_, frame) => result.Frame(frame.Data.ToArray());
+            result.media.OnTextReceivedSafe += (_, text) =>
+            {
+                using var json = JsonDocument.Parse(text.Text);
+                if (result.reads.TryRemove(json.RootElement.GetProperty("id").GetUInt32(), out var failed)) failed.Done.TrySetResult(([], 0, json.RootElement.GetProperty("code").GetString()));
+            };
             return result;
         }
 
@@ -298,6 +391,28 @@ static class PhoneRemoteFixture
         }
 
         public void Send(object message) => channel.Send(Wire.Serialize(message));
+        public void SendText(string text) => channel.Send(text);
+        public async Task<bool> MediaOpened(int milliseconds = 10000) => await Task.WhenAny(mediaOpen.Task, Task.Delay(milliseconds)) == mediaOpen.Task;
+        // A frame: id, offset in the reply, reply length, reserved, the resource's length (PHONE-REMOTE.md), then the bytes.
+        void Frame(byte[] frame)
+        {
+            var id = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(frame);
+            if (!reads.TryGetValue(id, out var pending)) return;
+            var offset = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(frame.AsSpan(4));
+            var total = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(frame.AsSpan(8));
+            pending.Length = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(frame.AsSpan(16));
+            pending.Bytes ??= new byte[total];
+            frame.AsSpan(24).CopyTo(pending.Bytes.AsSpan(offset));
+            pending.Received += frame.Length - 24;
+            if (pending.Received >= total && reads.TryRemove(id, out _)) pending.Done.TrySetResult((pending.Bytes, pending.Length, null));
+        }
+        public async Task<(byte[] Bytes, long Length, string? Error)> Read(string resource, long offset, int count)
+        {
+            var id = Interlocked.Increment(ref nextRead);
+            var pending = reads[id] = new Pending();
+            media.Send(Wire.Serialize(new { type = "read", id, resource, offset, count }));
+            return await pending.Done.Task.WaitAsync(TimeSpan.FromSeconds(60));
+        }
         public async Task<bool> Opened(int milliseconds = 15000) => await Task.WhenAny(open.Task, Task.Delay(milliseconds)) == open.Task;
         public async Task<bool> Closed(int milliseconds = 10000) => await Task.WhenAny(closed.Task, Task.Delay(milliseconds)) == closed.Task;
         public async Task<string?> Rejection(int milliseconds = 5000) => await Task.WhenAny(rejected.Task, Task.Delay(milliseconds)) == rejected.Task ? rejected.Task.Result : null;
@@ -310,6 +425,7 @@ static class PhoneRemoteFixture
         public async ValueTask DisposeAsync()
         {
             try { channel?.Dispose(); } catch { }
+            try { media?.Dispose(); } catch { }
             try { peer?.Dispose(); } catch { }
             await server.DisposeAsync();
         }
