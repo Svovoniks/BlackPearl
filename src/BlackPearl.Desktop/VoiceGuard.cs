@@ -21,21 +21,29 @@ internal sealed class EchoPresence
 {
     public const int Rate = 4000, Step = VoicePacket.SampleRate / Rate;
     public const int Window = Rate, Hop = Rate / 2, Early = Rate / 10, Late = Rate / 2;
-    // One window this similar is an echo; so are two in a row at the same delay that are less similar. Speech against
-    // an unrelated movie stays below 0.26 for a single window.
-    public const float Certain = 0.4f, Likely = 0.25f;
+    // One window this similar is an echo; so are two less similar ones at the same delay, a second apart so that they
+    // share no audio. Speech against an unrelated movie reaches 0.25 in about one window in thirty and stayed below
+    // 0.6, at delays that differ from one window to the next; an echo in a pause reaches 0.7 to 0.95.
+    public const float Certain = 0.7f, Likely = 0.25f;
+    // A second of microphone with only a moment of sound in it, such as the start of a word after silence, resembles
+    // anything by chance. To count, at least this many of its twenty 50 ms pieces have to carry sound, each within
+    // 10 dB of the second's average.
+    private const int Pieces = 20, Sounding = 8;
     // Once found, an echo is taken to be gone after this many windows in which the speakers played without one: ten
     // seconds, so a talkative speaker or a quiet scene does not hide it.
     public const int ForgetWindows = 20;
-    // Quieter than this, the speakers are not playing.
+    // Quieter than this, the speakers are not playing: a recording's own hiss and hum between its sounds is too faint
+    // to echo, and hum resembles any other hum.
     private const double PlayingPower = 1e-6, HearingPower = 1e-10;
-    // What was found last time carries over to the next time voice opens, as the devices usually stay the same.
+    // What was found last time carries over to the next time voice opens, as the devices usually stay the same. The
+    // app keeps it between runs as well (see Voice.cs), so speakers do not leak the movie at the start of every one.
     private static bool? remembered;
+    internal static bool? Remembered { get => remembered; set => remembered = value; }
     private readonly Band microphoneBand = new(), speakerBand = new();
     private readonly float[] microphone = new float[Window + Early], speakers = new float[Window + Early + Late];
     private readonly float[] heard = new float[Window], played = new float[Window + Early + Late];
     private readonly object gate = new();
-    private int sinceCompared, quiet, lastDelay = int.MinValue;
+    private int sinceCompared, quiet, lastDelay = int.MinValue, earlierDelay = int.MinValue;
     private long lastPlayed;
     public bool Present { get; private set; } = remembered ?? false;
     // The latest comparison, for diagnostics and checks: how similar, and at which delay in milliseconds.
@@ -69,7 +77,8 @@ internal sealed class EchoPresence
     {
         double heardPower = Dot(heard, heard, Window), playedPower = 0;
         for (var i = 0; i < played.Length; i++) playedPower += played[i] * played[i];
-        if (playedPower / played.Length < PlayingPower || heardPower / Window < HearingPower) { Latest = (0, 0); return; }
+        if (playedPower / played.Length < PlayingPower || heardPower / Window < HearingPower) { Skip(); return; }
+        if (Thin(heard, heardPower)) { Skip(); return; }
         // Speakers[n + offset] against microphone[n]: offset 0 is the latest delay, the last offset the earliest.
         double window = Dot(played, played, Window), best = 0; var bestOffset = 0;
         for (var offset = 0; offset <= Early + Late; offset++)
@@ -79,13 +88,26 @@ internal sealed class EchoPresence
             var similarity = Math.Abs(Dot(heard, played.AsSpan(offset), Window)) / Math.Sqrt(heardPower * window);
             if (similarity > best) { best = similarity; bestOffset = offset; }
         }
+        // The second the microphone resembles has to be one in which the speakers were playing.
+        var matched = played.AsSpan(bestOffset, Window);
+        if (Dot(matched, matched, Window) / Window < PlayingPower) { Skip(); return; }
         var delay = Late - bestOffset;
         Latest = ((float)best, delay * 1000 / Rate);
-        var echo = best >= Certain || best >= Likely && Math.Abs(delay - lastDelay) <= Rate / 1000;
-        lastDelay = best >= Likely ? delay : int.MinValue;
+        // Windows overlap by half, so the one to agree with is the one before the last.
+        var echo = best >= Certain || best >= Likely && Math.Abs(delay - earlierDelay) <= Rate / 1000;
+        earlierDelay = lastDelay; lastDelay = best >= Likely ? delay : int.MinValue;
         if (echo) { quiet = 0; Set(true); }
         else if (Present && ++quiet >= ForgetWindows) Set(false);
     }
+    private static bool Thin(ReadOnlySpan<float> window, double power)
+    {
+        var sounding = 0; var length = Window / Pieces;
+        for (var piece = 0; piece < Pieces; piece++)
+            if (Dot(window[(piece * length)..], window[(piece * length)..], length) >= power / Pieces / 10) sounding++;
+        return sounding < Sounding;
+    }
+    // A window that says nothing either way.
+    private void Skip() { Latest = (0, 0); earlierDelay = lastDelay; lastDelay = int.MinValue; }
     private void Set(bool present)
     {
         if (Present != present) PlaybackDiagnostics.Record("voice-echo", new { present, similarity = Math.Round(Latest.Similarity, 2), delayMs = Latest.DelayMs });

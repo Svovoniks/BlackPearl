@@ -242,6 +242,18 @@ static class VoiceProcessingChecks
         var held = presence.Present;
         Feed(presence, Rate * 16, Rate * 22, at => room[at] / 32768f);
         check(held && !presence.Present, "an echo that has stopped is taken to be gone after ten seconds of playing, not before");
+        // A single short sound that happens to match one in the movie, with silence around it, is not an echo: a
+        // second with only a moment of sound in it resembles anything.
+        EchoPresence.Forget();
+        var chance = new EchoPresence();
+        float Note(int at, int start) => at >= start && at < start + Rate * 15 / 100 ? 0.2f * MathF.Sin(2 * MathF.PI * 300 * (at - start) / Rate) : 0;
+        for (var at = 0; at + Block <= Rate * 4; at += Block)
+        {
+            var played = new float[Block]; var heard = new float[Block];
+            for (var i = 0; i < Block; i++) { played[i] = film[at + i] / 32768f * 0.2f + Note(at + i, Rate * 2); heard[i] = Note(at + i, Rate * 2 + 2400) + (float)(random.NextDouble() - 0.5) * 2e-4f; }
+            chance.Speakers(played, 1); chance.Microphone(heard);
+        }
+        check(!chance.Present, "one short sound like one in the movie, with silence around it, is not taken for an echo");
         EchoPresence.Forget();
     }
     static double Rms(float[] samples) => Math.Sqrt(samples.Average(s => (double)s * s));
