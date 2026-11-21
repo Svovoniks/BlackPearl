@@ -88,10 +88,13 @@ public partial class MainWindow
         if (phoneRemote != remote) return;
         bool Watched(string id) => playback.GetValueOrDefault("watched:" + id) == "true";
         long Position(string id) => long.TryParse(playback.GetValueOrDefault("position:" + id), out var at) ? Math.Max(0, at) : 0;
+        var byId = source.ToDictionary(x => x.Id);
         var entries = page.Entries.Select(entry =>
         {
             var file = entry.Level is "movie" or "episode" || entry.HomeSection == "continue";
-            return new PhoneLibraryEntry(entry.Id, entry.Title, entry.Caption, entry.Level, entry.Season, entry.Episode, entry.Overview, entry.Kind,
+            // A show's or season's card stands on one of its episodes; it describes the show, not that episode.
+            var overview = entry.Level is "series" or "season" && byId.GetValueOrDefault(entry.Id)?.Overview is { Length: > 0 } show ? show[..Math.Min(show.Length, 400)] : entry.Overview;
+            return new PhoneLibraryEntry(entry.Id, entry.Title, entry.Caption, entry.Level, entry.Season, entry.Episode, overview, entry.Kind,
                 entry.RuntimeMinutes, entry.Year, entry.Episodes, entry.HomeSection, file ? Math.Max(entry.PositionMs, Position(entry.Id)) : 0,
                 file && Watched(entry.Id), entry.Thumbnail, file);
         }).ToArray();

@@ -191,7 +191,7 @@ public partial class MainWindow
         }
         var enabled = PhoneRemoteEnabled;
         var main = Card("Phone remote");
-        main.Children.Add(Line("Control playback on this PC from BlackPearl Mobile on your phone, at home or away. The phone connects straight to this PC; your room server only introduces them."));
+        main.Children.Add(Line("Control playback on this PC from BlackPearl Mobile on your phone, at home or away, or browse this library and watch it on the phone, then carry on here from the same moment. The phone connects straight to this PC; your room server only introduces them."));
         var toggle = new CheckBox { IsChecked = enabled, Content = "Allow paired phones to control BlackPearl", Margin = new Thickness(0, 14, 0, 0) };
         toggle.Click += (_, _) => { library.Setting("phoneRemote", toggle.IsChecked == true ? "on" : "off"); SyncPhoneRemote(); RenderPhoneRemote(force: true); };
         main.Children.Add(toggle);
