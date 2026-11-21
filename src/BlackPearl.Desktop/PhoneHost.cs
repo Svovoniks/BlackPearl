@@ -165,20 +165,23 @@ internal sealed class PhoneHostProcess(LibraryStore library)
         link.CurrentState = () => new RemoteState(false, Volume: volume);
         link.Command += (session, _) => link.SendError(session, "nothing-playing", "BlackPearl isn't open on the PC. Choose a video in Library to play it on the PC or here.");
         link.Changed += () => dispatcher.BeginInvoke(ShowStatus);
+        // Without its window and icon nobody could see it, turn it off or close it before an update, so it doesn't run.
         try { tray = new TrayIcon(); }
-        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException) { PlaybackDiagnostics.Record("phone-host-icon-failed", new { error = ex.GetType().Name }); }
-        if (tray is not null)
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
         {
-            tray.Open += () => { PhoneHost.OpenApp(); };
-            tray.TurnOff += TurnOff;
-            tray.Ended += () => End("session");
-            ShowStatus();
-            if (library.Setting("phoneHostIntroduced") is null)
-            {
-                library.Setting("phoneHostIntroduced", "1");
-                tray.Notify("Your phone can still reach BlackPearl",
-                    "Your phone can browse and watch this PC's library while BlackPearl is closed. Right-click this icon to turn that off.");
-            }
+            PlaybackDiagnostics.Record("phone-host-icon-failed", new { error = ex.GetType().Name });
+            remote = null; link.Dispose(); phoneLibrary.CloseStreams();
+            return;
+        }
+        tray.Open += () => { PhoneHost.OpenApp(); };
+        tray.TurnOff += TurnOff;
+        tray.Ended += () => End("session");
+        ShowStatus();
+        if (library.Setting("phoneHostIntroduced") is null)
+        {
+            library.Setting("phoneHostIntroduced", "1");
+            tray.Notify("Your phone can still reach BlackPearl",
+                "Your phone can browse and watch this PC's library while BlackPearl is closed. Right-click this icon to turn that off.");
         }
         link.Start();
         // BlackPearl opening the library takes the phones over, so the host ends: once the room server has handed this
