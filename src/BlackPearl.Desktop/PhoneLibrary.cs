@@ -275,14 +275,61 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         // The phone left while the video was being prepared: the stream waits for it as for any dropped link.
         if (remote.Connected.All(s => s.PhoneId != session.PhoneId)) ExpireStream(session.PhoneId);
         var title = item.QueueTitle;
-        string? detail = item.Series is not null
-            ? string.Join(" · ", new[] { item.Season is { } season ? $"Season {season}" : null, item.EpisodeDisplayTitle }.OfType<string>())
-            : item.Year?.ToString(CultureInfo.InvariantCulture);
+        var detail = StreamDetail(item);
+        var (source, version) = (Items().ToArray(), LibraryIdentity.TitleKey(item) is { } show ? library.Setting("version:" + show) : null);
+        var (back, forward, start) = await Task.Run(() => EpisodeSteps(source, item, version));
+        var tracks = TrackPreferences();
         remote.SendMessage(session, stream.Converter is { } converter
             ? new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "hls", streamId = converter.Stream.Id,
-                segments = converter.Stream.Segments, segmentMs = converter.Stream.SegmentMs, quality = converter.Stream.Quality, qualities, note }
+                segments = converter.Stream.Segments, segmentMs = converter.Stream.SegmentMs, quality = converter.Stream.Quality, qualities, note,
+                previous = back, next = forward, first = start, tracks }
             : (object)new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "file", resource = "file/" + item.Id,
-                length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note });
+                length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note,
+                previous = back, next = forward, first = start, tracks });
+    }
+
+    private static string? StreamDetail(MediaItem item) => item.Series is not null
+        ? string.Join(" · ", new[] { item.Season is { } season ? $"Season {season}" : null, item.EpisodeDisplayTitle }.OfType<string>())
+        : item.Year?.ToString(CultureInfo.InvariantCulture);
+
+    private sealed record EpisodeStep(string Id, string Title, string? Detail);
+
+    // The episodes the phone's Previous and Next play, chosen as the PC's own buttons and up-next countdown choose them,
+    // and the show's first regular episode, where Loop all starts again after the last one. Null for a film, or at either
+    // end. Off the dispatcher thread: checking a file can wake a sleeping drive.
+    private static (EpisodeStep? Previous, EpisodeStep? Next, EpisodeStep? First) EpisodeSteps(MediaItem[] source, MediaItem item, string? version)
+    {
+        if (item.Series is null || item.Season is null || item.Episode is null || item.IsMusic) return (null, null, null);
+        static EpisodeStep Step(MediaItem episode) => new(episode.Id, episode.QueueTitle, StreamDetail(episode));
+        bool Plays(MediaItem episode) => episode.Id == item.Id || File.Exists(episode.Path);
+        var episodes = EpisodePlayback.Episodes(source, item, version);
+        var at = Array.FindIndex(episodes, episode => episode.Id == item.Id);
+        MediaItem? previous = null;
+        for (var index = at - 1; at > 0 && index >= 0 && previous is null; index--)
+            if (episodes[index].Available && File.Exists(episodes[index].Path)) previous = episodes[index];
+        var next = EpisodePlayback.Next(source, item, false, episode => File.Exists(episode.Path), version);
+        // As the window's Loop all: the first regular episode that plays, specials only when there is nothing else.
+        var first = next is null ? episodes.FirstOrDefault(episode => episode.Season != 0 && Plays(episode)) ?? episodes.FirstOrDefault(Plays) : null;
+        if (first?.Id == item.Id) first = null;
+        return (previous is null ? null : Step(previous), next is null ? null : Step(next), first is null ? null : Step(first));
+    }
+
+    // Settings › Playback, as the window reads it: audio and subtitle language priorities, and subtitle rules by audio
+    // language. The phone picks its starting tracks with them as the window would.
+    private object TrackPreferences()
+    {
+        string[] audio = [], subtitles = [];
+        SubtitleLanguageRule[] rules = [];
+        try { audio = TrackLanguages.Parse(library.Setting("audioLanguages") ?? ""); } catch (ArgumentException) { }
+        try { subtitles = TrackLanguages.Parse(library.Setting("subtitleLanguages") ?? "", true); } catch (ArgumentException) { }
+        try
+        {
+            var saved = Wire.Read<SubtitleLanguageRule[]>(library.Setting("subtitleLanguageRules") ?? "[]") ?? [];
+            if (saved.All(rule => rule?.AudioLanguage is not null && rule.Languages is not null))
+                rules = TrackLanguages.ParseSubtitleRules(saved.Select(rule => new KeyValuePair<string, string>(rule.AudioLanguage, string.Join(", ", rule.Languages))));
+        }
+        catch (Exception ex) when (ex is ArgumentException or JsonException) { }
+        return new { audio, subtitles, rules = rules.Select(rule => new { audio = rule.AudioLanguage, languages = rule.Languages }) };
     }
 
     // A conversion of the video at the quality asked for, or why there is none: no converter, a file that can't be read,
