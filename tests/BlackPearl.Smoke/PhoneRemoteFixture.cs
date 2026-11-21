@@ -199,8 +199,9 @@ static class PhoneRemoteFixture
     }
 
     // Drives a running BlackPearl as a paired phone would, for trying the desktop app by hand: each step is a command
-    // name with an optional value ("toggle", "seek-by=-10000", "volume=30", "wait=2000"), and every state the PC sends
-    // is printed.
+    // name with an optional value ("toggle", "seek-by=-10000", "volume=30", "wait=2000"), a message to send as it is
+    // ("send={...}"), a read on the media channel ("read=<resource>,<offset>,<count>"), or a timed run of reads
+    // ("fetch=<resource>,<bytes>"). Every message the PC sends is printed, long ones shortened.
     public static async Task Try(string url, string pcId, string phoneId, string secret, string[] steps)
     {
         await using var phone = await FakePhone.Connect(url, pcId, phoneId, secret);
@@ -208,12 +209,44 @@ static class PhoneRemoteFixture
         if (!await phone.Opened()) throw new Exception("No link to the PC");
         phone.Send(new { type = "hello", protocol = 1, app = "smoke", device = "Smoke phone" });
         Console.WriteLine("welcome: " + await phone.Next("welcome"));
-        _ = Task.Run(async () => { while (await phone.Next("", 600000) is { } message) Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {message}"); });
+        _ = Task.Run(async () =>
+        {
+            while (await phone.Next("", 600000) is { } message)
+            {
+                var text = message.ToString();
+                Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {(text.Length > 1500 ? text[..1500] + $"… ({text.Length} characters)" : text)}");
+            }
+        });
+        await phone.MediaOpened();
         await Task.Delay(1500);
         foreach (var step in steps)
         {
             var parts = step.Split('=', 2);
             if (parts[0] == "wait") { await Task.Delay(int.Parse(parts[1])); continue; }
+            if (parts[0] == "send") { Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} > {parts[1]}"); phone.SendText(parts[1]); await Task.Delay(1500); continue; }
+            if (parts[0] is "read" or "fetch")
+            {
+                var fields = parts[1].Split(',');
+                if (parts[0] == "read")
+                {
+                    var started = System.Diagnostics.Stopwatch.StartNew();
+                    var result = await phone.Read(fields[0], long.Parse(fields[1]), int.Parse(fields[2]));
+                    Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} read {fields[0]} @{fields[1]}: {result.Bytes.Length} bytes of {result.Length}, error {result.Error ?? "none"}, {started.ElapsedMilliseconds} ms, first bytes {Convert.ToHexString(result.Bytes.AsSpan(0, Math.Min(8, result.Bytes.Length)))}");
+                    continue;
+                }
+                // Eight reads of 256 KiB in flight, as the phone's proxy keeps them.
+                var total = long.Parse(fields[1]); long received = 0, next = 0; var clock = System.Diagnostics.Stopwatch.StartNew();
+                var inFlight = new Queue<Task<(byte[] Bytes, long Length, string? Error)>>();
+                while (received < total)
+                {
+                    while (inFlight.Count < 8 && next < total) { inFlight.Enqueue(phone.Read(fields[0], next, 262144)); next += 262144; }
+                    var reply = await inFlight.Dequeue();
+                    if (reply.Error is not null || reply.Bytes.Length == 0) { Console.WriteLine("fetch stopped: " + (reply.Error ?? "end")); break; }
+                    received += reply.Bytes.Length;
+                }
+                Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} fetched {received:N0} bytes in {clock.ElapsedMilliseconds} ms: {received * 8 / 1000.0 / Math.Max(1, clock.ElapsedMilliseconds):0.0} Mbps");
+                continue;
+            }
             Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} > {step}");
             if (parts.Length == 1) phone.Send(new { type = "command", action = parts[0] });
             else phone.Send(new { type = "command", action = parts[0], value = double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) });
@@ -350,6 +383,7 @@ static class PhoneRemoteFixture
         }
 
         public void Send(object message) => channel.Send(Wire.Serialize(message));
+        public void SendText(string text) => channel.Send(text);
         public async Task<bool> MediaOpened(int milliseconds = 10000) => await Task.WhenAny(mediaOpen.Task, Task.Delay(milliseconds)) == mediaOpen.Task;
         // A frame: id, offset in the reply, reply length, reserved, the resource's length (PHONE-REMOTE.md), then the bytes.
         void Frame(byte[] frame)
@@ -369,7 +403,7 @@ static class PhoneRemoteFixture
             var id = Interlocked.Increment(ref nextRead);
             var pending = reads[id] = new Pending();
             media.Send(Wire.Serialize(new { type = "read", id, resource, offset, count }));
-            return await pending.Done.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            return await pending.Done.Task.WaitAsync(TimeSpan.FromSeconds(60));
         }
         public async Task<bool> Opened(int milliseconds = 15000) => await Task.WhenAny(open.Task, Task.Delay(milliseconds)) == open.Task;
         public async Task<bool> Closed(int milliseconds = 10000) => await Task.WhenAny(closed.Task, Task.Delay(milliseconds)) == closed.Task;

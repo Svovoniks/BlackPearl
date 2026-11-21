@@ -27,7 +27,8 @@ public partial class MainWindow
         public string? Directory { get; init; }
         public void Dispose() => CloseConversion(Converter, Store, Directory);
     }
-    private readonly ConcurrentDictionary<PhoneRemoteSession, PhoneStream> phoneStreams = new();
+    // By phone id: a phone whose link drops and comes back keeps reading the same stream.
+    private readonly ConcurrentDictionary<string, PhoneStream> phoneStreams = new();
     // Picture tokens handed out in library pages, and the files they stand for. Phones never see the paths.
     private readonly ConcurrentDictionary<string, string> phoneArtwork = new();
     private readonly ConcurrentDictionary<string, byte[]> phoneArtworkCache = new();
@@ -35,13 +36,19 @@ public partial class MainWindow
     private void AttachPhonePlayback(PhoneRemoteHost remote)
     {
         remote.Request += (session, type, message) => Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) _ = Guard(() => RunPhoneRequest(remote, session, type, message)); });
-        remote.Disconnected += session => { if (phoneStreams.TryRemove(session, out var stream)) stream.Dispose(); };
+        // A phone that loses its link usually reconnects within moments, mid-video; its stream waits two minutes for it.
+        remote.Disconnected += session => _ = Task.Run(async () =>
+        {
+            if (!phoneStreams.TryGetValue(session.PhoneId, out var stream)) return;
+            await Task.Delay(TimeSpan.FromMinutes(2));
+            if (remote.Connected.All(s => s.PhoneId != session.PhoneId) && phoneStreams.TryRemove(KeyValuePair.Create(session.PhoneId, stream))) stream.Dispose();
+        });
         remote.ResolveMedia = ResolvePhoneResource;
     }
 
     private void ClosePhoneStreams()
     {
-        foreach (var session in phoneStreams.Keys) if (phoneStreams.TryRemove(session, out var stream)) stream.Dispose();
+        foreach (var phone in phoneStreams.Keys) if (phoneStreams.TryRemove(phone, out var stream)) stream.Dispose();
         phoneArtwork.Clear(); phoneArtworkCache.Clear();
     }
 
@@ -60,8 +67,8 @@ public partial class MainWindow
             case "browse": await BrowseForPhone(remote, session, request, message); break;
             case "watch": await WatchOnPhone(remote, session, request, message, Fail); break;
             case "progress": SavePhoneProgress(message); break;
-            case "play": await PlayFromPhone(message, Fail); break;
-            case "stream-stop": if (phoneStreams.TryRemove(session, out var stream)) stream.Dispose(); break;
+            case "play": if (await PlayFromPhone(message, Fail)) remote.SendMessage(session, new { type = "done", request }); break;
+            case "stream-stop": if (phoneStreams.TryRemove(session.PhoneId, out var stream)) stream.Dispose(); break;
         }
     }
 
@@ -117,9 +124,9 @@ public partial class MainWindow
         var parts = resource.Split('/');
         switch (parts)
         {
-            case ["file", var id] when phoneStreams.TryGetValue(session, out var stream) && stream.Item.Id == id:
+            case ["file", var id] when phoneStreams.TryGetValue(session.PhoneId, out var stream) && stream.Item.Id == id:
                 return new(stream.File.Media.Length, stream.File.ReadAsync);
-            case ["stream", var id, var piece] when phoneStreams.TryGetValue(session, out var stream) && stream.Converter is { } converter && converter.Stream.Id == id &&
+            case ["stream", var id, var piece] when phoneStreams.TryGetValue(session.PhoneId, out var stream) && stream.Converter is { } converter && converter.Stream.Id == id &&
                 int.TryParse(piece, NumberStyles.None, CultureInfo.InvariantCulture, out var index) && index >= 0 && index < converter.Stream.Segments:
                 return await converter.PhonePieceAsync(index, ct);
             case ["art", var token, var size] when phoneArtwork.TryGetValue(token, out var path) && int.TryParse(size, NumberStyles.None, CultureInfo.InvariantCulture, out var width):
@@ -167,7 +174,7 @@ public partial class MainWindow
             SavePlaybackPosition();
             if (nativeStopCount == 0) { ready = false; await loading.WaitAsync(); try { await StopNativePlayback(); } finally { loading.Release(); } }
         }
-        if (phoneStreams.TryRemove(session, out var previous)) previous.Dispose();
+        if (phoneStreams.TryRemove(session.PhoneId, out var previous)) previous.Dispose();
         var resume = !WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0;
         var file = new FileMediaSource(item.Path, PlaybackTitle(item), item.Id);
         var wanted = Text(message, "quality") ?? "auto";
@@ -184,7 +191,8 @@ public partial class MainWindow
             else note = why;
         }
         else if (!item.IsMusic && Ffmpeg.Find() is not null) qualities.AddRange(StreamQuality.Converted.Select(q => q.Id));
-        phoneStreams[session] = stream;
+        if (phoneStreams.TryRemove(session.PhoneId, out var raced)) raced.Dispose();
+        phoneStreams[session.PhoneId] = stream;
         var title = PlaybackTitle(item);
         string? detail = item.Series is not null
             ? string.Join(" · ", new[] { item.Season is { } season ? $"Season {season}" : null, item.EpisodeDisplayTitle }.OfType<string>())
@@ -241,13 +249,13 @@ public partial class MainWindow
     }
 
     // Continue on the PC: plays the video here from where the phone was.
-    private async Task PlayFromPhone(JsonElement message, Action<string, string> fail)
+    private async Task<bool> PlayFromPhone(JsonElement message, Action<string, string> fail)
     {
-        if (!PhonesCanStart) { fail("not-allowed", "This PC doesn't let phones start videos. Turn it on in Settings › Profile on the PC."); return; }
-        if (room?.IsConnected == true) { fail("in-room", "The PC is in a room. Leave the room on the PC to play this there."); return; }
+        if (!PhonesCanStart) { fail("not-allowed", "This PC doesn't let phones start videos. Turn it on in Settings › Profile on the PC."); return false; }
+        if (room?.IsConnected == true) { fail("in-room", "The PC is in a room. Leave the room on the PC to play this there."); return false; }
         var id = Text(message, "id");
         var item = items.FirstOrDefault(x => x.Id == id && x.Available && !x.IsVirtual);
-        if (item is null || !File.Exists(item.Path)) { fail("gone", "That video isn't available on the PC. Its drive may be disconnected."); return; }
+        if (item is null || !File.Exists(item.Path)) { fail("gone", "That video isn't available on the PC. Its drive may be disconnected."); return false; }
         if (Number(message, "positionMs") is { } position && !item.IsMusic)
         {
             if (position >= 10000 && WasWatched(item.Id)) SetWatched(item, false);
@@ -256,5 +264,6 @@ public partial class MainWindow
         queuePosition = -1;
         await PlayLocalItem(item);
         PublishQueue();
+        return true;
     }
 }
