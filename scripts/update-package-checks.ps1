@@ -151,7 +151,41 @@ try {
     Assert-SameFiles $installed $newer 'The refused chain'
     Check ($run.Code -ne 0 -and $run.Failed) 'a chain stops at the first refused step and runs its failure handling'
 
+    # The phone host (src/BlackPearl.Desktop/PhoneHost.cs) runs from the installed BlackPearl.exe with only a hidden
+    # window while the app is closed. A stand-in with the same window runs as the installed program; uninstalling must
+    # close it and remove the file it ran from.
+    $hostSource = Join-Path $test 'phone-host'
+    New-Item -ItemType Directory -Force $hostSource | Out-Null
+    [IO.File]::WriteAllText((Join-Path $hostSource 'Host.cs'), @'
+using System.Windows.Forms;
+class HostWindow : NativeWindow
+{
+    public HostWindow() { CreateHandle(new CreateParams { Caption = "BlackPearl phone access" }); }
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x10) { DestroyHandle(); Application.ExitThread(); return; }
+        base.WndProc(ref m);
+    }
+}
+static class Host
+{
+    [System.STAThread]
+    static void Main()
+    {
+        var window = new HostWindow();
+        var limit = new Timer { Interval = 120000 }; limit.Tick += (s, e) => Application.ExitThread(); limit.Start();
+        Application.Run();
+    }
+}
+'@)
+    & (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe') /nologo /target:winexe /r:System.Windows.Forms.dll "/out:$(Join-Path $hostSource 'BlackPearl.exe')" (Join-Path $hostSource 'Host.cs')
+    if ($LASTEXITCODE -ne 0) { throw 'Phone host fixture compilation failed' }
+    Copy-Item -LiteralPath (Join-Path $hostSource 'BlackPearl.exe') -Destination (Join-Path $installed 'BlackPearl.exe') -Force
+    $phoneHost = Start-Program (Join-Path $installed 'BlackPearl.exe') @()
+    Start-Sleep -Seconds 1
+    Check (!$phoneHost.HasExited) 'the stand-in phone host runs from the installed program'
     Uninstall-Silently $installed
+    Check ($phoneHost.WaitForExit(5000) -and !(Test-Path (Join-Path $installed 'BlackPearl.exe'))) 'uninstalling closes a running phone host and removes the program it ran from'
     Check (!(Test-Path $key) -and !(Test-Path (Join-Path $installed 'added\new {1}.md')) -and !(Test-Path (Join-Path $installed 'Models\notices.md'))) 'uninstalling removes files from the release and from the update'
     Write-Host "$checks update installer checks passed."
 }

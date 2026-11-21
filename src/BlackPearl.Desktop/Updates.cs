@@ -107,7 +107,7 @@ public partial class MainWindow
                 UpdateCardStatus.Text = "Installing and restarting BlackPearl… The installer will show progress.";
                 await StartInstallers(installers);
             }
-            Close();
+            closingForUpdate = true; Close();
         }
         catch (OperationCanceledException) { if (!closing) UpdateCardStatus.Text = "Download interrupted. Try again."; }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or HttpRequestException or System.ComponentModel.Win32Exception)
