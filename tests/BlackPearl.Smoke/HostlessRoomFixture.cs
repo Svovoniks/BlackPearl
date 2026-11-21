@@ -271,7 +271,7 @@ static class HostlessRoomFixture
         // The streamer leaves: its video ends, the room stays, and the role passes to whoever has been there longest.
         var leaving = b.Identity.Peer;
         await b.DisposeAsync();
-        await Wait(() => a.Identity!.Host && c.Snapshot?.People.Length == 2 && c.Snapshot.People.Single(p => p.IsHost).Id == a.Identity.Peer, "when the streamer leaves, the role passes to whoever has been in the room longest");
+        await Wait(() => a.Identity!.Host && c.Snapshot?.People.Length == 2 && c.Snapshot.People.FirstOrDefault(p => p.IsHost)?.Id == a.Identity.Peer, "when the streamer leaves, the role passes to whoever has been in the room longest");
         check(a.Snapshot!.Media is null && c.Snapshot!.Media is null, "the streamer's video ends for everyone when it leaves");
         check(cMessages.Any(m => m.Type == "stream-ended" && m.Sender == leaving) && cMessages.Any(m => m.Type == "peer-left" && m.Sender == leaving && m.Text == "Ben"), "viewers are told the stream ended and who left");
         await Wait(() => c.DirectControlsReady.IsCompletedSuccessfully, "the remaining members are connected to the new holder of the role");

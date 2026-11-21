@@ -29,8 +29,11 @@ public partial class MainWindow
 
     // Whether closing BlackPearl starts the phone host (PhoneHost.cs), worked out before closing stops the link. Not when
     // it closes to install an update, which needs every copy of the app gone, or when Windows is signing out.
-    private bool closingForUpdate, sessionEnding;
-    private bool KeepsPhonesAfterClosing => PhoneRemoteEnabled && PhoneRemoteSettings.WhileClosed(library) && !closingForUpdate && !sessionEnding &&
+    // A sign-out the user cancels leaves the flag behind, so it counts for a minute.
+    private bool closingForUpdate;
+    private long sessionEndingAt = long.MinValue / 2;
+    private bool SessionEnding => Environment.TickCount64 - sessionEndingAt < 60000;
+    private bool KeepsPhonesAfterClosing => PhoneRemoteEnabled && PhoneRemoteSettings.WhileClosed(library) && !closingForUpdate && !SessionEnding &&
         OpenFileHandoff.Claimed && PhoneRemoteSettings.HostKey(library) is not null && PhoneRemoteSettings.HasPhones(library);
 
     // Keeps the sign-in entry in step with the settings, off the UI thread.

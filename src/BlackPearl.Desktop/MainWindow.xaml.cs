@@ -2498,7 +2498,7 @@ public partial class MainWindow : Window
         InitializePictureInPicture(new WindowInteropHelper(this).Handle);
         InitializeMediaControls();
         SyncPhoneRemote(); SyncPhoneHostStartup();
-        if (Application.Current is { } app) app.SessionEnding += (_, _) => sessionEnding = true;
+        if (Application.Current is { } app) app.SessionEnding += (_, _) => sessionEndingAt = Environment.TickCount64;
         ApplyTitleBarTheme();
         Activated += (_, _) => ApplyTitleBarTheme();
         Deactivated += (_, _) => ApplyTitleBarTheme();

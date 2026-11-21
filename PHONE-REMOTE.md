@@ -240,7 +240,7 @@ the video it is playing itself at that moment.
 
 Phone → PC: `{"type":"play","request":<n>,"id":"…","positionMs":1180000}` plays the video on the PC from that
 position, and answers `{"type":"done","request":<n>}` once it has started. It needs `canStart`; a refusal is an
-`error` with code `not-allowed`, `in-room` (the PC is in a room) or `gone`. The PC ends the phone's stream before it
+`error` with code `not-allowed`, `in-room` (the PC is in a room), `gone`, or `opening` (BlackPearl is starting on the PC: ask again once the phone has reconnected to it). The PC ends the phone's stream before it
 answers: the phone is no longer watching, and an answer queued behind video it still reads can take seconds to arrive.
 
 ### The media channel, `media-v1`

@@ -76,16 +76,23 @@ internal static class PhoneHost
         { PlaybackDiagnostics.Record("phone-host-start-failed", new { error = ex.GetType().Name }); }
     }
 
-    // Opens BlackPearl, optionally playing a video once its library has loaded.
+    // Whether BlackPearl is open or this host started it moments ago and it is still starting. A second start then would
+    // open a second window on the same library: a double click on the icon clicks twice, and the icon stays until the
+    // app has taken the phones over.
+    private static long openedAt = -1;
+    internal static bool AppOpenOrOpening => AppOpen || openedAt >= 0 && Environment.TickCount64 - openedAt < 15000;
+
+    // Opens BlackPearl, optionally playing a video once its library has loaded, unless it is open or opening already.
     internal static void OpenApp(string? playId = null)
     {
-        if (Environment.ProcessPath is not { } exe) return;
+        if (AppOpenOrOpening || Environment.ProcessPath is not { } exe) return;
         try
         {
             var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! };
             if (playId is not null) { start.ArgumentList.Add(Program.PlayArgument); start.ArgumentList.Add(playId); }
             start.ArgumentList.Add("--data-dir"); start.ArgumentList.Add(Program.DataDirectory);
             Process.Start(start)?.Dispose();
+            openedAt = Environment.TickCount64;
         }
         catch (Exception ex) when (ex is Win32Exception or IOException or InvalidOperationException)
         { PlaybackDiagnostics.Record("phone-host-open-failed", new { error = ex.GetType().Name }); }
@@ -102,6 +109,8 @@ internal static class PhoneHost
         try
         {
             if (AppOpen) return;
+            // It draws nothing; without this its hidden window loads the graphics driver, a few hundred MB of it.
+            System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
             PlaybackDiagnostics.Initialize(Path.Combine(Program.DataDirectory, "logs", "phone-host"));
             LibraryStore library;
             try { library = new LibraryStore(Program.DataDirectory, deferRetention: true); }
@@ -206,6 +215,8 @@ internal sealed class PhoneHostProcess(LibraryStore library)
     private Task<bool> PlayOnPc(JsonElement message, Action<string, string> fail)
     {
         if (!PhoneRemoteSettings.PhonesCanStart(library)) { fail("not-allowed", "This PC doesn't let phones start videos. Turn it on in Settings › Profile on the PC."); return Task.FromResult(false); }
+        // A BlackPearl that is already opening wouldn't take the video; the phone reaches it in a moment and asks again.
+        if (PhoneHost.AppOpenOrOpening) { fail("opening", "BlackPearl is opening on the PC. Try again in a moment."); return Task.FromResult(false); }
         if (phoneLibrary!.Playable(message, fail) is not { } item) return Task.FromResult(false);
         phoneLibrary.SaveHandOver(item, PhoneLibrary.Position(message));
         dispatcher.BeginInvoke(() => PhoneHost.OpenApp(item.Id), DispatcherPriority.Background);
@@ -232,15 +243,24 @@ internal sealed class PhoneHostProcess(LibraryStore library)
     }
 }
 
-// The sign-in entry that starts the phone host with Windows. Only the installed app's own library has one: a library
-// opened with BLACKPEARL_DATA or --data-dir elsewhere, and builds with BLACKPEARL_PHONE_HOST=off, leave it alone.
+// The sign-in entry that starts the phone host with Windows. Only the installed app, on its own library, has one: any
+// other copy (a development or portable build), a library opened with BLACKPEARL_DATA or --data-dir elsewhere, and
+// builds with BLACKPEARL_PHONE_HOST=off leave it alone.
 internal static class PhoneHostStartup
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     internal const string ValueName = "BlackPearl phone access";
+    // The installer's record of where it installed the app (packaging/BlackPearl.iss, AppId).
+    private const string InstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{90B3BA58-BBC8-4993-A0EA-25C68D8B1DA6}_is1";
 
-    private static bool Applies => !PhoneHost.Off && Environment.ProcessPath is not null &&
-        string.Equals(Path.GetFullPath(Program.DataDirectory).TrimEnd('\\'), Path.GetFullPath(Program.DefaultDataDirectory).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+    private static bool Same(string a, string b) =>
+        string.Equals(Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+    private static bool Installed(string exe)
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(InstallKey);
+        return key?.GetValue("InstallLocation") is string { Length: > 0 } folder && Same(folder, Path.GetDirectoryName(exe)!);
+    }
+    private static bool Applies => !PhoneHost.Off && Environment.ProcessPath is { } exe && Same(Program.DataDirectory, Program.DefaultDataDirectory) && Installed(exe);
 
     public static void Sync(LibraryStore library)
     {
@@ -329,9 +349,10 @@ internal sealed class TrayIcon : IDisposable
         if (message == CallbackMessage)
         {
             var kind = (int)(lParam.ToInt64() & 0xFFFF);
-            // WM_CONTEXTMENU, then NIN_SELECT and NIN_KEYSELECT (a click, Enter or Space), and a double click.
+            // WM_CONTEXTMENU, then NIN_SELECT and NIN_KEYSELECT (a click, Enter or Space). A double click sends a select
+            // as well, so it isn't handled on its own.
             if (kind == 0x7B) ShowMenu((short)(wParam.ToInt64() & 0xFFFF), (short)((wParam.ToInt64() >> 16) & 0xFFFF));
-            else if (kind is 0x400 or 0x401 or 0x203) Open?.Invoke();
+            else if (kind is 0x400 or 0x401) Open?.Invoke();
             handled = true;
         }
         else if (message == taskbarCreated) Add(); // Explorer restarted and lost the icon.
