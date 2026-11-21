@@ -113,7 +113,7 @@ UTF-8 JSON text messages, at most 64 KiB, each with a `type`.
 ### Opening
 
 1. Phone → PC: `{"type":"hello","protocol":1,"app":"<app version>","device":"<phone model or name>"}`
-2. PC → phone: `{"type":"welcome","protocol":1,"app":"<desktop version>","pc":"<PC name>","pcId":"<PC id>","canStart":true,"features":["library","watch"]}`.
+2. PC → phone: `{"type":"welcome","protocol":1,"app":"<desktop version>","pc":"<PC name>","pcId":"<PC id>","canStart":true,"features":["library","watch","queues"]}`.
    `features` lists what the PC offers beyond the remote (see "The library and watching on the phone"); a PC from
    before them sends none.
    If the PC can't speak the phone's protocol it sends `{"type":"error","code":"protocol","message":"…"}` saying which
@@ -252,7 +252,7 @@ answers: the phone is no longer watching, and an answer queued behind video it s
 
 ### Queues
 
-The PC's saved queues, the ones on its Queues page, are shared with the phone. A video's place is its position in the
+The PC's saved queues, the ones on its Queues page, are shared with the phone when its `welcome` lists the `queues` feature. A video's place is its position in the
 saved queue (from 0), so a video queued twice has two places; videos the library no longer has keep their places but
 are never listed.
 
