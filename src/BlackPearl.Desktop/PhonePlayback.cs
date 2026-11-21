@@ -35,16 +35,25 @@ public partial class MainWindow
 
     private void AttachPhonePlayback(PhoneRemoteHost remote)
     {
-        remote.Request += (session, type, message) => Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) _ = Guard(() => RunPhoneRequest(remote, session, type, message)); });
-        // A phone that loses its link usually reconnects within moments, mid-video; its stream waits two minutes for it.
-        remote.Disconnected += session => _ = Task.Run(async () =>
-        {
-            if (!phoneStreams.TryGetValue(session.PhoneId, out var stream)) return;
-            await Task.Delay(TimeSpan.FromMinutes(2));
-            if (remote.Connected.All(s => s.PhoneId != session.PhoneId) && phoneStreams.TryRemove(KeyValuePair.Create(session.PhoneId, stream))) stream.Dispose();
-        });
+        remote.Request += (session, type, message) => Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) _ = RunPhoneRequest(remote, session, type, message); });
+        remote.Disconnected += session => ExpirePhoneStream(remote, session.PhoneId);
         remote.ResolveMedia = ResolvePhoneResource;
     }
+
+    // A phone that loses its link usually reconnects within moments, mid-video, so its stream waits two minutes for it.
+    // Each drop starts the wait over: an earlier drop's wait ends without effect once the phone came back in between.
+    private readonly ConcurrentDictionary<string, int> phoneDrops = new();
+    private void ExpirePhoneStream(PhoneRemoteHost remote, string phoneId)
+    {
+        var drop = phoneDrops.AddOrUpdate(phoneId, 1, (_, count) => count + 1);
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(PhoneStreamGrace);
+            if (phoneDrops.GetValueOrDefault(phoneId) != drop || remote.Connected.Any(s => s.PhoneId == phoneId)) return;
+            if (phoneStreams.TryRemove(phoneId, out var stream)) stream.Dispose();
+        });
+    }
+    private static readonly TimeSpan PhoneStreamGrace = TimeSpan.FromMinutes(2);
 
     private void ClosePhoneStreams()
     {
@@ -58,17 +67,31 @@ public partial class MainWindow
         message.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) && double.IsFinite(number) ? (long)number : null;
     private static bool Flag(JsonElement message, string name) => message.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
 
+    // A phone's request never opens a dialog on the PC: whatever goes wrong is answered to the phone, which shows it.
     private async Task RunPhoneRequest(PhoneRemoteHost remote, PhoneRemoteSession session, string type, JsonElement message)
     {
         var request = Number(message, "request") ?? 0;
         void Fail(string code, string text) => remote.SendMessage(session, new { type = "error", code, message = text, request });
-        switch (type)
+        try
         {
-            case "browse": await BrowseForPhone(remote, session, request, message); break;
-            case "watch": await WatchOnPhone(remote, session, request, message, Fail); break;
-            case "progress": SavePhoneProgress(message); break;
-            case "play": if (await PlayFromPhone(message, Fail)) remote.SendMessage(session, new { type = "done", request }); break;
-            case "stream-stop": if (phoneStreams.TryRemove(session.PhoneId, out var stream)) stream.Dispose(); break;
+            switch (type)
+            {
+                case "browse": await BrowseForPhone(remote, session, request, message); break;
+                case "watch": await WatchOnPhone(remote, session, request, message, Fail); break;
+                case "progress": SavePhoneProgress(message); break;
+                case "play": if (await PlayFromPhone(message, Fail)) remote.SendMessage(session, new { type = "done", request }); break;
+                case "stream-stop": if (phoneStreams.TryRemove(session.PhoneId, out var stream)) stream.Dispose(); break;
+            }
+        }
+        catch (Exception ex) when (!closing)
+        {
+            PlaybackDiagnostics.Record("phone-request-failed", new { type, error = ex.GetType().Name });
+            try
+            {
+                Fail("failed", ex is IOException or UnauthorizedAccessException && ex.Message.Length is > 0 and < 200
+                    ? ex.Message : "The PC couldn't do that. Try again.");
+            }
+            catch (Exception) { }
         }
     }
 
@@ -77,9 +100,16 @@ public partial class MainWindow
         var browse = new LibraryBrowseRequest(Text(message, "query") ?? "", (int)(Number(message, "category") ?? 0), Text(message, "parentId"),
             Number(message, "season") is { } season ? (int)season : null, (int)(Number(message, "page") ?? 0), Flag(message, "home"), (int)(Number(message, "seed") ?? 0));
         var source = items.ToArray();
-        var playback = library.PlaybackSettings();
+        Dictionary<string, string> playback;
         LibraryBrowsePage page;
-        try { page = await Task.Run(() => SharedLibrary.Browse(source, browse, PhoneArtworkToken, playback, PhonePageSize)); }
+        try
+        {
+            (playback, page) = await Task.Run(() =>
+            {
+                var settings = library.PlaybackSettings();
+                return (settings, SharedLibrary.Browse(source, browse, PhoneArtworkToken, settings, PhonePageSize));
+            });
+        }
         catch (InvalidDataException ex)
         {
             remote.SendMessage(session, new { type = "error", code = "browse", message = ex.Message, request });
@@ -172,13 +202,16 @@ public partial class MainWindow
         var id = Text(message, "id");
         var item = items.FirstOrDefault(x => x.Id == id && x.Available && !x.IsVirtual);
         if (item is null || !File.Exists(item.Path)) { fail("gone", "That video isn't available on the PC. Its drive may be disconnected."); return; }
+        long? takenAt = null;
         if (Flag(message, "takeOver") && room is null && playingItem?.Id == item.Id && HasMediaPlayback && player is not null)
         {
+            // Where the PC is now, also for a title watched before, whose saved position stays 0 while it is watched again.
+            takenAt = Math.Max(0, PlaybackPosition());
             SavePlaybackPosition();
             if (nativeStopCount == 0) { ready = false; await loading.WaitAsync(); try { await StopNativePlayback(); } finally { loading.Release(); } }
         }
         if (phoneStreams.TryRemove(session.PhoneId, out var previous)) previous.Dispose();
-        var resume = !WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0;
+        var resume = takenAt ?? (!WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0);
         var file = new FileMediaSource(item.Path, PlaybackTitle(item), item.Id);
         var wanted = Text(message, "quality") ?? "auto";
         var home = Text(message, "network") == "home";
@@ -193,9 +226,13 @@ public partial class MainWindow
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
             else note = why;
         }
-        else if (!item.IsMusic && Ffmpeg.Find() is not null) qualities.AddRange(StreamQuality.Converted.Select(q => q.Id));
+        else if (!item.IsMusic && Ffmpeg.Find() is { } ffmpeg && await ProbeForPhone(ffmpeg, item, TimeSpan.FromSeconds(2)) is { } probe)
+            qualities.AddRange(StreamQuality.For(probe.ClassHeight).Select(q => q.Id));
+        if (phoneRemote != remote) { stream.Dispose(); return; }
         if (phoneStreams.TryRemove(session.PhoneId, out var raced)) raced.Dispose();
         phoneStreams[session.PhoneId] = stream;
+        // The phone left while the video was being prepared: the stream waits for it as for any dropped link.
+        if (remote.Connected.All(s => s.PhoneId != session.PhoneId)) ExpirePhoneStream(remote, session.PhoneId);
         var title = PlaybackTitle(item);
         string? detail = item.Series is not null
             ? string.Join(" · ", new[] { item.Season is { } season ? $"Season {season}" : null, item.EpisodeDisplayTitle }.OfType<string>())
@@ -212,9 +249,7 @@ public partial class MainWindow
     private async Task<(PhoneStream? Stream, string? Why)> ConvertForPhone(MediaItem item, FileMediaSource file, string qualityId, List<string> qualities)
     {
         if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.");
-        VideoProbe? probe;
-        try { probe = await VideoProbe.ReadAsync(ffmpeg, item.Path, lifetime.Token); }
-        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException) { probe = null; }
+        var probe = await ProbeForPhone(ffmpeg, item, null);
         if (probe is null) return (null, "This file can't be converted, so the phone plays it as it is.");
         qualities.AddRange(StreamQuality.For(probe.ClassHeight).Select(q => q.Id));
         var quality = StreamQuality.Find(qualityId) is { } found && qualities.Contains(found.Id) ? found : StreamQuality.For(probe.ClassHeight).Last();
@@ -230,6 +265,28 @@ public partial class MainWindow
         return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory }, null);
     }
 
+    // The video's description, or null when the converter can't read it: it failed, took longer than its own 30 seconds
+    // (a sleeping drive, or security software holding ffmpeg), or longer than wait. Read once per file.
+    private readonly ConcurrentDictionary<string, Task<VideoProbe?>> phoneProbes = new();
+    private async Task<VideoProbe?> ProbeForPhone(string ffmpeg, MediaItem item, TimeSpan? wait)
+    {
+        var key = item.Path + "|" + (item.FileSize ?? 0);
+        if (phoneProbes.Count > 200) phoneProbes.Clear();
+        var probing = phoneProbes.GetOrAdd(key, _ => Task.Run(async () =>
+        {
+            try { return await VideoProbe.ReadAsync(ffmpeg, item.Path, lifetime.Token); }
+            catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or OperationCanceledException)
+            {
+                PlaybackDiagnostics.Record("phone-stream", new { state = "probe failed", error = ex.GetType().Name });
+                return null;
+            }
+        }));
+        var probe = wait is { } limit ? await Task.WhenAny(probing, Task.Delay(limit)) == probing ? await probing : null : await probing;
+        // A failure isn't kept: the next try reads the file again.
+        if (probing.IsCompleted && probing.Result is null) phoneProbes.TryRemove(KeyValuePair.Create(key, probing));
+        return probe;
+    }
+
     // How far the phone got. Saved as this PC saves its own playback, so Continue watching and the watched marks match.
     // A video playing here right now keeps its own position.
     private void SavePhoneProgress(JsonElement message)
@@ -237,12 +294,11 @@ public partial class MainWindow
         var id = Text(message, "id");
         if (items.FirstOrDefault(x => x.Id == id) is not { IsMusic: false } item || Number(message, "positionMs") is not { } position) return;
         if (room is null && playingItem?.Id == id && HasMediaPlayback && WantsMediaPlayback) return;
-        var duration = Number(message, "durationMs") ?? 0;
-        var ended = Flag(message, "ended") || duration > 0 && position >= duration - 2000;
-        var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + item.Id, ended || WasWatched(item.Id) ? "0" : Math.Max(0, position).ToString(CultureInfo.InvariantCulture)) };
-        if (position >= 10000 || ended) saved.Add(KeyValuePair.Create("played:" + item.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)));
+        var progress = PhoneProgress.From(position, Number(message, "durationMs") ?? 0, Flag(message, "ended"), WasWatched(item.Id));
+        var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + item.Id, progress.ResumeMs.ToString(CultureInfo.InvariantCulture)) };
+        if (progress.Played) saved.Add(KeyValuePair.Create("played:" + item.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)));
         library.SetSettings(saved);
-        if (ended && !WasWatched(item.Id)) SetWatched(item, true);
+        if (progress.Ended && !WasWatched(item.Id)) SetWatched(item, true);
         else
         {
             foreach (var card in libraryCards.Where(x => x.Card.Media.Id == item.Id)) UpdateCardPlayback(card);

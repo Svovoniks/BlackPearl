@@ -399,8 +399,10 @@ public sealed class PhoneRemoteHost : IDisposable
     {
         if (channel.Label == PhoneRemoteProtocol.MediaLabel && session.Media is null)
         {
-            session.Media = new PhoneMediaServer(session, channel, (s, resource, ct) =>
+            var media = session.Media = new PhoneMediaServer(session, channel, (s, resource, ct) =>
                 s.Greeted && s.PhoneId != "pair" && ResolveMedia is { } resolve ? resolve(s, resource, ct) : Task.FromResult<PhoneResource?>(null));
+            // The media channel can close on its own; a new one then takes its place.
+            channel.OnClose += _ => { if (session.Media == media) { session.Media = null; media.Dispose(); } };
             return;
         }
         if (channel.Label != PhoneRemoteProtocol.Label || session.Channel is not null) { try { channel.Dispose(); } catch { } return; }

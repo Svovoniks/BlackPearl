@@ -26,6 +26,12 @@ static class PhoneRemoteFixture
             "0123456789abcdef0123456789abcdef", "sdp", "{\"type\":\"offer\",\"sdp\":\"v=0\"}") == "AHCUPPyOcWPNmRtEBJ6D5PQUJwF9CV5-GHlhUpfTkX8", "phone remote signatures match the protocol's first test vector");
         check(PhoneRemoteProtocol.Sign("ffeeddccbbaa99887766554433221100", "pc", "pair", "0123456789abcdef0123456789abcdef", "ice",
             "{\"candidate\":\"candidate:1 1 UDP 2122317823 192.168.1.20 50000 typ host\",\"mid\":\"0\"}") == "bIGb4K6s3ztFQAOUL2Q3Oof397tsk3TiGq_W2ZB3I_I", "phone remote signatures match the protocol's second test vector");
+        // A phone's progress saves as the PC's own playback does.
+        check(PhoneProgress.From(754000, 6300000, false, false) == new PhoneProgress(754000, true, false), "a phone's progress saves its position and counts as played");
+        check(PhoneProgress.From(5000, 6300000, false, false) == new PhoneProgress(5000, false, false), "a few seconds on the phone don't count as played");
+        check(PhoneProgress.From(6299000, 6300000, false, false) == new PhoneProgress(0, true, true) && PhoneProgress.From(100, 0, true, false).Ended,
+            "the end of a video, or the phone saying it ended, marks it watched and clears its resume point");
+        check(PhoneProgress.From(900000, 6300000, false, true).ResumeMs == 0, "a title watched before keeps no resume point while it is watched again, as on the PC");
         await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", url => Exercise(url, check));
         await OtherServers(check);
     }

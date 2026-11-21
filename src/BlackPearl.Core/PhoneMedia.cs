@@ -18,6 +18,18 @@ public sealed class PhoneResourceBusyException(string message) : IOException(mes
 
 public delegate Task<PhoneResource?> PhoneResourceResolver(PhoneRemoteSession session, string resource, CancellationToken ct);
 
+// What a phone's progress report saves (PHONE-REMOTE.md, "Watching on the phone"), the way the PC saves its own playback:
+// the resume point (0 at the end, and for a title already watched), whether it counts as played, and whether it is now
+// watched.
+public readonly record struct PhoneProgress(long ResumeMs, bool Played, bool Ended)
+{
+    public static PhoneProgress From(long positionMs, long durationMs, bool ended, bool watched)
+    {
+        ended |= durationMs > 0 && positionMs >= durationMs - 2000;
+        return new(ended || watched ? 0 : Math.Max(0, positionMs), positionMs >= 10000 || ended, ended);
+    }
+}
+
 // Serves one phone's reads on its media-v1 channel. Reads are answered in the order they were asked, each as binary
 // frames; a few are read ahead so the disk overlaps with sending.
 internal sealed class PhoneMediaServer : IDisposable

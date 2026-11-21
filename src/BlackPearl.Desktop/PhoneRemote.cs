@@ -82,6 +82,15 @@ public partial class MainWindow
         RenderPhoneRemote();
     }
 
+    // Whether the video playing is one of the library's, rather than a file opened on its own. Remembered per video: the
+    // state is read four times a second while a phone is connected.
+    private (string Id, bool Known) phoneStateItem;
+    private bool InLibrary(MediaItem item)
+    {
+        if (phoneStateItem.Id != item.Id) phoneStateItem = (item.Id, !string.IsNullOrEmpty(item.Path) && items.Any(x => x.Id == item.Id));
+        return phoneStateItem.Known;
+    }
+
     private RemoteState PhoneRemoteState()
     {
         RemoteRoom? inRoom = room?.Snapshot is { } snapshot ? new(snapshot.Name ?? "Room", snapshot.People.Length) : null;
@@ -98,7 +107,7 @@ public partial class MainWindow
             (int)Math.Round(Volume.Value), player.Mute, loopMode switch { LoopMode.All => "all", LoopMode.One => "one", _ => "off" }, fullscreen,
             PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom,
             // Only a video this PC plays on its own can move to the phone; a room's belongs to the room.
-            room is null && item is { IsMusic: false } && !string.IsNullOrEmpty(item.Path) && items.Any(x => x.Id == item.Id) ? item.Id : null);
+            room is null && item is { IsMusic: false } && InLibrary(item) ? item.Id : null);
     }
 
     // Sends the state when something other than the advancing position changed, after a seek, and every five seconds
