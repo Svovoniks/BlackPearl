@@ -55,7 +55,7 @@ public partial class MainWindow
         phoneRemoteServer = server;
         phoneRemote = new PhoneRemoteHost(new PhoneRemoteOptions
         {
-            Server = server, HostKey = hostKey, PcName = PcName, Store = new SettingsPhoneStore(library), CanStart = PhonesCanStart,
+            Server = server, HostKey = hostKey, PcName = PcName, Store = new SettingsPhoneStore(library), CanStart = PhonesCanStart, Features = PhoneFeatures,
             AppVersion = typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
         });
         var remote = phoneRemote;
@@ -65,6 +65,7 @@ public partial class MainWindow
         // Asked from a native thread when a phone connects. The state is read on the UI thread, which then sends it to
         // every phone, rather than holding the native thread until it can.
         remote.CurrentState = () => { Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) PublishPhoneRemoteState(force: true); }); return null; };
+        AttachPhonePlayback(remote);
         remote.Start();
         phoneRemoteTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => PublishPhoneRemoteState(), Dispatcher);
         phoneRemoteTimer.Start();
@@ -76,6 +77,7 @@ public partial class MainWindow
         phoneRemoteTimer?.Stop();
         pairingWindow?.Close();
         if (phoneRemote is { } remote) { phoneRemote = null; remote.Dispose(); }
+        ClosePhoneStreams();
         phoneRemoteServer = null; phoneRemoteSentKey = null;
         RenderPhoneRemote();
     }
@@ -94,7 +96,9 @@ public partial class MainWindow
         var position = Math.Max(0, PlaybackPosition());
         return new RemoteState(true, title, string.IsNullOrWhiteSpace(detail) ? null : detail, WantsMediaPlayback, position, Math.Max(0, player.Length),
             (int)Math.Round(Volume.Value), player.Mute, loopMode switch { LoopMode.All => "all", LoopMode.One => "one", _ => "off" }, fullscreen,
-            PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom);
+            PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom,
+            // Only a video this PC plays on its own can move to the phone; a room's belongs to the room.
+            room is null && item is { IsMusic: false } && !string.IsNullOrEmpty(item.Path) && items.Any(x => x.Id == item.Id) ? item.Id : null);
     }
 
     // Sends the state when something other than the advancing position changed, after a seek, and every five seconds
