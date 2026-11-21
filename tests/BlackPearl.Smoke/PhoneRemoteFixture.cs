@@ -31,6 +31,8 @@ static class PhoneRemoteFixture
         check(PhoneProgress.From(5000, 6300000, false, false) == new PhoneProgress(5000, false, false), "a few seconds on the phone don't count as played");
         check(PhoneProgress.From(6299000, 6300000, false, false) == new PhoneProgress(0, true, true) && PhoneProgress.From(100, 0, true, false).Ended,
             "the end of a video, or the phone saying it ended, marks it watched and clears its resume point");
+        check(PhoneProgress.From(600000, 6300000, true, false) == new PhoneProgress(600000, true, false) && PhoneProgress.From(6270000, 6300000, true, false).Ended,
+            "a phone that says it ended in the middle of a video, as when its stream stopped, doesn't mark it watched");
         check(PhoneProgress.From(900000, 6300000, false, true).ResumeMs == 0, "a title watched before keeps no resume point while it is watched again, as on the PC");
         await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", url => Exercise(url, check));
         await OtherServers(check);
