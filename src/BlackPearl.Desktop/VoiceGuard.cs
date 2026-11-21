@@ -196,8 +196,8 @@ internal sealed class VoiceGuard
     // already follows its louder moments, so this mostly covers noise that grew since the last pause.
     public const float Margin = 8;
     // A band is raised to at most what the denoiser kept plus this many times the most it kept there lately, which
-    // fades by 1 dB every 10 ms. On real recordings this brought back most of the noise removal the guard had cost.
-    public const float Tail = 4;
+    // fades by 1 dB every 10 ms. On real recordings this brought back the noise removal the guard had cost.
+    public const float Tail = 2;
     private const double Fade = 0.8;
     // Speech is present from this probability, fully at the upper one, for 150 ms after it was last heard. The audio
     // here is 40 ms behind the speech detector, so a word's first sounds are covered as well.

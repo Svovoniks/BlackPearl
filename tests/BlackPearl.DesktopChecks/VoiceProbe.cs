@@ -88,12 +88,17 @@ static class VoiceProbe
             File.WriteAllText(name + ".csv", rows.ToString());
         }
     }
-    // Watches the processing on a real microphone without keeping or playing any audio:
-    // --voice-live <part of the microphone's name> <seconds> [Standard|Light|Off]. It opens that microphone and
-    // listens to what the default output plays, as voice does, and prints once a second: the processed level, the
-    // speech detector, whether the speakers were found in the microphone and how alike the two were, the input
-    // gain, and the limiter. Name a microphone that is safe to open: a Bluetooth headset's switches it to call mode.
-    public static async Task Live(string microphone, int seconds, string? only)
+    // Watches the processing on a real microphone without keeping any audio:
+    // --voice-live <part of the microphone's name> <seconds> [Standard|Light|Off] [<recording> <part of an output's name>].
+    // It opens that microphone and listens to what the default output plays, as voice does, and prints once a second:
+    // the processed level, the speech detector, whether the speakers were found in the microphone and how alike the
+    // two were, the input gain, and the limiter. Name a microphone that is safe to open: a Bluetooth headset's
+    // switches it to call mode.
+    //
+    // With a recording and an output, it plays the recording into that output and reports how the voice came through:
+    // meant for a virtual cable, whose output nobody hears and whose other end is the microphone. It refuses when
+    // another program has that microphone open, as that program would pass the recording on.
+    public static async Task Live(string microphone, int seconds, string? only, string? recording = null, string? into = null)
     {
         var mode = only is null ? VoiceAudio.Processing.Standard : Enum.Parse<VoiceAudio.Processing>(only);
         var (inputs, _) = await VoiceAudio.ListDevicesAsync();
@@ -107,6 +112,28 @@ static class VoiceProbe
         Console.WriteLine($"Microphone: {audio.InputName}; ready: {audio.MicrophoneReady}; problem: {audio.Problem ?? "none"}");
         if (!audio.MicrophoneReady || audio.Processor is not { } processor) { Environment.ExitCode = 1; return; }
         Console.WriteLine($"Echo cancelling available: {processor.EchoCancelling}; denoiser: {processor.DenoiserName}; speech detection: {processor.DetectsSpeech}");
+        short[]? played = null; var heardBack = new List<short>(); Task? playing = null;
+        if (recording is not null && into is not null)
+        {
+            var (_, outputs) = await VoiceAudio.ListDevicesAsync();
+            var output = outputs.FirstOrDefault(d => d.Name.Contains(into, StringComparison.OrdinalIgnoreCase));
+            if (output is null) { Console.WriteLine($"No output named like \"{into}\". Found: {string.Join("; ", outputs.Select(d => d.Name))}"); Environment.ExitCode = 1; return; }
+            using (var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator())
+            using (var endpoint = enumerator.GetDevice(device.Id))
+            {
+                var sessions = endpoint.AudioSessionManager.Sessions; var others = new List<string>();
+                for (var i = 0; i < sessions.Count; i++)
+                    if (sessions[i].State == NAudio.CoreAudioApi.Interfaces.AudioSessionState.AudioSessionStateActive && sessions[i].GetProcessID != Environment.ProcessId)
+                        others.Add(System.Diagnostics.Process.GetProcessById((int)sessions[i].GetProcessID).ProcessName);
+                if (others.Count > 0) { Console.WriteLine($"Not playing: {string.Join(", ", others)} has this microphone open and would pass the recording on."); Environment.ExitCode = 1; return; }
+            }
+            played = Read(recording);
+            if (played is null) { Console.WriteLine("The recording could not be read."); Environment.ExitCode = 1; return; }
+            lock (heardBack) processor.Processed = block => { lock (heardBack) heardBack.AddRange(block); };
+            playing = VoiceAudio.PlayAsync(output.Id, played.Select(s => s / 32768f).ToArray(), CancellationToken.None);
+            Console.WriteLine($"Playing {Path.GetFileName(recording)} ({played.Length / Rate} s) into {output.Name}");
+            seconds = Math.Max(seconds, played.Length / Rate + 2);
+        }
         Console.WriteLine("second  level dBFS  speech  frames sent  echo found  cancelling  similarity  delay ms  echo dB  voice dB  gain dB  limiter dB  given back");
         for (var second = 1; second <= seconds; second++)
         {
@@ -119,8 +146,19 @@ static class VoiceProbe
                 limiter = Math.Min(limiter, processor.LimiterDb);
                 var evidence = processor.EchoEvidence; if (evidence.Similarity > similarity) { similarity = evidence.Similarity; delay = evidence.DelayMs; }
             }
+            if (played is not null && second % 5 != 0 && second != seconds) continue;
             Console.WriteLine(FormattableString.Invariant($"{second,6}  {peak,10:F1}  {heard,6:F2}  {Volatile.Read(ref sent) - before,11}  {(processor.EchoPresent ? "yes" : "no"),10}  {(processor.EchoCancelled ? "yes" : "no"),10}  {similarity,10:F2}  {delay,8}  {processor.EchoDb,7:F1}  {processor.SpeechDb,8:F1}  {processor.InputGainDb,7:F1}  {limiter,10:F1}  {restored,10:F2}"));
         }
+        if (played is null || playing is null) return;
+        await playing;
+        short[] back; lock (heardBack) back = heardBack.ToArray();
+        Report(played, back);
+    }
+    static void Report(short[] played, short[] heardBack)
+    {
+        if (heardBack.Length < played.Length / 2) { Console.WriteLine("Too little came back to compare."); return; }
+        var kept = VoiceProcessingChecks.Compare(played, heardBack, 900);
+        Console.WriteLine(FormattableString.Invariant($"Through the real microphone path: gain {kept.Gain:+0.0;-0.0} dB, moving {kept.Moves:F1} dB between strong syllables, {kept.Dips:P0} of them more than 6 dB down; below 1 kHz {kept.Low:+0.0;-0.0} dB and above 4 kHz {kept.High:+0.0;-0.0} dB against the middle."));
     }
     static void Write(string path, short[] samples)
     {

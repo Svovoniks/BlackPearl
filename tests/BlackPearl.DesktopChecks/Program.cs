@@ -249,7 +249,7 @@ static class Program
         }
         if (args.FirstOrDefault() == "--voice-probe") { VoiceProbe.Run(args[1], args.ElementAtOrDefault(2)); return; }
         if (args.FirstOrDefault() == "--voice-render") { VoiceProbe.Render(args[1], args[2], args.ElementAtOrDefault(3)); return; }
-        if (args.FirstOrDefault() == "--voice-live") { Task.Run(() => VoiceProbe.Live(args[1], int.Parse(args[2]), args.ElementAtOrDefault(3))).GetAwaiter().GetResult(); return; }
+        if (args.FirstOrDefault() == "--voice-live") { Task.Run(() => VoiceProbe.Live(args[1], int.Parse(args[2]), args.ElementAtOrDefault(3), args.ElementAtOrDefault(4), args.ElementAtOrDefault(5))).GetAwaiter().GetResult(); return; }
         if (args.FirstOrDefault() == "--voice-processing")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;

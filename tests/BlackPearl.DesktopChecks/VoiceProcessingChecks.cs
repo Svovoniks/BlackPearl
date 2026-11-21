@@ -269,11 +269,11 @@ static class VoiceProcessingChecks
     // its level) once the level has settled: the gain, how far the gain moves between such frames (the spread from
     // the 10th to the 90th percentile, in dB), the share of them more than 6 dB below the usual gain, and the
     // change of the low and the high band against the middle one.
-    sealed record Kept(double Gain, double Moves, double Dips, double Low, double High);
-    static Kept Compare(short[] voice, short[] processed)
+    internal sealed record Kept(double Gain, double Moves, double Dips, double Low, double High);
+    internal static Kept Compare(short[] voice, short[] processed, int withinMs = 80)
     {
-        // The processing delays the audio by a known amount at most; find it within 80 ms.
-        var lag = Enumerable.Range(0, 80).Select(ms => ms * Rate / 1000).MaxBy(shift =>
+        // The processing delays the audio by a known amount at most; find it within 80 ms (real devices add more).
+        var lag = Enumerable.Range(0, withinMs).Select(ms => ms * Rate / 1000).MaxBy(shift =>
         {
             double sum = 0;
             for (var i = Rate * 2; i < Math.Min(voice.Length, processed.Length - shift) && i < Rate * 5; i += 3) sum += voice[i] * (double)processed[i + shift];
