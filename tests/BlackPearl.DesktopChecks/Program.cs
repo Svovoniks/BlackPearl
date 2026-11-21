@@ -186,6 +186,17 @@ static class Program
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
             RoomPlaybackStatusChecks.Run(args.Contains("--screenshots")); app.Shutdown(); return;
         }
+        if (args.FirstOrDefault() == "--phone-library")
+        {
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            app.Dispatcher.BeginInvoke(async () =>
+            {
+                try { await PhoneLibraryChecks.Run(directory); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { app.Shutdown(); }
+            });
+            app.Run(); return;
+        }
         if (args.FirstOrDefault() == "--room-tracks")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;

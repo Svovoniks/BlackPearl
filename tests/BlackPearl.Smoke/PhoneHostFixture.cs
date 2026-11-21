@@ -105,11 +105,11 @@ static class PhoneHostFixture
     }
 
     // The host needs a moment to start and reach the room server; until then the phone's offer goes unanswered.
-    static async Task<PhoneRemoteFixture.FakePhone?> Connect(string url, string pcId, PairedPhone phone, Action<bool, string> check)
+    static async Task<FakePhone?> Connect(string url, string pcId, PairedPhone phone, Action<bool, string> check)
     {
         for (var attempt = 0; attempt < 6; attempt++)
         {
-            var link = await PhoneRemoteFixture.FakePhone.Connect(url, pcId, phone.Id, phone.Secret);
+            var link = await FakePhone.Connect(url, pcId, phone.Id, phone.Secret);
             if (await link.Opened(5000)) { check(true, "a paired phone connects to the phone host"); return link; }
             await link.DisposeAsync();
         }
