@@ -4,8 +4,8 @@ using BlackPearl.Desktop;
 using Windows.Media.SpeechSynthesis;
 
 // BlackPearl's own microphone processing, without audio devices: the bundled models load, noise is removed, Silero
-// decides what is speech, and the echo canceller removes what the speakers played. Speech comes from Windows'
-// speech synthesizer; machines without a voice check everything else.
+// decides what is speech, the echo canceller removes what the speakers played, and through all of it the voice
+// leaves as it arrived. Speech comes from Windows' speech synthesizer; machines without a voice check everything else.
 static class VoiceProcessingChecks
 {
     const int Rate = VoicePacket.SampleRate, Frame = VoicePacket.FrameSamples;
@@ -23,6 +23,8 @@ static class VoiceProcessingChecks
         var decision = new VoiceProcessor.SpeechDecision();
         check(!decision.Next(0.9f) && !decision.Next(0.1f) && !decision.Next(0.9f) && decision.Next(0.6f) && decision.Next(0.4f) && !decision.Next(0.3f),
             "speech needs two chunks in a row above 0.5, then holds until the probability falls below 0.35");
+
+        Pieces(check);
 
         var fan = Noise(Rate * 6, 0.03, 1);
         foreach (var (mode, name) in new[] { (VoiceAudio.Processing.Standard, "DeepFilterNet"), (VoiceAudio.Processing.Light, "RNNoise") })
@@ -73,17 +75,28 @@ static class VoiceProcessingChecks
             var raised = result.Level(4, quiet.Length / Rate) - Level(quiet[(Rate * 4)..]);
             check(raised > 10, $"quiet speech is raised towards a normal level ({mode}: {raised:F0} dB louder)");
         }
-        // A learned high gain never pushes a sudden loud sound past full scale.
-        var level = new VoiceProcessor.InputLevel();
-        var faint = Enumerable.Range(0, VoiceProcessor.BlockSamples).Select(i => (float)(0.003 * Math.Sin(i * 0.1))).ToArray();
-        for (var i = 0; i < 50; i++) level.Learn(faint, 1);
-        level.Apply((float[])faint.Clone());
-        float[] Shout() => Enumerable.Range(0, VoiceProcessor.BlockSamples).Select(i => (float)(0.7 * Math.Sin(i * 0.1))).ToArray();
-        var shouts = new[] { Shout(), Shout() };
-        foreach (var shout in shouts) level.Apply(shout);
-        var loudest = shouts.Max(s => s.Max(Math.Abs));
-        check(level.GainDb > 20 && loudest <= 0.9f, $"a loud sound after quiet speech is not clipped (gain {level.GainDb:F0} dB, peak {loudest:F2})");
-        VoiceProcessor.InputLevel.Forget();
+        // The voice leaves as it arrived. With nothing to remove, what is sent is the microphone itself: the same
+        // level from one syllable to the next, and the same tone.
+        var kept = Compare(speech, spoken.Audio);
+        check(kept.Moves < 1.2 && kept.Dips < 0.02, $"clean speech keeps its loud and soft syllables as they were (gain moves {kept.Moves:F1} dB, {kept.Dips:P0} of frames dip)");
+        check(Math.Abs(kept.Low) < 1.5 && Math.Abs(kept.High) < 1.5, $"clean speech keeps its tone (below 1 kHz {kept.Low:+0.0;-0.0} dB, above 4 kHz {kept.High:+0.0;-0.0} dB against the middle)");
+        check(spoken.Audio.Max(s => Math.Abs((int)s)) < 32000, "normal speech stays below full scale without the limiter working");
+        // A voice from across a room arrives with the room's reverberation, which a denoiser takes for noise and
+        // removes together with part of the voice. In a quiet room there is nothing to remove, so it stays whole.
+        var distant = Room(speech);
+        var far = Process(VoiceAudio.Processing.Standard, distant);
+        var farKept = Compare(distant, far.Audio);
+        check(farKept.Dips < 0.05 && farKept.Moves < 2.5, $"a voice from across a quiet room is kept whole ({farKept.Dips:P0} of frames dip, gain moves {farKept.Moves:F1} dB)");
+        var lightFar = Compare(distant, Process(VoiceAudio.Processing.Light, distant).Audio);
+        check(lightFar.Dips < 0.05 && lightFar.Moves < 2.5, $"lighter processing keeps a distant voice whole too ({lightFar.Dips:P0} of frames dip, gain moves {lightFar.Moves:F1} dB)");
+        // With noise in the room the same voice is still kept, and the pauses are still cleaned.
+        var noisyRoom = Mix(distant, Noise(distant.Length, 0.01, 5));
+        var farNoisy = Process(VoiceAudio.Processing.Standard, noisyRoom);
+        var farNoisyKept = Compare(distant, farNoisy.Audio);
+        check(farNoisyKept.Dips < 0.08, $"a distant voice over fan noise is kept ({farNoisyKept.Dips:P0} of frames dip)");
+        var end = noisyRoom.Length / Rate;
+        var hush = Level(noisyRoom[^(Rate / 2)..]) + farNoisyKept.Gain - farNoisy.Level(end - 0.5, end);
+        check(hush > 15, $"and the fan is still removed once the voice stops ({hush:F0} dB quieter)");
         // The first word is not cut off. The gate opens a little after speech starts and sends its pre-roll at once,
         // so the first burst begins earlier.
         var onset = speech.Select((s, i) => (s, i)).First(p => Math.Abs(p.s) > 1000).i / Frame;
@@ -102,6 +115,7 @@ static class VoiceProcessingChecks
         }
         var echo = Process(VoiceAudio.Processing.Standard, heard, movie);
         var cancelled = Level(heard[(Rate * 6)..]) - echo.Level(6, 12);
+        check(echo.EchoPresent, "the movie from the speakers is found in the microphone");
         check(cancelled > 20, $"the movie's sound from the speakers is removed from the microphone ({cancelled:F0} dB quieter)");
         var lateSent = echo.SentAfter(6);
         check(lateSent < Rate * 6 / Frame / 10, $"once the canceller has adapted the movie's dialogue is not sent as speech ({lateSent} frames in 6 s)");
@@ -111,18 +125,222 @@ static class VoiceProcessingChecks
         var doubleTalk = Process(VoiceAudio.Processing.Standard, both, movie);
         var voiceFrames = voice.Length / Frame;
         check(doubleTalk.SentAfter(6) > voiceFrames * 0.6, $"speaking over the movie is still sent ({doubleTalk.SentAfter(6)} of {voiceFrames} frames)");
-        var kept = doubleTalk.Level(6, 12) - Level(voice);
-        check(kept > -10, $"the voice keeps its level while the canceller removes the movie ({kept:F1} dB)");
+        var level = doubleTalk.Level(6, 12) - Level(voice);
+        check(level > -10, $"the voice keeps its level while the canceller removes the movie ({level:F1} dB)");
+
+        // Headphones: the movie plays, but none of it reaches the microphone. An echo canceller handed a movie it
+        // cannot find suppresses the voice instead, so it has to stand aside.
+        var worn = Repeat(speech, Rate * 12);
+        var headphones = Process(VoiceAudio.Processing.Standard, worn, Film(speech, Rate * 12));
+        check(!headphones.EchoPresent, $"with headphones no echo is found (similarity {headphones.Similarity:F2})");
+        var wornKept = Compare(worn[(Rate * 4)..], headphones.Audio[(Rate * 4)..]);
+        check(wornKept.Dips < 0.02 && wornKept.Moves < 1.5, $"with headphones the movie playing does not touch the voice ({wornKept.Dips:P0} of frames dip, gain moves {wornKept.Moves:F1} dB)");
+        check(headphones.Sent > Rate * 12 / Frame * 0.6, $"and the voice is sent ({headphones.Sent} frames)");
     }
 
-    sealed record Result(double[] Levels, List<int> SentFrames)
+    // The pieces on their own, without speech.
+    static void Pieces(Action<bool, string> check)
+    {
+        const int Block = VoiceProcessor.BlockSamples;
+        var random = new Random(3);
+        float[] Hiss(double amplitude) => Enumerable.Range(0, Block).Select(_ => (float)((random.NextDouble() * 2 - 1) * amplitude)).ToArray();
+
+        // The guard only ever mixes the microphone back, so two identical signals come out as they went in, a block later.
+        var guard = new VoiceGuard();
+        var blocks = Enumerable.Range(0, 60).Select(_ => Hiss(0.2)).ToArray();
+        double error = 0, power = 0;
+        for (var i = 0; i < blocks.Length; i++)
+        {
+            var output = (float[])blocks[i].Clone();
+            guard.Process(blocks[i], output, 1);
+            if (i < 2) continue;
+            for (var n = 0; n < Block; n++) { error += Math.Pow(output[n] - blocks[i - 1][n], 2); power += blocks[i - 1][n] * blocks[i - 1][n]; }
+        }
+        check(error / power < 1e-8, $"the guard returns unchanged audio as it was, one block later (error {10 * Math.Log10(error / power + 1e-20):F0} dB)");
+        // In a pause the denoiser's silence stands; during speech in a quiet room the microphone comes back.
+        guard = new VoiceGuard();
+        float[] silence = new float[Block], pause = [], talk = [];
+        for (var i = 0; i < 100; i++) { pause = (float[])silence.Clone(); guard.Process(Hiss(0.01), pause, 0); }
+        for (var i = 0; i < 30; i++) { talk = (float[])silence.Clone(); guard.Process(Hiss(0.2), talk, 1); }
+        check(pause.Max(Math.Abs) < 1e-4 && Rms(talk) > 0.08, $"the guard leaves pauses silent and gives back what a denoiser took from speech (pause peak {pause.Max(Math.Abs):F5}, speech {Rms(talk):F2} of 0.12)");
+        // With that much noise measured in the pauses, the denoiser may remove that much from speech.
+        guard = new VoiceGuard();
+        for (var i = 0; i < 100; i++) guard.Process(Hiss(0.2), (float[])silence.Clone(), 0);
+        for (var i = 0; i < 30; i++) { talk = (float[])silence.Clone(); guard.Process(Hiss(0.2), talk, 1); }
+        check(Rms(talk) < 0.01, $"the guard lets a denoiser remove as much as the noise it measured ({Rms(talk):F3})");
+        // A quiet microphone that is then raised by 20 dB has the same room, 20 dB louder.
+        guard = new VoiceGuard();
+        for (var i = 0; i < 100; i++) guard.Process(Hiss(0.02), (float[])silence.Clone(), 0);
+        for (var i = 0; i < 30; i++) { talk = (float[])silence.Clone(); guard.Process(Hiss(0.2), talk, 1, 20); }
+        check(Rms(talk) < 0.01, $"the noise the guard measured follows the microphone's gain ({Rms(talk):F3})");
+
+        // The filter in front of everything takes out rumble below the voice and leaves the lowest voices alone.
+        double Passes(double hz)
+        {
+            var filter = Biquad.HighPass(60); double sum = 0;
+            for (var i = 0; i < Rate; i++) { var y = filter.Run((float)Math.Sin(2 * Math.PI * hz * i / Rate)); if (i >= Rate / 2) sum += y * y; }
+            return 10 * Math.Log10(sum / (Rate / 4.0));
+        }
+        check(Passes(25) < -14 && Passes(85) > -1.5 && Passes(150) > -0.2, $"rumble is filtered out below the voice (25 Hz {Passes(25):F0} dB, 85 Hz {Passes(85):F1} dB, 150 Hz {Passes(150):F1} dB)");
+
+        // The limiter leaves anything below its ceiling alone and holds what is above it, without steps.
+        var limiter = new PeakLimiter();
+        float[] Tone(double amplitude, int block) => Enumerable.Range(0, Block).Select(i => (float)(amplitude * Math.Sin((block * Block + i) * 0.13))).ToArray();
+        var soft = Tone(0.5, 0); var same = (float[])soft.Clone(); limiter.Apply(same);
+        check(same.SequenceEqual(soft), "the limiter does not touch audio below its ceiling");
+        var loud = Enumerable.Range(1, 20).Select(i => { var tone = Tone(2, i); limiter.Apply(tone); return tone; }).ToArray();
+        var step = loud.Skip(2).Max(tone => Enumerable.Range(1, Block - 1).Max(i => Math.Abs(tone[i] - tone[i - 1])));
+        check(loud.Max(tone => tone.Max(Math.Abs)) <= PeakLimiter.Ceiling + 1e-6f && step < 0.13f, $"a sound twice full scale is held below it smoothly (peak {loud.Max(tone => tone.Max(Math.Abs)):F2}, largest step {step:F3})");
+        var after = soft;
+        for (var i = 21; i < 121; i++) { after = Tone(0.5, i); limiter.Apply(after); }
+        check(Math.Abs(after.Max(Math.Abs) - 0.5f) < 0.01f, $"and the level returns once it is over ({after.Max(Math.Abs):F2} of 0.50)");
+
+        // A learned high gain never pushes a sudden loud sound past full scale, and the gain itself moves slowly.
+        VoiceProcessor.InputLevel.Forget();
+        var level = new VoiceProcessor.InputLevel(); limiter = new PeakLimiter();
+        float[] Faint() => Enumerable.Range(0, Block).Select(i => (float)(0.003 * Math.Sin(i * 0.1))).ToArray();
+        for (var i = 0; i < 200; i++) { var faint = Faint(); level.Learn(faint, 1); level.Apply(faint); }
+        var gain = level.GainDb;
+        var shouts = Enumerable.Range(0, 3).Select(_ => Enumerable.Range(0, Block).Select(i => (float)(0.7 * Math.Sin(i * 0.1))).ToArray()).ToArray();
+        foreach (var shout in shouts) { level.Learn(shout, 1); level.Apply(shout); limiter.Apply(shout); }
+        var loudest = shouts.Max(s => s.Max(Math.Abs));
+        check(gain > 20 && loudest <= 0.9f, $"a loud sound after quiet speech is not clipped (gain {gain:F0} dB, peak {loudest:F2})");
+        check(gain - level.GainDb < 0.5, $"and one loud moment does not change the gain ({gain - level.GainDb:F2} dB)");
+        // The next time voice opens the level is already known. Another microphone, 20 dB louder, is then learned
+        // afresh within a few seconds instead of over minutes.
+        level = new VoiceProcessor.InputLevel();
+        check(Math.Abs(level.GainDb - gain) < 1, $"the level learned carries over to the next time ({level.GainDb:F0} dB)");
+        float[] Nearer() => Enumerable.Range(0, Block).Select(i => (float)(0.03 * Math.Sin(i * 0.1))).ToArray();
+        for (var i = 0; i < 400; i++) { var nearer = Nearer(); level.Learn(nearer, 1); level.Apply(nearer); }
+        var asked = VoiceProcessor.InputLevel.TargetDb - 20 * Math.Log10(0.03 / Math.Sqrt(2));
+        check(Math.Abs(level.GainDb - asked) < 1.5, $"a microphone that is suddenly 20 dB louder gets the gain its own level asks for within four seconds ({level.GainDb:F1} of {asked:F1} dB)");
+        VoiceProcessor.InputLevel.Forget();
+
+        // Whether the speakers reach the microphone: none is assumed until an echo is found, which takes a second or
+        // two; it is taken to be gone after ten seconds of the speakers playing without it, and silence from the
+        // speakers says nothing either way.
+        EchoPresence.Forget();
+        var presence = new EchoPresence();
+        var film = Noise(Rate * 22, 0.05, 11); var room = Noise(Rate * 22, 0.01, 12);
+        void Feed(EchoPresence target, int from, int to, Func<int, float> microphone, bool playing = true)
+        {
+            var played = new float[Block]; var heard = new float[Block];
+            for (var at = from; at + Block <= to; at += Block)
+            {
+                for (var i = 0; i < Block; i++) { played[i] = playing ? film[at + i] / 32768f : 0; heard[i] = microphone(at + i); }
+                target.Speakers(played, 1); target.Microphone(heard);
+            }
+        }
+        Feed(presence, 0, Rate * 4, at => room[at] / 32768f);
+        check(!presence.Present, $"speakers that do not reach the microphone are not taken for an echo (similarity {presence.Latest.Similarity:F2})");
+        Feed(presence, Rate * 4, Rate * 6, at => room[at] / 32768f + 0.3f * film[at - 2400] / 32768f);
+        check(presence.Present && Math.Abs(presence.Latest.DelayMs - 50) <= 2, $"an echo is found within two seconds, at its delay (similarity {presence.Latest.Similarity:F2}, {presence.Latest.DelayMs} ms)");
+        Feed(presence, Rate * 6, Rate * 8, at => room[at] / 32768f, playing: false);
+        check(presence.Present, "silent speakers are no sign that the echo has gone");
+        check(new EchoPresence().Present, "what was found carries over to the next time voice opens");
+        Feed(presence, Rate * 8, Rate * 16, at => room[at] / 32768f);
+        var held = presence.Present;
+        Feed(presence, Rate * 16, Rate * 22, at => room[at] / 32768f);
+        check(held && !presence.Present, "an echo that has stopped is taken to be gone after ten seconds of playing, not before");
+        EchoPresence.Forget();
+    }
+    static double Rms(float[] samples) => Math.Sqrt(samples.Average(s => (double)s * s));
+
+    // How the processed audio differs from the voice that went in, over the frames that carry it (within 12 dB of
+    // its level) once the level has settled: the gain, how far the gain moves between such frames (the spread from
+    // the 10th to the 90th percentile, in dB), the share of them more than 6 dB below the usual gain, and the
+    // change of the low and the high band against the middle one.
+    sealed record Kept(double Gain, double Moves, double Dips, double Low, double High);
+    static Kept Compare(short[] voice, short[] processed)
+    {
+        // The processing delays the audio by a known amount at most; find it within 80 ms.
+        var lag = Enumerable.Range(0, 80).Select(ms => ms * Rate / 1000).MaxBy(shift =>
+        {
+            double sum = 0;
+            for (var i = Rate * 2; i < Math.Min(voice.Length, processed.Length - shift) && i < Rate * 5; i += 3) sum += voice[i] * (double)processed[i + shift];
+            return Math.Abs(sum);
+        });
+        var frames = Math.Min(voice.Length, processed.Length - lag) / Frame;
+        double[] Band(short[] samples, int offset, double from, double to)
+        {
+            var high = new Filter(from, true); var low = new Filter(to, false);
+            var energy = new double[frames];
+            for (var i = 0; i < frames * Frame; i++) { var v = low.Run(high.Run(samples[offset + i] / 32768.0)); energy[i / Frame] += v * v; }
+            return energy;
+        }
+        double[] before = Band(voice, 0, 300, 4000), after = Band(processed, lag, 300, 4000);
+        var top = before.OrderDescending().Take(Math.Max(1, frames / 10)).Average();
+        var carried = Enumerable.Range(0, frames).Where(f => f * Frame > Rate * 3 && before[f] > top / 16).ToArray();
+        var gains = carried.Select(f => 10 * Math.Log10((after[f] + 1e-12) / before[f])).Order().ToArray();
+        double At(double share) => gains[(int)(share * (gains.Length - 1))];
+        double Change(double from, double to)
+        {
+            double[] a = Band(voice, 0, from, to), b = Band(processed, lag, from, to);
+            return 10 * Math.Log10(carried.Sum(f => b[f]) / carried.Sum(f => a[f])) - 10 * Math.Log10(carried.Sum(f => after[f]) / carried.Sum(f => before[f]));
+        }
+        return new(At(0.5), At(0.9) - At(0.1), gains.Count(g => g < At(0.5) - 6) / (double)gains.Length, Change(100, 1000), Change(4000, 10000));
+    }
+    sealed class Filter
+    {
+        readonly double b0, b1, b2, a1, a2; double z1, z2;
+        public Filter(double hz, bool high)
+        {
+            var w = 2 * Math.PI * hz / Rate; var cos = Math.Cos(w); var alpha = Math.Sin(w) / Math.Sqrt(2); var a0 = 1 + alpha; var mid = high ? 1 + cos : 1 - cos;
+            b0 = b2 = mid / 2 / a0; b1 = (high ? -mid : mid) / a0; a1 = -2 * cos / a0; a2 = (1 - alpha) / a0;
+        }
+        public double Run(double x) { var y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return y; }
+    }
+    // The voice as a microphone across a room hears it: the direct sound and half a second of decaying reflections
+    // that carry more energy than it does.
+    static short[] Room(short[] voice)
+    {
+        var random = new Random(21);
+        var response = new double[Rate / 2];
+        for (var i = 240; i < response.Length; i++) response[i] = (random.NextDouble() * 2 - 1) * Math.Exp(-6.9 * i / (Rate * 0.45)) * 0.06;
+        response[0] = 1;
+        // The reflections are dense, so only every eighth is used, scaled to the same energy.
+        var result = new double[voice.Length];
+        for (var tap = 0; tap < response.Length; tap += tap == 0 ? 240 : 8)
+        {
+            var weight = tap == 0 ? 1 : response[tap] * Math.Sqrt(8);
+            for (var i = tap; i < voice.Length; i++) result[i] += voice[i - tap] * weight;
+        }
+        var scale = Math.Sqrt(voice.Sum(s => (double)s * s) / result.Sum(v => v * v));
+        return result.Select(v => (short)Math.Clamp(v * scale, short.MinValue, short.MaxValue)).ToArray();
+    }
+    // A movie's sound that has nothing to do with the voice: another, higher and faster voice made from the same
+    // speech, over notes of music.
+    static short[] Film(short[] speech, int length)
+    {
+        var random = new Random(31);
+        var result = new double[length];
+        for (var i = 0; i < length; i++)
+        {
+            var position = (i * 1.19 + Rate * 3) % (speech.Length - 1); var at = (int)position;
+            result[i] = speech[at] + (speech[at + 1] - speech[at]) * (position - at);
+        }
+        for (var start = 0; start < length;)
+        {
+            var note = (int)(Rate * (0.2 + random.NextDouble() * 0.4)); var pitch = 110 * Math.Pow(2, random.Next(24) / 12.0);
+            for (var i = 0; i < note && start + i < length; i++)
+            {
+                var t = (double)i / Rate;
+                result[start + i] += 2500 * Math.Exp(-t * 3) * (Math.Sin(2 * Math.PI * pitch * t) + 0.5 * Math.Sin(4 * Math.PI * pitch * t) + 0.25 * Math.Sin(6 * Math.PI * pitch * t));
+            }
+            start += note;
+        }
+        return result.Select(v => (short)Math.Clamp(v, short.MinValue, short.MaxValue)).ToArray();
+    }
+
+
+    sealed record Result(double[] Levels, List<int> SentFrames, short[] Audio, bool EchoPresent, float Similarity)
     {
         public int Sent => SentFrames.Count;
         public int SentAfter(int seconds) => SentFrames.Count(f => f >= seconds * Rate / Frame);
         // Mean power of the processed frames between two times, in dBFS.
-        public double Level(int from, int to)
+        public double Level(double from, double to)
         {
-            var frames = Levels[(from * Rate / Frame)..Math.Min(Levels.Length, to * Rate / Frame)];
+            var frames = Levels[(int)(from * Rate / Frame)..Math.Min(Levels.Length, (int)(to * Rate / Frame))];
             return 10 * Math.Log10(frames.Average(db => Math.Pow(10, db / 10)) + 1e-10);
         }
     }
@@ -132,16 +350,20 @@ static class VoiceProcessingChecks
         var capture = new VoiceCapture { Transmitting = true };
         var sent = new List<int>(); var frame = 0;
         capture.Frame += _ => sent.Add(frame);
-        VoiceProcessor.InputLevel.Forget();
+        VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
         using var processor = new VoiceProcessor(capture, mode);
+        var audio = new List<short>(microphone.Length);
+        processor.Processed = block => audio.AddRange(block);
         var levels = new double[microphone.Length / Frame];
+        var similarity = 0f;
         for (frame = 0; frame < levels.Length; frame++)
         {
             if (speakers is not null) processor.Reference(speakers.AsSpan(frame * Frame, Frame));
             processor.Write(microphone.AsSpan(frame * Frame, Frame));
             levels[frame] = capture.LevelDb;
+            similarity = Math.Max(similarity, processor.EchoEvidence.Similarity);
         }
-        return new(levels, sent);
+        return new(levels, sent, audio.ToArray(), processor.EchoPresent, similarity);
     }
     // The level of the loudest tenth of the samples: what a voice's level means, ignoring its pauses.
     static double ActiveDb(short[] samples)

@@ -39,6 +39,63 @@ static class VoiceProbe
             foreach (var (group, total) in totals.OrderBy(t => t.Key)) Console.WriteLine($"{group,-24} sent from {total.Triggered}/{total.Files} files, {total.Frames} frames");
         }
     }
+    // Writes what the processing does to each recording: --voice-render <folder> <output folder> [Standard|Light|Off].
+    // "<name>.proc.wav" is the processed microphone before the voice gate, "<name>.sent.wav" is what a listener
+    // decodes (silence where nothing was sent), and "<name>.csv" has one row per 20 ms frame. Both start a second
+    // before the recording does, as the input is read with a second of silence in front. A file named
+    // "<name>.ref.wav" beside a recording is what the speakers play, for the echo canceller. Every recording starts
+    // as a first session does: no level learned, echo not yet looked for. VOICE_PROBE_ALWAYS=1 keeps the gate open,
+    // so the sent audio shows the codec alone.
+    public static void Render(string folder, string output, string? only)
+    {
+        var mode = only is null ? VoiceAudio.Processing.Standard : Enum.Parse<VoiceAudio.Processing>(only);
+        Directory.CreateDirectory(output);
+        foreach (var file in Directory.GetFiles(folder, "*.wav").Where(f => !f.EndsWith(".ref.wav", StringComparison.OrdinalIgnoreCase)).Order())
+        {
+            if (Read(file) is not { } samples) continue;
+            var reference = File.Exists(Path.ChangeExtension(file, ".ref.wav")) ? Read(Path.ChangeExtension(file, ".ref.wav")) : null;
+            var capture = new VoiceCapture { Transmitting = true, AlwaysOn = Environment.GetEnvironmentVariable("VOICE_PROBE_ALWAYS") == "1" };
+            var decoder = Concentus.OpusCodecFactory.CreateDecoder(Rate, 1);
+            var frames = samples.Length / Frame;
+            var processed = new List<short>(samples.Length);
+            var sent = new short[frames * Frame];
+            var packets = new List<byte[]>();
+            capture.Frame += packet => packets.Add(packet.ToArray());
+            VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
+            using var processor = new VoiceProcessor(capture, mode);
+            processor.Processed = block => processed.AddRange(block);
+            var rows = new System.Text.StringBuilder("frame,heard,cleaned,sent,gain,limiter,restored,echo\n");
+            var decoded = new short[Frame];
+            for (var frame = 0; frame < frames; frame++)
+            {
+                if (reference is not null && (frame + 1) * Frame <= reference.Length) processor.Reference(reference.AsSpan(frame * Frame, Frame));
+                processor.Write(samples.AsSpan(frame * Frame, Frame));
+                // Packets sent now are this frame and, when the gate has just opened, the pre-roll before it.
+                for (var i = 0; i < packets.Count; i++)
+                {
+                    if (!VoicePacket.TryRead(packets[i], out _, out _, out _, out var payload)) continue;
+                    decoder.Decode(payload, decoded, Frame, false);
+                    var at = frame - (packets.Count - 1 - i);
+                    if (at >= 0) decoded.CopyTo(sent, at * Frame);
+                }
+                var (heard, cleaned) = processor.SpeechProbability;
+                rows.Append(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{heard:F3},{cleaned:F3},{packets.Count},{processor.InputGainDb:F1},{processor.LimiterDb:F1},{processor.Restored:F2},{(processor.EchoPresent ? 1 : 0)}\n");
+                packets.Clear();
+            }
+            var name = Path.Combine(output, Path.GetFileNameWithoutExtension(file));
+            Write(name + ".proc.wav", processed.ToArray());
+            Write(name + ".sent.wav", sent);
+            File.WriteAllText(name + ".csv", rows.ToString());
+        }
+    }
+    static void Write(string path, short[] samples)
+    {
+        using var writer = new BinaryWriter(File.Create(path));
+        writer.Write("RIFF"u8); writer.Write(36 + samples.Length * 2); writer.Write("WAVEfmt "u8); writer.Write(16);
+        writer.Write((short)1); writer.Write((short)1); writer.Write(Rate); writer.Write(Rate * 2); writer.Write((short)2); writer.Write((short)16);
+        writer.Write("data"u8); writer.Write(samples.Length * 2);
+        writer.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(samples.AsSpan()));
+    }
     // 16-bit PCM WAV, first channel, resampled to 48 kHz after a second of silence.
     static short[]? Read(string path)
     {

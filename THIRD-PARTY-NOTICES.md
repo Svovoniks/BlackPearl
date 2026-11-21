@@ -15,7 +15,7 @@ BlackPearl dynamically links the following components. Package versions and cont
 | libdatachannel and bundled OpenSSL | Included in DataChannelDotnet | https://github.com/paullouisageneau/libdatachannel |
 | Concentus (managed Opus voice codec) | 2.2.2 | https://github.com/lostromb/concentus |
 | NAudio Core / WASAPI (voice microphone and playback) | 3.3.0 | https://github.com/naudio/NAudio |
-| WebRTC audio processing, `webrtc-apm.dll` (voice echo cancellation and gain control; BSD-3-Clause, C interface MIT) | 2.1, from SoundFlow.Extensions.WebRtc.Apm 1.4.0 | https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing, https://github.com/LSXPrime/SoundFlow |
+| WebRTC audio processing, `webrtc-apm.dll` (voice echo cancellation; BSD-3-Clause, C interface MIT) | 2.1, from SoundFlow.Extensions.WebRtc.Apm 1.4.0 | https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing, https://github.com/LSXPrime/SoundFlow |
 | RNNoise, `rnnoise.dll` built from the release (lighter voice noise removal; BSD-3-Clause) | 0.2 | https://github.com/xiph/rnnoise |
 | DeepFilterNet 3 and its Rust dependencies, `deepfilter.dll` built from `src/native/deepfilter` (voice noise removal; MIT or Apache-2.0) | revision d375b2d8 | https://github.com/Rikorose/DeepFilterNet |
 | Silero VAD model `silero_vad.onnx` (voice speech detection; MIT) | 6.2.3 | https://github.com/snakers4/silero-vad |
