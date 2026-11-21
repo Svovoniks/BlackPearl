@@ -270,9 +270,6 @@ A read that can't be answered gets a text `{"type":"read-error","id":<u32>,"code
 `busy` means not ready yet (a piece still converting): ask again shortly. The PC queues at most 64 reads per phone and
 answers `busy` past that.
 
-Both channels share one link. The PC sends video only while little of it is still queued (256 KiB), so its messages on
-`remote-v1` reach a phone that reads as fast as it can within moments, not after the video queued ahead of them.
-
 ## While BlackPearl is closed
 
 With **Phones can browse and watch while BlackPearl is closed** on (Settings › Profile › Phone remote, on by default),

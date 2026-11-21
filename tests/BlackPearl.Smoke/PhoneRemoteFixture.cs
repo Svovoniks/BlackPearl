@@ -91,7 +91,6 @@ static class PhoneRemoteFixture
         host.ResolveMedia = (_, resource, _) => Task.FromResult(resource switch
         {
             "file/test" => new PhoneResource(video.Length, (offset, count, _) => Task.FromResult(video.AsSpan((int)offset, count).ToArray())),
-            "file/big" => new PhoneResource(1L << 40, (_, count, _) => Task.FromResult(new byte[count])),
             "stream/busy/0" => throw new PhoneResourceBusyException("Still converting."),
             _ => null,
         });
@@ -173,28 +172,6 @@ static class PhoneRemoteFixture
             var tail = await phone.Read("file/test", 599990, 262144);
             check(tail.Bytes.AsSpan().SequenceEqual(video.AsSpan(599990)) && (await phone.Read("file/test", 600000, 100)).Bytes.Length == 0, "a read past the end of the video is cut short, and one at its end is empty");
             check((await phone.Read("file/other", 0, 100)).Error == "gone" && (await phone.Read("stream/busy/0", 0, 100)).Error == "busy", "a resource the PC doesn't offer is refused, and one still being prepared asks the phone to try again");
-            // Video and the PC's messages share one link. A phone reading as fast as it can, as its player does while
-            // it buffers, still hears the PC at once: Continue on PC's answer waited seconds behind queued video.
-            using (var reading = new CancellationTokenSource())
-            {
-                var reader = Task.Run(async () =>
-                {
-                    long next = 0; var inFlight = new Queue<Task<(byte[] Bytes, long Length, string? Error)>>();
-                    while (!reading.IsCancellationRequested)
-                    {
-                        while (inFlight.Count < 8) { inFlight.Enqueue(phone.Read("file/big", next, PhoneMediaServer.MaxRead)); next += PhoneMediaServer.MaxRead; }
-                        await inFlight.Dequeue();
-                    }
-                });
-                await Task.Delay(1500);
-                var sent = System.Diagnostics.Stopwatch.StartNew();
-                host.Publish(new RemoteState(true, "Night Signal", Playing: false, PositionMs: 6000, DurationMs: 60000));
-                var heard = await phone.Next("state", 10000);
-                var latency = sent.ElapsedMilliseconds;
-                reading.Cancel();
-                try { await reader; } catch (Exception) { }
-                check(heard is not null && latency < 500, $"a phone reading video as fast as it can still hears the PC at once ({latency} ms)");
-            }
             var welcomed = await phone.Welcome;
             check(welcomed.GetProperty("features").EnumerateArray().Select(f => f.GetString()).SequenceEqual(["library", "watch"]), "the PC's welcome lists the library and watch features");
             phone.Send(new { type = "browse", request = 7, home = true });

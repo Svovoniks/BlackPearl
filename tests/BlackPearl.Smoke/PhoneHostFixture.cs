@@ -93,13 +93,13 @@ static class PhoneHostFixture
 
             // BlackPearl opens the library, then connects for phones itself. The host keeps the phone's link until the room
             // server has handed the PC's id to the app, so the phone isn't left with neither, and then ends.
+            // Held to the end and closed, not released: the awaits below can resume on another thread.
             using var app = new Mutex(true, appMutex);
             check(!host.WaitForExit(1500) && !await link.Closed(10), "the phone host keeps the phone's link while BlackPearl is still connecting");
             using var appLink = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Test PC", AppVersion = "0.0.0-test", Store = new SettingsStore(store) });
             appLink.Start();
             check(host.WaitForExit(5000), "the phone host ends once BlackPearl has taken the phones over");
             check(await link.Closed(10000), "the phone's link to the phone host closes when it ends, for BlackPearl to take the phone over");
-            app.ReleaseMutex();
         }
         finally { if (!host.HasExited) { host.Kill(); host.WaitForExit(5000); } }
     }
