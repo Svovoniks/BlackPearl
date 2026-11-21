@@ -323,18 +323,7 @@ public partial class MainWindow
         }
     }
 
-    private static void CloseConversion(StreamConverter? converter, SegmentStore? store, string? directory)
-    {
-        if (converter is null && store is null && directory is null) return;
-        converter?.Dispose();
-        // The converted video and its subtitle files can be gigabytes: they go on another thread.
-        _ = Task.Run(() =>
-        {
-            store?.Dispose();
-            try { if (directory is not null && Directory.Exists(directory)) Directory.Delete(directory, true); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-        });
-    }
+    private static void CloseConversion(StreamConverter? converter, SegmentStore? store, string? directory) => PhoneLibrary.CloseConversion(converter, store, directory);
 
     private void StopConversion()
     {

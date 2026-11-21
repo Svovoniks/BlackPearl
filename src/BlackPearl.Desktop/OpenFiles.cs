@@ -18,6 +18,7 @@ public static class OpenFileHandoff
     // Keeps its name from when the app was called Watchroom, so a running Watchroom and a newly started BlackPearl
     // still recognize each other on the same library.
     private static string Name => "Watchroom-" + LibraryIdentity.Hash(Path.GetFullPath(Program.DataDirectory).ToUpperInvariant());
+    internal static string InstanceName => Name;
 
     public static string? FileArgument(IEnumerable<string> args) =>
         args.Where(arg => !arg.StartsWith("--", StringComparison.Ordinal)).Select(arg =>

@@ -23,19 +23,21 @@ public partial class MainWindow
     private string? phoneRemoteKey;
     private Window? pairingWindow;
 
-    private bool PhoneRemoteEnabled => library.Setting("phoneRemote") == "on";
-    private bool PhonesCanStart => library.Setting("phoneRemoteCanStart") != "off";
-    private static string PcName => Environment.MachineName;
+    private bool PhoneRemoteEnabled => PhoneRemoteSettings.Enabled(library);
+    private bool PhonesCanStart => PhoneRemoteSettings.PhonesCanStart(library);
+    private static string PcName => PhoneRemoteSettings.PcName;
 
-    private sealed class SettingsPhoneStore(LibraryStore library) : IPairedPhoneStore
-    {
-        public IReadOnlyList<PairedPhone> Load()
-        {
-            try { return Wire.Read<List<PairedPhone>>(library.Setting("phoneRemotePhones") ?? "[]"); }
-            catch (System.Text.Json.JsonException) { return []; }
-        }
-        public void Save(IReadOnlyList<PairedPhone> phones) => library.Setting("phoneRemotePhones", Wire.Serialize(phones));
-    }
+    // Whether closing BlackPearl starts the phone host (PhoneHost.cs), worked out before closing stops the link. Not when
+    // it closes to install an update, which needs every copy of the app gone, or when Windows is signing out.
+    // A sign-out the user cancels leaves the flag behind, so it counts for a minute.
+    private bool closingForUpdate;
+    private long sessionEndingAt = long.MinValue / 2;
+    private bool SessionEnding => Environment.TickCount64 - sessionEndingAt < 60000;
+    private bool KeepsPhonesAfterClosing => PhoneRemoteEnabled && PhoneRemoteSettings.WhileClosed(library) && !closingForUpdate && !SessionEnding &&
+        OpenFileHandoff.Claimed && PhoneRemoteSettings.HostKey(library) is not null && PhoneRemoteSettings.HasPhones(library);
+
+    // Keeps the sign-in entry in step with the settings, off the UI thread.
+    private void SyncPhoneHostStartup() { var store = library; _ = Task.Run(() => PhoneHostStartup.Sync(store)); }
 
     // Starts, restarts or stops the link to match the settings. Called at startup and when they change.
     private void SyncPhoneRemote()
@@ -55,7 +57,7 @@ public partial class MainWindow
         phoneRemoteServer = server;
         phoneRemote = new PhoneRemoteHost(new PhoneRemoteOptions
         {
-            Server = server, HostKey = hostKey, PcName = PcName, Store = new SettingsPhoneStore(library), CanStart = PhonesCanStart, Features = PhoneFeatures,
+            Server = server, HostKey = hostKey, PcName = PcName, Store = new LibraryPhoneStore(library), CanStart = PhonesCanStart, Features = PhoneFeatures,
             AppVersion = typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
         });
         var remote = phoneRemote;
@@ -175,7 +177,7 @@ public partial class MainWindow
     {
         if (PhoneRemoteContent is null || preferenceSection != "Profile") return;
         var remote = phoneRemote;
-        var phones = remote?.Phones ?? new SettingsPhoneStore(library).Load();
+        var phones = remote?.Phones ?? new LibraryPhoneStore(library).Load();
         var connected = remote?.Connected.Select(s => (s.PhoneId, s.Relayed)).ToArray() ?? [];
         var key = Wire.Serialize(new { enabled = PhoneRemoteEnabled, canStart = PhonesCanStart, status = remote?.Status, ready = remote?.ServerReady, phones, connected, server = SavedServerAddress });
         if (!force && key == phoneRemoteKey) return;
@@ -204,7 +206,7 @@ public partial class MainWindow
         var main = Card("Phone remote");
         main.Children.Add(Line("Control playback on this PC from BlackPearl Mobile on your phone, at home or away, or browse this library and watch it on the phone, then carry on here from the same moment. The phone connects straight to this PC; your room server only introduces them."));
         var toggle = new CheckBox { IsChecked = enabled, Content = "Allow paired phones to control BlackPearl", Margin = new Thickness(0, 14, 0, 0) };
-        toggle.Click += (_, _) => { library.Setting("phoneRemote", toggle.IsChecked == true ? "on" : "off"); SyncPhoneRemote(); RenderPhoneRemote(force: true); };
+        toggle.Click += (_, _) => { library.Setting("phoneRemote", toggle.IsChecked == true ? "on" : "off"); SyncPhoneRemote(); SyncPhoneHostStartup(); RenderPhoneRemote(force: true); };
         main.Children.Add(toggle);
         var canStart = new CheckBox { IsChecked = PhonesCanStart, IsEnabled = enabled, Content = "Phones can start videos and change queues on their own", Margin = new Thickness(0, 10, 0, 0) };
         canStart.Click += (_, _) =>
@@ -214,6 +216,17 @@ public partial class MainWindow
             StopPhoneRemote(); SyncPhoneRemote();
         };
         main.Children.Add(canStart);
+        var whileClosed = PhoneRemoteSettings.WhileClosed(library);
+        var keep = new CheckBox { IsChecked = whileClosed, IsEnabled = enabled, Content = "Phones can browse and watch while BlackPearl is closed", Margin = new Thickness(0, 10, 0, 0) };
+        keep.Click += (_, _) => { library.Setting("phoneRemoteWhileClosed", keep.IsChecked == true ? "on" : "off"); SyncPhoneHostStartup(); RenderPhoneRemote(force: true); };
+        main.Children.Add(keep);
+        var signIn = new CheckBox { IsChecked = PhoneRemoteSettings.AtSignIn(library), IsEnabled = enabled && whileClosed, Content = "Also when I sign in to Windows, before BlackPearl is opened", Margin = new Thickness(28, 8, 0, 0) };
+        signIn.Click += (_, _) => { library.Setting("phoneRemoteAtSignIn", signIn.IsChecked == true ? "on" : "off"); SyncPhoneHostStartup(); };
+        main.Children.Add(signIn);
+        var keepHint = Line("BlackPearl's icon stays in the notification area meanwhile. Right-click it to turn this off.", size: 12.5);
+        keepHint.Margin = new Thickness(28, 6, 0, 0);
+        if (!enabled || !whileClosed) keepHint.Opacity = .6;
+        main.Children.Add(keepHint);
         var status = new DockPanel { Margin = new Thickness(0, 16, 0, 0) };
         var pair = new Button { Content = "Pair a phone", IsEnabled = enabled && remote is not null, VerticalAlignment = VerticalAlignment.Center };
         pair.SetResourceReference(StyleProperty, "Primary");
@@ -236,7 +249,7 @@ public partial class MainWindow
             remove.Click += (_, _) =>
             {
                 if (phoneRemote is { } live) live.Forget(phone.Id);
-                else { var store = new SettingsPhoneStore(library); store.Save(store.Load().Where(p => p.Id != phone.Id).ToArray()); }
+                else { var store = new LibraryPhoneStore(library); store.Save(store.Load().Where(p => p.Id != phone.Id).ToArray()); }
                 RenderPhoneRemote(force: true);
             };
             DockPanel.SetDock(remove, Dock.Right); row.Children.Add(remove);

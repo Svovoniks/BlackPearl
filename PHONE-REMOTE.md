@@ -225,6 +225,13 @@ or for a conversion (H.264 and AAC in MPEG-TS pieces of `segmentMs`, the last on
  "streamId":"<32 hex>","segments":708,"segmentMs":4000,"quality":"720p","qualities":["original","720p","480p"],"note":null}
 ```
 
+Both also carry, for an episode, the episodes the PC's own Previous and Next would play and the show's first episode,
+which Loop all starts again from after the last one, each as `{"id":"…","title":"…","detail":"Season 2 · Episode 4"}`
+or null (`previous`, `next`, `first`; `first` only when there is no `next`), and the PC's track preferences from
+Settings › Playback, as two-letter language codes in priority order: `"tracks":{"audio":["ja","en"],"subtitles":["en"],
+"rules":[{"audio":"en","languages":["off"]}]}`. A rule replaces `subtitles` while the audio is in its language; `off`
+means no subtitles. The phone picks its starting tracks with them as the PC would. Older PCs send none of these.
+
 `positionMs` is where to start: the PC's saved position, 0 for a watched video. `note` says why the phone got the
 file when it asked for a conversion (no converter, or a file already smaller). The PC keeps one stream per phone; a
 new `watch` replaces it and `{"type":"stream-stop"}` ends it. A failure is an `error` with the `request` and the code
@@ -240,7 +247,8 @@ the video it is playing itself at that moment.
 
 Phone → PC: `{"type":"play","request":<n>,"id":"…","positionMs":1180000}` plays the video on the PC from that
 position, and answers `{"type":"done","request":<n>}` once it has started. It needs `canStart`; a refusal is an
-`error` with code `not-allowed`, `in-room` (the PC is in a room) or `gone`.
+`error` with code `not-allowed`, `in-room` (the PC is in a room), `gone`, or `opening` (BlackPearl is starting on the PC: ask again once the phone has reconnected to it). The PC ends the phone's stream before it
+answers: the phone is no longer watching, and an answer queued behind video it still reads can take seconds to arrive.
 
 ### The media channel, `media-v1`
 
@@ -268,3 +276,20 @@ little-endian header:
 A read that can't be answered gets a text `{"type":"read-error","id":<u32>,"code":"busy|gone|invalid|failed","message":"…"}`.
 `busy` means not ready yet (a piece still converting): ask again shortly. The PC queues at most 64 reads per phone and
 answers `busy` past that.
+
+## While BlackPearl is closed
+
+With **Phones can browse and watch while BlackPearl is closed** on (Settings › Profile › Phone remote, on by default),
+BlackPearl starts a small process of itself with no window, `BlackPearl.exe --phone-host`, once it has closed, and
+optionally at Windows sign-in (`--phone-host --signed-in`, from a `Run` entry named `BlackPearl phone access`). It
+connects for phones with the same key, so to a phone it is the same PC: its `welcome` offers `library` and `watch`,
+its state says nothing is playing, and the remote's commands get `error` `nothing-playing`. Browsing, watching and
+progress work as with the app. Continuing on the PC opens BlackPearl with the video (`--play-id <id>`), which plays it
+from the position the host saved once its library has loaded.
+
+The host shows an icon in the notification area whose menu opens BlackPearl or turns the host off. It ends once
+BlackPearl has the library open again: after the room server has handed the PC's id to the app (at most ten seconds),
+so phones are never left with neither. The phones then reconnect to the app as after any dropped link. BlackPearl
+doesn't start the host when it closes to install an update or as Windows signs out, and a build started with
+`BLACKPEARL_PHONE_HOST=off` (as `scripts/dev-launch.ps1` does unless `-PhoneHost`) never starts it or changes the
+sign-in entry.
