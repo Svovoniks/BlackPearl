@@ -123,7 +123,7 @@ public partial class MainWindow
         for (int index = 0, at = 0; index < saved.MediaIds.Length && at < queue.Count; index++)
         {
             if (saved.MediaIds[index] != queue[at].Id) continue;
-            if (at == queuePosition) return new(saved.Id, saved.Name, index);
+            if (at == queuePosition) return new(saved.Id, PhoneQueues.Name(saved.Name), index);
             at++;
         }
         return null;

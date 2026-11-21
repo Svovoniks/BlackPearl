@@ -271,11 +271,18 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         }
         else if (ffmpeg is not null && await Probe(ffmpeg, item, TimeSpan.FromSeconds(2)) is { } probe)
             qualities.AddRange(StreamQuality.For(probe.ClassHeight).Select(q => q.Id));
-        // Where the phone goes from here, worked out before the stream is registered, so the answer follows at once.
-        var (source, version) = (Items().ToArray(), LibraryIdentity.TitleKey(item) is { } show ? library.Setting("version:" + show) : null);
-        var (inQueue, place) = QueuePlace(Text(message, "queue"), Number(message, "queueIndex"), item.Id);
-        var (back, forward, start) = await Task.Run(() => inQueue is null ? EpisodeSteps(source, item, version) : QueueSteps(source, inQueue, place));
-        var tracks = TrackPreferences();
+        // Where the phone goes from here, worked out before the stream is registered, so the answer follows at once. A
+        // failure on the way closes the stream (and its conversion), which nothing else would close.
+        SavedQueue? inQueue; int place; EpisodeStep? back, forward, start; object tracks;
+        try
+        {
+            var (source, version) = (Items().ToArray(), LibraryIdentity.TitleKey(item) is { } show ? library.Setting("version:" + show) : null);
+            (inQueue, place) = QueuePlace(Text(message, "queue"), Number(message, "queueIndex"), item.Id);
+            var queued = inQueue;
+            (back, forward, start) = await Task.Run(() => queued is null ? EpisodeSteps(source, item, version) : QueueSteps(source, queued, place));
+            tracks = TrackPreferences();
+        }
+        catch { stream.Dispose(); throw; }
         if (current() != remote) { stream.Dispose(); return; }
         if (streams.TryRemove(session.PhoneId, out var raced)) raced.Dispose();
         streams[session.PhoneId] = stream;
@@ -344,7 +351,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 var upNext = PhoneQueues.UpNext(queue, byId, active, Watched);
                 var entries = PhoneQueues.Entries(queue, byId);
                 var cover = upNext >= 0 ? byId[queue.MediaIds[upNext]] : entries.Select(e => e.Item).FirstOrDefault();
-                return new QueueCard(queue.Id, queue.Name.Length > 120 ? queue.Name[..120] : queue.Name, entries.Length, upNext >= 0 ? upNext : null,
+                return new QueueCard(queue.Id, queue.Name, entries.Length, upNext >= 0 ? upNext : null,
                     queue.Id == activeId, cover is null ? null : ArtworkToken(Picture(cover)));
             }).ToArray();
         });

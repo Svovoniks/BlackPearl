@@ -101,6 +101,12 @@ static class PhoneLibraryChecks
             page = await phone.Next("page", 10000);
             Check(page?.GetProperty("entries").EnumerateArray().Select(e => e.GetProperty("id").GetString()).SequenceEqual(["harbor-1", "harbor-2", "harbor-3"]) == true,
                 "a show's episodes are listed for a video of it");
+            // A queue named at absurd length still lists its videos: phones are sent the first 120 characters of a name.
+            store.Setting("queues", Wire.Serialize(new[] { queued, new SavedQueue("long", new string('x', 70000), ["harbor-1"]) }));
+            phone.Send(new { type = "browse", request = 20, queue = "long" });
+            page = await phone.Next("page", 10000);
+            Check(page?.GetProperty("entries").GetArrayLength() == 1 && page?.GetProperty("location").GetString()?.Length == 120,
+                "a queue with a very long name still lists its videos, under the first 120 characters of its name");
             phone.Send(new { type = "watch", request = 13, id = "harbor-1", quality = StreamQuality.OriginalId, network = "home", queue = "evening", queueIndex = 3 });
             var inQueue = await phone.Next("stream", 15000);
             string? Step(System.Text.Json.JsonElement? answer, string name, string field = "id") =>

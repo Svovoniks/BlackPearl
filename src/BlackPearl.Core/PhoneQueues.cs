@@ -7,9 +7,16 @@ public static class PhoneQueues
 {
     public static SavedQueue[] Read(string? json)
     {
-        try { return (Wire.Read<SavedQueue[]>(string.IsNullOrWhiteSpace(json) ? "[]" : json) ?? []).Where(q => q?.Id is not null && q.Name is not null && q.MediaIds is not null).ToArray(); }
+        try
+        {
+            return (Wire.Read<SavedQueue[]>(string.IsNullOrWhiteSpace(json) ? "[]" : json) ?? [])
+                .Where(q => q?.Id is not null && q.Name is not null && q.MediaIds is not null).Select(q => q with { Name = Name(q.Name) }).ToArray();
+        }
         catch (System.Text.Json.JsonException) { return []; }
     }
+
+    // A queue's name as phones are sent it: at most 120 characters, so a long one can't crowd a page out of its message.
+    public static string Name(string name) => name.Length > 120 ? name[..120] : name;
 
     // The queue's videos the library still has, with their places. Ones that left the library are skipped, as the PC's
     // player skips them.
