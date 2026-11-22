@@ -169,6 +169,21 @@ static class Program
             };
             shuffleWindow.Show(); app.Run(); return;
         }
+        if (args.FirstOrDefault() == "--phone-takeover")
+        {
+            // A phone taking over the video playing here, without the whole suite.
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var takeOverWindow = new MainWindow { Left = -20000, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual };
+            takeOverWindow.Loaded += async (_, _) =>
+            {
+                var count = 0;
+                void Pass(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }
+                try { await PhoneTakeOverChecks.Run(takeOverWindow, Pass); Console.WriteLine($"{count} phone takeover checks passed."); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { if (takeOverWindow.IsLoaded) takeOverWindow.Close(); app.Shutdown(); }
+            };
+            takeOverWindow.Show(); app.Run(); return;
+        }
         if (args.FirstOrDefault() == "--guest-recovery")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -434,6 +449,7 @@ static class Program
                 RenameChecks.Run(Check);
                 await PictureInPictureChecks.Run(window, Check);
                 await EndedSeekChecks.Run(window, Check);
+                await PhoneTakeOverChecks.Run(window, Check);
                 await LocalAviAudioChecks.Run(window, Check);
                 await CheckBackNavigation(window, Check);
                 PlayerInteractionChecks.Run(window, Check);

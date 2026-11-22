@@ -34,6 +34,12 @@ static class PhoneRemoteFixture
         check(PhoneProgress.From(600000, 6300000, true, false) == new PhoneProgress(600000, true, false) && PhoneProgress.From(6270000, 6300000, true, false).Ended,
             "a phone that says it ended in the middle of a video, as when its stream stopped, doesn't mark it watched");
         check(PhoneProgress.From(900000, 6300000, false, true).ResumeMs == 0, "a title watched before keeps no resume point while it is watched again, as on the PC");
+        // An episode of 2696 seconds left with Next 3 minutes before its end, in the credits.
+        check(PhoneProgress.From(2516000, 2696000, false, false, final: true) == new PhoneProgress(0, true, true),
+            "leaving a video on the phone in its last tenth, as with Next in the credits, marks it watched");
+        check(PhoneProgress.From(2516000, 2696000, false, false) == new PhoneProgress(2516000, true, false) &&
+            PhoneProgress.From(2400000, 2696000, false, false, final: true) == new PhoneProgress(2400000, true, false) && !PhoneProgress.From(100, 0, false, false, final: true).Ended,
+            "a pause in the credits, or leaving a video before its last tenth, keeps its resume point");
         await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", async url => { await Exercise(url, check); await PhoneHostFixture.Run(url, directory, check); });
         await OtherServers(check);
     }

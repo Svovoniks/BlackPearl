@@ -24,10 +24,13 @@ public delegate Task<PhoneResource?> PhoneResourceResolver(PhoneRemoteSession se
 public readonly record struct PhoneProgress(long ResumeMs, bool Played, bool Ended)
 {
     // A player that runs out of data, as when the link is lost, can say it ended in the middle; with a known length,
-    // only the last minute counts.
-    public static PhoneProgress From(long positionMs, long durationMs, bool ended, bool watched)
+    // only the last minute counts. final: the phone left the video, with Next, another video, or by closing its player.
+    // Left in its last tenth, as when Next skips the credits, it counts as watched, as the PC's "Next episode" does.
+    public static PhoneProgress From(long positionMs, long durationMs, bool ended, bool watched, bool final = false)
     {
-        ended = durationMs > 0 ? positionMs >= durationMs - 2000 || ended && positionMs >= durationMs - 60000 : ended;
+        ended = durationMs > 0
+            ? positionMs >= durationMs - 2000 || ended && positionMs >= durationMs - 60000 || final && positionMs >= durationMs - durationMs / 10
+            : ended;
         return new(ended || watched ? 0 : Math.Max(0, positionMs), positionMs >= 10000 || ended, ended);
     }
 }

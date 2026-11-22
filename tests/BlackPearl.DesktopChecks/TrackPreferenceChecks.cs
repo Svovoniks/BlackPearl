@@ -88,6 +88,7 @@ static class TrackPreferenceChecks
             picker.SelectedItem = picker.Items.Cast<object>().Single(t => (int)t.GetType().GetProperty("Id")!.GetValue(t)! == english);
             Call("RefreshTracks"); Wait(() => player.Spu == subtitle);
             Check(true, "switching to a blank subtitle rule restores the video's original subtitle default");
+            PhoneRemoteChecks(window, player, english, russian, subtitle, Check, Wait);
             audioInput.Text = "Not a language";
             Check(!(bool)Call("SaveTrackPreferences")!, "invalid settings are rejected without replacing saved preferences");
             player.Stop(); Field("player", null);
@@ -120,5 +121,53 @@ static class TrackPreferenceChecks
             finally { Field("room", null); Task.Run(() => client.DisposeAsync().AsTask()).GetAwaiter().GetResult(); }
         }
         finally { Field("player", null); Field("vlc", null); Field("closing", true); window.Close(); }
+    }
+    // BlackPearl Mobile's remote (PHONE-REMOTE.md, "Tracks"): the state carries the player's Audio and Subtitles menus as
+    // they show, and `audio-track` and `subtitle-track` choose as a click in them does.
+    static void PhoneRemoteChecks(MainWindow window, MediaPlayer player, int english, int russian, int subtitle, Action<bool, string> check, Action<Func<bool>> wait)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        object? Call(string name, params object[] args) => typeof(MainWindow).GetMethod(name, flags)!.Invoke(window, args);
+        object? Item(object tuple, int n) => tuple.GetType().GetField("Item" + n)!.GetValue(tuple);
+        (string Code, string Message)? Command(string action, int id) =>
+            ((string, string)?)Call("RunPhoneTrackCommand", new RemoteCommand(action, System.Text.Json.JsonDocument.Parse(id.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement.Clone()));
+        var empty = (System.Windows.FrameworkElement)window.FindName("PlayerEmpty");
+        var emptyBefore = empty.Visibility;
+        try
+        {
+            check(Command("audio-track", russian) is { Code: "nothing-playing" }, "a phone's track choice with nothing in the player is refused as nothing playing");
+            empty.Visibility = System.Windows.Visibility.Collapsed;
+            Call("RefreshTracks");
+            var tracks = Call("PhoneRemoteTracks")!;
+            var audio = (RemoteTrack[])Item(tracks, 1)!; var subtitles = (RemoteTrack[])Item(tracks, 3)!;
+            check(audio.Count(t => t.Id >= 0) == 2 && audio.Any(t => t.Id == english && t.Name == "English") && audio.Any(t => t.Id == russian && t.Name == "Russian")
+                && (int?)Item(tracks, 2) == english && (bool)Item(tracks, 5)!,
+                "the phone's state lists the audio menu's tracks by language, with the playing one");
+            check(subtitles.FirstOrDefault() is { Id: -1, Name: "Off", Detail: null } && subtitles.Any(t => t.Id == subtitle) && (int?)Item(tracks, 4) == subtitle,
+                "the phone's subtitle list starts with Off and ticks the subtitles shown");
+            var state = Wire.Serialize(Call("PhoneRemoteState")!);
+            check(state.Contains("\"audioTracks\":[{\"id\":" + audio[0].Id) && state.Contains("\"subtitleTrack\":" + subtitle) && state.Contains("\"canChangeTracks\":true"),
+                "the state message names the track fields as PHONE-REMOTE.md does");
+            check(ReferenceEquals(Item(Call("PhoneRemoteTracks")!, 1), audio), "an unchanged menu is not converted again on every state");
+            check(Command("audio-track", russian) is null, "a phone picks another audio track");
+            wait(() => player.AudioTrack == russian && player.Spu == -1);
+            check(true, "a phone's audio choice also applies the subtitle rule for its language, as the menu does");
+            // The player refreshes its menus when a track is selected (its ES events), which this check does by hand.
+            Call("RefreshTracks");
+            check((int?)Item(Call("PhoneRemoteTracks")!, 2) == russian && (int?)Item(Call("PhoneRemoteTracks")!, 4) == -1, "the next state ticks the phone's audio choice and Off");
+            check(Command("subtitle-track", subtitle) is null, "a phone picks subtitles");
+            wait(() => player.Spu == subtitle);
+            check(true, "the phone's subtitle choice shows on the PC");
+            check(Command("subtitle-track", 9999) is null && player.Spu == subtitle && Command("audio-track", 9999) is null && player.AudioTrack == russian,
+                "an id the menu doesn't have changes nothing");
+            typeof(MainWindow).GetField("nativeStopCount", flags)!.SetValue(window, 1);
+            var refused = Command("audio-track", english);
+            check(refused is { Code: "not-allowed", Message: var why } && !why.Contains("room") && player.AudioTrack == russian && !(bool)Item(Call("PhoneRemoteTracks")!, 5)!,
+                "while the menus are greyed out a phone's choice is refused and the state says so");
+            typeof(MainWindow).GetField("nativeStopCount", flags)!.SetValue(window, 0);
+            check(Command("audio-track", english) is null, "the phone's audio choice works again once the menus do");
+            wait(() => player.AudioTrack == english);
+        }
+        finally { empty.Visibility = emptyBefore; }
     }
 }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Windows;
 using BlackPearl.Core;
 
 namespace BlackPearl.Desktop;
@@ -7,10 +8,12 @@ namespace BlackPearl.Desktop;
 // playing here, progress shown on the cards, and Continue on the PC.
 public partial class MainWindow
 {
-    // The window also has a player, whose Shuffle a phone can turn on and whose sound it can play (PhoneSound.cs); the
-    // phone host (PhoneHost.cs) has none.
-    private static readonly string[] PhoneFeatures = [.. PhoneLibrary.Features, "shuffle", "sound"];
+    // The window also has a player, whose Shuffle a phone can turn on, whose tracks it can change and whose sound it can
+    // play (PhoneSound.cs); the phone host (PhoneHost.cs) has none.
+    private static readonly string[] PhoneFeatures = [.. PhoneLibrary.Features, "shuffle", "tracks", "sound"];
     private PhoneLibrary? phoneLibrary;
+    // The title of the video a phone took over, which the empty player names; see RefreshPlayerEmpty.
+    private string? watchingOnPhone;
     private PhoneLibrary PhoneLibrary => phoneLibrary ??= new(library, () => phoneRemote, action => Dispatcher.BeginInvoke(action), lifetime.Token)
     {
         Items = () => items, WasWatched = WasWatched, SetWatched = SetWatched, Play = PlayFromPhone, TakeOver = TakeOverForPhone,
@@ -21,15 +24,23 @@ public partial class MainWindow
     private void AttachPhonePlayback(PhoneRemoteHost remote) => PhoneLibrary.Attach(remote);
     private void ClosePhoneStreams() => phoneLibrary?.CloseStreams();
 
-    // The phone continues the video playing here: this PC saves where it was and stops. Where the PC is now, also for a
-    // title watched before, whose saved position stays 0 while it is watched again. A video still opening holds its
-    // resume point until it plays.
+    // The phone continues the video playing here: this PC saves where it was and closes its player. Where the PC is now,
+    // also for a title watched before, whose saved position stays 0 while it is watched again. A video still opening
+    // holds its resume point until it plays.
+    // The player closes rather than stops: a stopped video stays loaded, and Space, a headset's play button or Windows'
+    // media controls then started it again here, where the PC ignores the phone's progress on the video it plays.
     private async Task<long?> TakeOverForPhone(MediaItem item)
     {
         if (room is not null || playingItem?.Id != item.Id || !HasMediaPlayback || player is null) return null;
         var takenAt = Math.Max(0, player.Time <= 0 && localResume > 0 ? localResume : PlaybackPosition());
-        SavePlaybackPosition();
-        if (nativeStopCount == 0) { ready = false; await loading.WaitAsync(); try { await StopNativePlayback(); } finally { loading.Release(); } }
+        EndUpNext(false);
+        await Disconnect();
+        // Another video started meanwhile keeps the player.
+        if (playingItem is null && PlayerEmpty.Visibility == Visibility.Visible)
+        {
+            watchingOnPhone = item.QueueTitle; RefreshPlayerEmpty();
+            RoomHeading.Text = "BlackPearl player"; RoomSubtitle.Text = "Continuing on your phone";
+        }
         return takenAt;
     }
 
