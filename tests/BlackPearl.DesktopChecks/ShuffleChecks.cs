@@ -89,7 +89,7 @@ static class ShuffleChecks
 
             // Next keeps its pick, and the end-of-episode button and the up-next card offer the same one.
             var pick = Adjacent(1)!;
-            check(pick is not null && pick.Id != episodes[0].Id && pick.Season == 1 && Enumerable.Range(0, 5).All(_ => Adjacent(1)?.Id == pick.Id),
+            check(pick.Id != episodes[0].Id && pick.Season == 1 && Enumerable.Range(0, 5).All(_ => Adjacent(1)?.Id == pick.Id),
                 "the random pick is a regular episode and stays the same until it plays");
             Call("RefreshEpisodeEndAction");
             check((string)endButton.Content == "Next episode →" && (string)endButton.ToolTip == $"Season 1 · {pick.EpisodeDisplayTitle}", "the end-of-episode button offers the random pick");
