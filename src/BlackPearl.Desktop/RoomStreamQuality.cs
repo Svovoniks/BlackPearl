@@ -31,7 +31,8 @@ public partial class MainWindow
     // Why the chosen quality is not what the room gets, such as a video that is already smaller.
     private (string MediaId, string Text, bool Failed)? qualityNotice;
 
-    private const double PlaybackDockWidth = 980;
+    // 980 for the pills, plus 30 for the Shuffle button beside Loop, so the pills kept the room they had.
+    private const double PlaybackDockWidth = 1010;
     private string SavedStreamQuality => library.Setting(StreamQuality.SettingKey) is { } saved && StreamQuality.Find(saved) is not null ? saved : StreamQuality.OriginalId;
     private bool StreamsRoomVideo => room is { IsConnected: true, Identity.Host: true, HostedMedia: ILocalMediaSource } client && client.Snapshot?.Media is not null;
 

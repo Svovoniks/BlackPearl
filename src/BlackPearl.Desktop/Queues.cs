@@ -374,7 +374,8 @@ public partial class MainWindow
         listedEpisodes = episodes;
         QueueList.SelectedIndex = Array.FindIndex(episodes, item => item.Id == current.Id) is var index and >= 0 ? index
             : Array.FindIndex(episodes, item => item.Season == current.Season && item.Episode == current.Episode);
-        QueueStatus.Text = current.Season is { } season && !current.IsMusic ? $"{current.Series} · Season {season} · plays in order" : $"{current.Series} · plays in order";
+        var order = Shuffling ? "shuffled" : "plays in order";
+        QueueStatus.Text = current.Season is { } season && !current.IsMusic ? $"{current.Series} · Season {season} · {order}" : $"{current.Series} · {order}";
         PlayPlayerQueueButton.Visibility = Visibility.Collapsed;
         // Rows mark the playing episode, so redraw them when it changes.
         QueueList.Items.Refresh();
@@ -383,6 +384,11 @@ public partial class MainWindow
     private MediaItem? AdjacentEpisode(int direction)
     {
         if (!ShowingEpisodeList) return null;
+        if (Shuffling && playingItem is { } playing)
+        {
+            var shown = items.FirstOrDefault(item => item.Id == playing.Id) ?? playing;
+            return direction > 0 ? ShuffledEpisode(shown, item => RecentlyExists(item.Path)) : ShuffledPreviousEpisode(shown, item => RecentlyExists(item.Path));
+        }
         var current = Array.FindIndex(listedEpisodes, item => item.Id == playingItem?.Id);
         if (current < 0) current = QueueList.SelectedIndex;
         if (current < 0) return null;

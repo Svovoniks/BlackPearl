@@ -29,7 +29,7 @@ public partial class MainWindow
     // A loaded queue continues only the video it started; other videos offer their next episode.
     private bool PlayingFromQueue(MediaItem? item) => item is not null && queuePosition >= 0 && queuePosition < queue.Count && queue[queuePosition].Id == item.Id;
     // A queue that started this video takes priority; at the end of that queue an episode still offers its next episode.
-    private bool ContinuesQueue(MediaItem? ended) => PlayingFromQueue(ended) && QueuePlayback.FindNext(queue, queuePosition, 1, QueueItemAvailable) >= 0;
+    private bool ContinuesQueue(MediaItem? ended) => PlayingFromQueue(ended) && QueueStepIndex(1, QueueItemAvailable) >= 0;
     private long episodeActionCheckedAt;
     // Library updates replace records; keep the playing video's current metadata.
     private void RefreshPlayingItem()
@@ -53,7 +53,7 @@ public partial class MainWindow
         if (episodeActionItem != item || episodeActionLibrary != items || Environment.TickCount64 - episodeActionCheckedAt > 5000)
         {
             episodeActionItem = item; episodeActionLibrary = items; episodeActionCheckedAt = Environment.TickCount64;
-            episodeActionNext = EpisodePlayback.Next(items, item!, false, next => RecentlyExists(next.Path), PreferredVersion(item));
+            episodeActionNext = FollowingEpisode(item!, next => RecentlyExists(next.Path));
         }
         EpisodeEndButton.Content = episodeActionNext is null ? "Finish ✓" : "Next episode →";
         EpisodeEndButton.ToolTip = episodeActionNext is null ? item!.Series is null ? "Mark this movie as watched" : "Mark this episode as watched" :
@@ -67,7 +67,7 @@ public partial class MainWindow
         {
             RefreshEpisodeEndAction();
             if (EpisodeEndButton.Visibility != Visibility.Visible || !EpisodeEndButton.IsEnabled || playingItem is not { } item) return;
-            var next = EpisodePlayback.Next(items, item, false, candidate => File.Exists(candidate.Path), PreferredVersion(item));
+            var next = FollowingEpisode(item, candidate => File.Exists(candidate.Path));
             library.Setting("position:" + item.Id, "0"); SetWatched(item, true);
             if (next is null) { SetStatus(item.Series is null ? "Movie marked as watched." : "Episode marked as watched."); return; }
             await PlayFollowingEpisode(next);
@@ -151,12 +151,14 @@ public partial class MainWindow
         // Looping is the host's choice in a room, and applies to everyone there.
         var loop = room is null || room.Identity?.Host == true && room.IsConnected ? loopMode : LoopMode.Off;
         var current = endedItem is null ? null : items.FirstOrDefault(item => item.Id == endedItem.Id) ?? endedItem;
+        // Shuffle picks the next episode itself, and with Loop all starts a new round instead of wrapping.
+        var shuffled = Shuffling && current is not null && !ContinuesQueue(endedItem) ? ShuffledEpisode(current, item => File.Exists(item.Path)) : null;
         // Loop all wraps a finished queue to its first video, and a show's last episode to its first episode.
-        var firstQueued = loop == LoopMode.All && PlayingFromQueue(endedItem) ? QueuePlayback.FindNext(queue, -1, 1, QueueItemAvailable) : -1;
-        var nextEpisode = loop == LoopMode.All && firstQueued < 0 && current is not null
+        var firstQueued = loop == LoopMode.All && !Shuffling && PlayingFromQueue(endedItem) ? QueuePlayback.FindNext(queue, -1, 1, QueueItemAvailable) : -1;
+        var nextEpisode = Shuffling ? shuffled : loop == LoopMode.All && firstQueued < 0 && current is not null
             ? EpisodePlayback.Next(items, current, false, item => File.Exists(item.Path), PreferredVersion(current)) : null;
         // The show starts again at its first regular episode; specials (season 0) come first only when there is nothing else.
-        var firstEpisode = loop == LoopMode.All && firstQueued < 0 && nextEpisode is null && current?.Series is not null
+        var firstEpisode = loop == LoopMode.All && !Shuffling && firstQueued < 0 && nextEpisode is null && current?.Series is not null
             ? FirstPlayable(EpisodePlayback.Episodes(items, current, PreferredVersion(current)), current)
             : null;
         // Loop one, or Loop all with nothing else to play, replays the video from the start; in a room it restarts for everyone.
@@ -175,7 +177,7 @@ public partial class MainWindow
         }
         if (firstQueued >= 0) { await PlayQueueAt(firstQueued); return; }
         if (endedItem is null || current is null || room is not null && (room.Identity?.Host != true || !room.IsConnected)) return;
-        var next = firstEpisode ?? nextEpisode ?? EpisodePlayback.Next(items, current, false, item => File.Exists(item.Path), PreferredVersion(endedItem));
+        var next = Shuffling ? shuffled : firstEpisode ?? nextEpisode ?? EpisodePlayback.Next(items, current, false, item => File.Exists(item.Path), PreferredVersion(endedItem));
         if (next is null) return;
         // An album plays on to its next track without a countdown.
         if (endedItem.IsMusic && next.IsMusic) { await PlayFollowingEpisode(next); return; }
