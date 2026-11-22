@@ -152,13 +152,26 @@ static class VoiceProbe
         if (played is null || playing is null) return;
         await playing;
         short[] back; lock (heardBack) back = heardBack.ToArray();
-        Report(played, back);
+        Report("Through the real microphone path", played, back);
     }
-    static void Report(short[] played, short[] heardBack)
+    // The same report for a recording put through the processing directly, without audio devices, to tell what the
+    // devices add: --voice-compare <recording> [Standard|Light|Off].
+    public static void Compare(string recording, string? only)
+    {
+        var mode = only is null ? VoiceAudio.Processing.Standard : Enum.Parse<VoiceAudio.Processing>(only);
+        if (Read(recording) is not { } samples) { Console.WriteLine("The recording could not be read."); Environment.ExitCode = 1; return; }
+        VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
+        using var processor = new VoiceProcessor(new VoiceCapture { Transmitting = true }, mode);
+        var processed = new List<short>(samples.Length);
+        processor.Processed = block => processed.AddRange(block);
+        for (var at = 0; at + Frame <= samples.Length; at += Frame) processor.Write(samples.AsSpan(at, Frame));
+        Report("Without devices", samples, processed.ToArray());
+    }
+    static void Report(string path, short[] played, short[] heardBack)
     {
         if (heardBack.Length < played.Length / 2) { Console.WriteLine("Too little came back to compare."); return; }
         var kept = VoiceProcessingChecks.Compare(played, heardBack, 900);
-        Console.WriteLine(FormattableString.Invariant($"Through the real microphone path: gain {kept.Gain:+0.0;-0.0} dB, moving {kept.Moves:F1} dB between strong syllables, {kept.Dips:P0} of them more than 6 dB down; below 1 kHz {kept.Low:+0.0;-0.0} dB and above 4 kHz {kept.High:+0.0;-0.0} dB against the middle."));
+        Console.WriteLine(FormattableString.Invariant($"{path}: gain {kept.Gain:+0.0;-0.0} dB, moving {kept.Moves:F1} dB between strong syllables, {kept.Dips:P0} of them more than 6 dB down; below 1 kHz {kept.Low:+0.0;-0.0} dB and above 4 kHz {kept.High:+0.0;-0.0} dB against the middle."));
     }
     static void Write(string path, short[] samples)
     {
