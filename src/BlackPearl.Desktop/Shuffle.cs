@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Controls;
 using BlackPearl.Core;
 
 namespace BlackPearl.Desktop;
@@ -35,8 +36,43 @@ public partial class MainWindow
         PublishPhoneRemoteState();
     }
     private string ShuffleLabel => shuffle ? "Shuffle on" : "Shuffle off";
+
+    // The Shuffle button gives way to the pills: when one would fold into the … menu, Shuffle folds there instead and
+    // frees its width. It comes back once the bar is wider than when it gave way, or has fewer pills to fit.
+    private double playbackDockWidth;
+    private (double Width, int Pills)? shuffleYield;
+    private int ShownPills => PillMenus.Count(menu => PillStrip.GetShown(menu.Pill));
+    // With every pill in the bar, whether the pills' column has room for Shuffle (as wide as Loop, its twin). Back in the
+    // bar it also takes itself out of the … menu, and the … pill goes too when nothing else is in it.
+    private bool ShuffleFitsAgain()
+    {
+        if (PlayerPills.Folded.Count > 0 || PlayerPills.Parent is not Grid { ColumnDefinitions.Count: > 1 } grid) return false;
+        var free = grid.ColumnDefinitions[1].ActualWidth - PlayerPills.DesiredSize.Width;
+        var onlyShuffleInMenu = StopButton.Visibility == Visibility.Visible && LoopButton.Visibility == Visibility.Visible &&
+            PictureInPictureButton.Visibility == Visibility.Visible;
+        return free + (onlyShuffleInMenu ? OverflowPill.ActualWidth : 0) - LoopButton.ActualWidth >= 6;
+    }
+    private void BalanceShuffle()
+    {
+        if (ShuffleButton is null) return;
+        if (shuffleYield is null)
+        {
+            if (ShuffleButton.Visibility != Visibility.Visible || PlayerPills.Folded.Count == 0) return;
+            shuffleYield = (playbackDockWidth, ShownPills);
+            ShuffleButton.Visibility = Visibility.Collapsed;
+            RefreshOverflowMenu();
+        }
+        else if (playbackDockWidth >= shuffleYield.Value.Width + 40 || ShownPills < shuffleYield.Value.Pills || ShuffleFitsAgain())
+        {
+            shuffleYield = null;
+            ShuffleButton.Visibility = playbackDockWidth >= 610 ? Visibility.Visible : Visibility.Collapsed;
+            RefreshOverflowMenu();
+        }
+    }
     private void RefreshShuffleButton()
     {
+        // A pill shown or hidden (a room's participants or quality) may give Shuffle back its place.
+        BalanceShuffle();
         // A viewer's own earlier choice must neither show nor carry over if the streaming role passes to them.
         if (room?.Identity is { Host: false } && shuffle) { shuffle = false; showShuffle.Reset(); queueShuffle.Reset(); RefreshOverflowMenu(); }
         ShuffleButton.IsChecked = shuffle;

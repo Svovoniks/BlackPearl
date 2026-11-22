@@ -43,7 +43,7 @@ public partial class MainWindow
         InitializeSubtitleLift();
         InitializeStreamQuality();
         PlayerPills.Overflow = OverflowPill;
-        PlayerPills.FoldedChanged += (_, _) => RefreshOverflowMenu();
+        PlayerPills.FoldedChanged += (_, _) => { BalanceShuffle(); RefreshOverflowMenu(); };
         // The player's controls and menus sit in LibVLC's overlay window, outside the player page that maps the app palette, and
         // the pebble material built from it, to dark. Without it they drew light in light mode: the queue picker as a light well.
         PlayerOverlay.Resources.MergedDictionaries.Add(RoomPage.Resources);
@@ -316,12 +316,14 @@ public partial class MainWindow
         UpNextCard.Width = QualityOffer.Width = Math.Clamp(width - 16, 240, 340);
         // Resizing fires this continuously; only re-lay out the bar when it crosses a density step.
         var density = width >= 900 ? 7 : width >= 640 ? 6 : width >= 610 ? 5 : width >= 580 ? 4 : width >= 540 ? 3 : width >= 520 ? 2 : width >= 440 ? 1 : 0;
+        playbackDockWidth = width;
+        BalanceShuffle();
         if (density == controlsDensity) return;
         controlsDensity = density;
         foreach (var detail in new[] { AudioPillDetail, SubtitlePillDetail, QualityPillDetail, QueuePillDetail, ParticipantsPillDetail })
         { detail.MaxWidth = width >= 900 ? 96 : 0; detail.Margin = new Thickness(width >= 900 ? 6 : 0, 0, 0, 0); }
         foreach (var text in new[] { AudioPillText, SubtitlePillText, QualityPillText, QueuePillText, ParticipantsPillText }) text.MaxWidth = width >= 640 ? 130 : 72;
-        ShuffleButton.Visibility = width >= 610 ? Visibility.Visible : Visibility.Collapsed;
+        ShuffleButton.Visibility = width >= 610 && shuffleYield is null ? Visibility.Visible : Visibility.Collapsed;
         LoopButton.Visibility = width >= 580 ? Visibility.Visible : Visibility.Collapsed;
         StopButton.Visibility = width >= 540 ? Visibility.Visible : Visibility.Collapsed;
         PictureInPictureButton.Visibility = width >= 520 ? Visibility.Visible : Visibility.Collapsed;
