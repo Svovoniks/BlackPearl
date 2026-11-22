@@ -43,6 +43,14 @@ internal sealed class VoiceProcessor : IDisposable
     // versions are held back as long, so that changing from one to another does not skip or repeat anything.
     private readonly DelayLine directDelay = new(WebRtcApm.CaptureDelay), subtractedDelay = new(WebRtcApm.CaptureDelay);
     private readonly float[] subtractedNow = new float[BlockSamples];
+    // Since the deciding detector's last reading: the power of what went into noise removal and of what came out.
+    private double heardPower, leftPower;
+    private int heardBlocks;
+    // -36 is 13 dB under where the voice is brought to. At -40 a tenth more of the faintest "mm-hm"s got through, and
+    // so did other people talking in the same room, on a microphone quiet enough to need a lot of gain.
+    private const double StartDb = -36, KeptDb = 9;
+    // For the probe: the level left and the amount taken off over the deciding detector's latest chunk.
+    internal (double LeftDb, double OffDb) StartMeasures { get; private set; }
     private readonly float[] cancelled = new float[BlockSamples], subtracted = new float[BlockSamples], played = new float[BlockSamples], mixed = new float[BlockSamples];
     private readonly SpeakerQueue speakers = new();
     internal SpeakerQueue Speakers => speakers;
@@ -161,7 +169,6 @@ internal sealed class VoiceProcessor : IDisposable
         if (echo is not null || denoiser is not null)
             for (var i = 0; i < BlockSamples; i++) block[i] = rumble.Run(block[i]);
         CancelEcho();
-        var chunks = heard?.Chunks ?? 0;
         if (heard is { } before && !before.Write(block)) StopDetecting();
         if (denoiser is not null)
         {
@@ -171,22 +178,44 @@ internal sealed class VoiceProcessor : IDisposable
             if (noisyDelay?.Length != denoiser.Delay) noisyDelay = new(denoiser.Delay);
             noisyDelay.Run(block, noisy);
             Denoise();
-        }
-        // The second speech detector hears the denoiser's own output, so the guard never changes what counts as speech.
-        if (cleaned is { } after && !after.Write(block)) { cleaned = null; after.Dispose(); }
-        if (denoiser is not null)
-        {
             guard.Process(noisy, block, heard?.Probability ?? 0, level.GainDb);
             limiter.Apply(block);
             // A limiter that has to hold the voice down means the gain is too high for this voice.
             level.Ease(limiter.GainDb);
         }
-        for (var i = 0; i < BlockSamples; i++) output[i] = (short)Math.Clamp(MathF.Round(block[i] * 32768f), short.MinValue, short.MaxValue);
-        // Speech is decided before the samples reach the gate, so the gate acts on what it is about to encode.
-        // Only changes are passed on.
-        if (heard is { } detector && detector.Chunks != chunks)
+        // Whether this is speech is decided on what is about to be sent: the voice after the gain and with the noise
+        // taken out. The detector on the microphone itself used to have to agree, and it is deaf where the other is
+        // not: on a quiet microphone it gives short sounds too low a reading, and under typing or knocking it gives
+        // everything one. On real conversation that kept back a third of the "mm-hm"s, a fifth of the one-word
+        // answers and, over typing, nearly everything. It still sets the level and guides the voice guard.
+        var decider = denoiser is not null ? cleaned ?? heard : heard;
+        var chunks = decider?.Chunks ?? 0;
+        if (denoiser is not null && cleaned is { } after)
         {
-            var now = decision.Next(Math.Min(detector.Probability, cleaned?.Probability ?? 1));
+            for (var i = 0; i < BlockSamples; i++) { heardPower += noisy[i] * (double)noisy[i]; leftPower += block[i] * (double)block[i]; }
+            heardBlocks++;
+            if (!after.Write(block)) { cleaned = null; after.Dispose(); decider = heard; chunks = heard?.Chunks ?? 0; }
+        }
+        for (var i = 0; i < BlockSamples; i++) output[i] = (short)Math.Clamp(MathF.Round(block[i] * 32768f), short.MinValue, short.MaxValue);
+        // Only changes are passed on.
+        if (decider is not null && decider.Chunks != chunks)
+        {
+            // What noise removal leaves of a knock or a key is faint and little of what was there, and can still
+            // sound like the start of a word to the detector. So speech may only start on a stretch that is left
+            // within StartDb of full scale (the voice is brought to about -23) and of which no more than KeptDb was
+            // taken off. Once started, the detector alone says when it ends.
+            var mayStart = true;
+            if (ReferenceEquals(decider, cleaned) && heardBlocks > 0)
+            {
+                var leftDb = 10 * Math.Log10(leftPower / (heardBlocks * BlockSamples) + 1e-12);
+                var offDb = 10 * Math.Log10((heardPower + 1e-12) / (leftPower + 1e-12));
+                StartMeasures = (leftDb, offDb);
+                // Until the voice's level is known there is nothing to hold "faint" against; the detector on the
+                // microphone has to agree instead, as it always had to.
+                mayStart = offDb <= KeptDb && (double.IsNaN(level.SpeechDb) ? (heard?.Probability ?? 1) >= SpeechDecision.Start : leftDb >= StartDb);
+            }
+            heardPower = leftPower = 0; heardBlocks = 0;
+            var now = decision.Next(decider.Probability, mayStart);
             if (now != speaking) capture.SpeechDetected = speaking = now;
         }
         Processed?.Invoke(output);
@@ -412,16 +441,18 @@ internal sealed class VoiceProcessor : IDisposable
     }
 
     // Speech starts once the probability has been at least 0.5 for two 32 ms chunks in a row, and lasts until it falls
-    // below 0.35, as Silero recommends; the voice gate's pre-roll and hangover cover both ends.
+    // below 0.35, as Silero recommends; the voice gate's pre-roll and hangover cover both ends. Both of those chunks
+    // have to be ones speech may start on: what is left of a knock often passes for one chunk and not the next.
     internal sealed class SpeechDecision
     {
         public const float Start = 0.5f, Stop = 0.35f;
         public const int Confirm = 2;
         private bool above;
         private int run;
-        public bool Next(float probability)
+        // mayStart: whether speech may begin on this chunk; it does not end speech that has begun.
+        public bool Next(float probability, bool mayStart = true)
         {
-            above = above ? probability >= Stop : probability >= Start;
+            above = run >= Confirm ? probability >= Stop : probability >= Start && mayStart;
             run = above ? run + 1 : 0;
             return run >= Confirm;
         }

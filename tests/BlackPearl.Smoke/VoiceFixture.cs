@@ -191,11 +191,23 @@ static class VoiceFixture
         output.Clear(); Pull(4);
         check(output.Any(x => Math.Abs(x) > 0.05), "a single short frame still plays after the prebuffer wait");
 
-        // Bursts after a stall drain down so voice does not stay behind the video.
+        // Bursts after a stall in the middle of a sentence drain down so voice does not stay behind the video.
         jitter = new VoiceJitterBuffer();
-        for (ushort s = 0; s < 30; s++) jitter.Push(s, 0, encoded[s], now);
+        for (ushort s = 0; s < 5; s++) jitter.Push(s, 0, encoded[s], now);
+        Pull(5); now += 600;
+        for (ushort s = 5; s < 35; s++) jitter.Push(s, 0, encoded[s % encoded.Count], now);
         Pull(5);
         check(jitter.Dropped > 0 && jitter.Buffered <= jitter.TargetFrames + 4, $"a burst of queued frames is trimmed to keep latency low ({jitter.Dropped} dropped, {jitter.Buffered} queued)");
+
+        // A sentence opens with the 300 ms from before the speech gate opened, all at once, and the start of its
+        // first word may be anywhere in them: none of that is skipped, only the quiet before it.
+        var lead = Encode(440, 0, 1);
+        jitter = new VoiceJitterBuffer();
+        jitter.Push(0, 0, lead[0], now);
+        for (ushort s = 1; s <= VoiceCapture.PrerollFrames; s++) jitter.Push(s, 0, encoded[s], now);
+        output.Clear(); Pull(VoiceCapture.PrerollFrames);
+        var heardFrames = Enumerable.Range(0, output.Count / Frame).Count(i => output.Skip(i * Frame).Take(Frame).Any(x => Math.Abs(x) > 0.05));
+        check(jitter.Dropped <= 1 && heardFrames >= VoiceCapture.PrerollFrames - 1, $"the opening of a sentence is played whole: only the quiet before the first word is skipped ({jitter.Dropped} dropped, {heardFrames} frames of the word heard)");
 
         // Sequence wrap-around and a sender that rejoins with a new sequence.
         jitter = new VoiceJitterBuffer();

@@ -23,6 +23,11 @@ static class VoiceProcessingChecks
         var decision = new VoiceProcessor.SpeechDecision();
         check(!decision.Next(0.9f) && !decision.Next(0.1f) && !decision.Next(0.9f) && decision.Next(0.6f) && decision.Next(0.4f) && !decision.Next(0.3f),
             "speech needs two chunks in a row above 0.5, then holds until the probability falls below 0.35");
+        // Both of those chunks have to be ones speech may start on (loud enough, and little taken off by noise
+        // removal); once it has started, that no longer matters.
+        decision = new VoiceProcessor.SpeechDecision();
+        check(!decision.Next(0.9f) && !decision.Next(0.9f, mayStart: false) && !decision.Next(0.9f) && decision.Next(0.9f) && decision.Next(0.6f, mayStart: false) && !decision.Next(0.2f),
+            "speech starts only on two chunks in a row that it may start on, and is not ended by one it could not have started on");
 
         Pieces(check);
 
@@ -60,6 +65,15 @@ static class VoiceProcessingChecks
         var spoken = Process(VoiceAudio.Processing.Standard, speech);
         var talking = speech.Length / Frame;
         check(spoken.Sent > talking * 0.6, $"synthesized speech is detected and sent ({spoken.Sent} of {talking} frames)");
+        // The same dropped and knocked objects once the voice's level is known, which is when speech is decided on
+        // the cleaned sound alone: what is left of them is too faint, or too little of what was there, to start it.
+        var afterTalk = speech.Concat(new short[Rate]).Concat(impacts.SelectMany(sound => sound)).ToArray();
+        foreach (var mode in new[] { VoiceAudio.Processing.Standard, VoiceAudio.Processing.Light })
+        {
+            var heardThen = Process(mode, afterTalk); var first = (speech.Length + Rate) / Frame; var each = impacts[0].Length / Frame;
+            var let = Enumerable.Range(0, impacts.Length).Count(i => heardThen.SentFrames.Any(f => f >= first + i * each && f < first + (i + 1) * each));
+            check(let == 0, $"nor once the voice's level is known ({mode}: {let} of {impacts.Length} sounds sent)");
+        }
         var noisy = Mix(speech, Noise(speech.Length, 0.03, 2));
         var overFan = Process(VoiceAudio.Processing.Standard, noisy);
         check(overFan.Sent > talking * 0.6, $"speech over fan noise is still detected ({overFan.Sent} of {talking} frames)");

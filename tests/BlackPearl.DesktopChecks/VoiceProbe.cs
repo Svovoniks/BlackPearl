@@ -64,7 +64,7 @@ static class VoiceProbe
             VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
             using var processor = new VoiceProcessor(capture, mode);
             processor.Processed = block => processed.AddRange(block);
-            var rows = new System.Text.StringBuilder("frame,heard,cleaned,sent,gain,limiter,restored,echo,similarity,delay,cancelled,echoDb,speechDb,subtracted,working,skew\n");
+            var rows = new System.Text.StringBuilder("frame,heard,cleaned,sent,gain,limiter,restored,echo,similarity,delay,cancelled,echoDb,speechDb,subtracted,working,skew,leftDb,offDb\n");
             var decoded = new short[Frame];
             for (var frame = 0; frame < frames; frame++)
             {
@@ -79,7 +79,7 @@ static class VoiceProbe
                     if (at >= 0) decoded.CopyTo(sent, at * Frame);
                 }
                 var (heard, cleaned) = processor.SpeechProbability;
-                rows.Append(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{heard:F3},{cleaned:F3},{packets.Count},{processor.InputGainDb:F1},{processor.LimiterDb:F1},{processor.Restored:F2},{(processor.EchoPresent ? 1 : 0)},{processor.EchoEvidence.Similarity:F2},{processor.EchoEvidence.DelayMs},{(processor.EchoCancelled ? 1 : 0)},{processor.EchoDb:F1},{processor.SpeechDb:F1},{(processor.EchoSubtracted ? 1 : 0)},{processor.SubtractionDb:F1},{processor.EchoSkew * 1e6:F1}\n");
+                rows.Append(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{heard:F3},{cleaned:F3},{packets.Count},{processor.InputGainDb:F1},{processor.LimiterDb:F1},{processor.Restored:F2},{(processor.EchoPresent ? 1 : 0)},{processor.EchoEvidence.Similarity:F2},{processor.EchoEvidence.DelayMs},{(processor.EchoCancelled ? 1 : 0)},{processor.EchoDb:F1},{processor.SpeechDb:F1},{(processor.EchoSubtracted ? 1 : 0)},{processor.SubtractionDb:F1},{processor.EchoSkew * 1e6:F1},{processor.StartMeasures.LeftDb:F1},{processor.StartMeasures.OffDb:F1}\n");
                 packets.Clear();
             }
             var name = Path.Combine(output, Path.GetFileNameWithoutExtension(file));
