@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
@@ -36,7 +38,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
     public static Task PlayTestSoundAsync(string? output) => PlayAsync(output, VoiceCues.Test, CancellationToken.None);
     // Plays 48 kHz mono samples on the chosen output, as voice plays; cancelling stops it early.
     public static Task PlayAsync(string? output, float[] samples, CancellationToken cancel) => Simulated
-        ? Task.Delay(samples.Length * 1000 / VoicePacket.SampleRate, cancel).ContinueWith(_ => { }, TaskScheduler.Default)
+        ? Task.Delay((int)(samples.Length * 1000L / VoicePacket.SampleRate), cancel).ContinueWith(_ => { }, TaskScheduler.Default)
         : Task.Run(async () =>
     {
         using var devices = new MMDeviceEnumerator();
@@ -50,7 +52,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
             using var player = new WasapiPlayerBuilder().WithDevice(device).WithLatency(60).WithCategory(OutputCategory).Build();
             player.Init(new MixerProvider(mixer));
             player.Play();
-            try { await Task.Delay(samples.Length * 1000 / VoicePacket.SampleRate + 250, cancel); }
+            try { await Task.Delay((int)(samples.Length * 1000L / VoicePacket.SampleRate) + 250, cancel); }
             catch (OperationCanceledException) { }
             player.Stop();
         }
@@ -64,6 +66,65 @@ internal sealed class VoiceAudio : IAsyncDisposable
     private MMDeviceNotificationClient? notifications;
     private WasapiRecorder? recorder, loopback;
     private VoiceProcessor? processor;
+    // The processing behind the open microphone, for the live probe.
+    internal VoiceProcessor? Processor => processor;
+    // Times Windows reported that microphone audio was lost between two buffers (the first buffer after opening always
+    // says so and is not counted), the samples received, and the longest the processing of one buffer took.
+    internal int InputGaps => Volatile.Read(ref inputGaps);
+    internal long InputSamples => Interlocked.Read(ref inputSamples);
+    internal double SlowestBufferMs => pump?.SlowestMs ?? 0;
+    private int inputGaps, inputBuffers;
+    private long inputSamples;
+    private Pump? pump;
+
+    // Takes microphone buffers from Windows' capture thread and processes them on a thread of its own. Windows keeps
+    // only a little audio waiting; when the capture thread is busy for longer than that, as it was each time the
+    // speech gate opened and a burst of frames was encoded, the audio that arrives meanwhile is lost and the voice
+    // skips. The capture thread now only hands its buffer over.
+    internal sealed class Pump : IDisposable
+    {
+        private readonly BlockingCollection<(short[] Samples, int Count)> waiting = new(200);
+        private readonly Action<short[], int> process;
+        private readonly Thread thread;
+        private double slowestMs;
+        private int failed;
+        public double SlowestMs => Volatile.Read(ref slowestMs);
+        // Buffers that could not be taken because four seconds of them were already waiting.
+        public int Dropped { get; private set; }
+        public Pump(Action<short[], int> process)
+        {
+            this.process = process;
+            thread = new Thread(Run) { IsBackground = true, Name = "Voice processing", Priority = ThreadPriority.AboveNormal };
+            thread.Start();
+        }
+        public void Post(ReadOnlySpan<short> samples)
+        {
+            var copy = ArrayPool<short>.Shared.Rent(samples.Length);
+            samples.CopyTo(copy);
+            try { if (waiting.TryAdd((copy, samples.Length))) return; }
+            catch (InvalidOperationException) { }   // closing
+            ArrayPool<short>.Shared.Return(copy); Dropped++;
+        }
+        private void Run()
+        {
+            foreach (var (samples, count) in waiting.GetConsumingEnumerable())
+            {
+                var began = Stopwatch.GetTimestamp();
+                try { process(samples, count); }
+                // A failure that repeats does so a hundred times a second: the log gets the first, tenth, hundredth...
+                catch (Exception ex) when (ex is not OutOfMemoryException) { if (++failed is 1 or 10 or 100 or 1000) PlaybackDiagnostics.Record("voice-processing-failed", new { stage = "pump", error = ex.GetType().Name, ex.Message, times = failed }); }
+                var took = Stopwatch.GetElapsedTime(began).TotalMilliseconds;
+                if (took > slowestMs) Volatile.Write(ref slowestMs, took);
+                ArrayPool<short>.Shared.Return(samples);
+            }
+        }
+        // Processes what is still waiting, then stops.
+        public void Dispose()
+        {
+            waiting.CompleteAdding();
+            if (Thread.CurrentThread != thread) thread.Join(3000);
+        }
+    }
     private WasapiPlayer? player;
     private Settings settings;
     private int restartQueued;
@@ -76,6 +137,11 @@ internal sealed class VoiceAudio : IAsyncDisposable
     public event Action? Changed;
     // Device checks play voice at zero session volume so nothing is heard, and read back what was played.
     internal bool SilentOutput { get; init; }
+    // For the live probe: the output whose sound is taken as what the speakers play, instead of the Windows default,
+    // and something to add to the microphone before it is processed. Together with a virtual cable they make a real
+    // echo, with a voice over it, that nobody hears.
+    internal string? ReferenceOutput { get; init; }
+    internal Action<short[], int>? AddToMicrophone { get; init; }
     internal long SamplesPlayed => provider is { } played ? Interlocked.Read(ref played.Samples) : 0;
     internal float PeakPlayed { get => provider?.Peak ?? 0; set { if (provider is { } played) played.Peak = value; } }
     private MixerProvider? provider;
@@ -166,6 +232,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
         using var device = Find(enumerator, DataFlow.Capture, settings.Input);
         if (device is null) return;
         InputName = device.FriendlyName;
+        processing.Microphone(device.ID);
         WasapiRecorder Build(bool raw)
         {
             var builder = new WasapiRecorderBuilder().WithDevice(device).WithFormat(new WaveFormat(VoicePacket.SampleRate, 16, 1)).WithBufferLength(20);
@@ -180,10 +247,17 @@ internal sealed class VoiceAudio : IAsyncDisposable
             PlaybackDiagnostics.Record("voice-input-mode-unavailable", new { mode = "Raw", error = ex.GetType().Name, code = ex.HResult });
             created = Build(false);
         }
+        var handing = pump = new Pump((samples, count) => { AddToMicrophone?.Invoke(samples, count); processing.Write(samples.AsSpan(0, count)); });
+        // The first buffer of a microphone just opened always says audio was lost before it.
+        Volatile.Write(ref inputBuffers, 0);
         created.DataAvailable += (buffer, flags, _, _) =>
         {
-            if ((flags & AudioClientBufferFlags.Silent) != 0) { Span<short> silence = stackalloc short[buffer.Length / 2]; silence.Clear(); processing.Write(silence); }
-            else processing.Write(MemoryMarshal.Cast<byte, short>(buffer));
+            // Audio lost before it reached the app is heard as a skip; the log says when it happens.
+            if (Interlocked.Increment(ref inputBuffers) > 1 && (flags & AudioClientBufferFlags.DataDiscontinuity) != 0 && Interlocked.Increment(ref inputGaps) is 1 or 10 or 100)
+                PlaybackDiagnostics.Record("voice-input-gap", new { gaps = InputGaps, buffers = Volatile.Read(ref inputBuffers), slowestMs = Math.Round(SlowestBufferMs, 1) });
+            Interlocked.Add(ref inputSamples, buffer.Length / 2);
+            if ((flags & AudioClientBufferFlags.Silent) != 0) { Span<short> silence = stackalloc short[buffer.Length / 2]; silence.Clear(); handing.Post(silence); }
+            else handing.Post(MemoryMarshal.Cast<byte, short>(buffer));
         };
         created.RecordingStopped += (_, e) =>
         {
@@ -204,7 +278,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
     {
         try
         {
-            using var output = Find(enumerator, DataFlow.Render, null);
+            using var output = Find(enumerator, DataFlow.Render, ReferenceOutput);
             if (output is null) return;
             var created = new WasapiRecorderBuilder().WithDevice(output).WithLoopbackCapture().WithFormat(new WaveFormat(VoicePacket.SampleRate, 16, 1)).WithBufferLength(20).Build();
             created.DataAvailable += (buffer, flags, _, _) =>
@@ -275,6 +349,8 @@ internal sealed class VoiceAudio : IAsyncDisposable
         simulatedInput = false;
         var old = recorder; recorder = null; MicrophoneReady = false;
         try { old?.Dispose(); } catch (Exception ex) when (ex is COMException or InvalidOperationException) { }
+        var handing = pump; pump = null;
+        handing?.Dispose();
         CloseReference();
         // The recorders have stopped calling it, so the models can be released.
         var models = processor; processor = null;
