@@ -88,11 +88,11 @@ static class ShuffleChecks
             button.Visibility = Visibility.Visible; Call("RefreshOverflowMenu");
 
             // Next keeps its pick, and the end-of-episode button and the up-next card offer the same one.
-            var pick = Adjacent(1);
+            var pick = Adjacent(1)!;
             check(pick is not null && pick.Id != episodes[0].Id && pick.Season == 1 && Enumerable.Range(0, 5).All(_ => Adjacent(1)?.Id == pick.Id),
                 "the random pick is a regular episode and stays the same until it plays");
             Call("RefreshEpisodeEndAction");
-            check((string)endButton.Content == "Next episode →" && (string)endButton.ToolTip == $"Season 1 · {pick!.EpisodeDisplayTitle}", "the end-of-episode button offers the random pick");
+            check((string)endButton.Content == "Next episode →" && (string)endButton.ToolTip == $"Season 1 · {pick.EpisodeDisplayTitle}", "the end-of-episode button offers the random pick");
             var ended = await End(episodes[0]);
             for (var i = 0; i < 30 && card.Visibility != Visibility.Visible; i++) await Task.Delay(100);
             check(card.Visibility == Visibility.Visible && upNext.Text == $"Season 1 · {pick.EpisodeDisplayTitle}", "the up-next countdown offers the random pick");
