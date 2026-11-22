@@ -57,8 +57,14 @@ public sealed record StreamPlan(StreamQuality Quality, int Height, long FileKbps
 // What ffmpeg says a video file holds: enough to choose a quality and to draw its subtitles into the picture.
 public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width, int Height, bool Hdr, int AudioTracks, ProbedSubtitle[] Subtitles, int[] FontStreams)
 {
+    // The audio tracks in order, as "-map 0:a:<n>" counts them.
+    public ProbedAudio[] Audio { get; init; } = [];
     private static readonly Regex DurationLine = new(@"Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)(?:, start: (-?\d+(?:\.\d+)?))?", RegexOptions.Compiled);
-    private static readonly Regex StreamLine = new(@"^\s*Stream #0:(\d+)(?:\[0x[0-9a-fA-F]+\])?(?:\([^)]*\))?: (Video|Audio|Subtitle|Attachment): ([\w-]+)(.*)$", RegexOptions.Compiled);
+    private static readonly Regex StreamLine = new(@"^\s*Stream #0:(\d+)(?:\[0x[0-9a-fA-F]+\])?(?:\((?<language>[^)]*)\))?: (Video|Audio|Subtitle|Attachment): ([\w-]+)(.*)$", RegexOptions.Compiled);
+    // A stream's own title, in the metadata ffmpeg lists under it.
+    private static readonly Regex TitleLine = new(@"^\s+title\s*: (.*)$", RegexOptions.Compiled);
+    // The channel layout after the sample rate: "48000 Hz, 5.1(side)", "44100 Hz, stereo", "48000 Hz, 6 channels".
+    private static readonly Regex Layout = new(@"\d+ Hz, ([^,]+)", RegexOptions.Compiled);
     private static readonly Regex Size = new(@"[, ](\d{2,5})x(\d{2,5})(?:[, \[]|$)", RegexOptions.Compiled);
     private static readonly string[] ImageSubtitles = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"];
     private static readonly string[] Fonts = ["ttf", "otf"];
@@ -70,9 +76,16 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
     public static VideoProbe? Parse(string output, bool sound = false)
     {
         long duration = 0; double start = 0; int width = 0, height = 0, audio = 0; var hdr = false;
-        var subtitles = new List<ProbedSubtitle>(); var fonts = new List<int>();
+        var subtitles = new List<ProbedSubtitle>(); var fonts = new List<int>(); var audioTracks = new List<ProbedAudio>();
+        var inAudio = false;
         foreach (var line in output.Split('\n'))
         {
+            // A title under an audio stream names that track; a title anywhere else (the file's, a chapter's) does not.
+            if (inAudio && TitleLine.Match(line.TrimEnd('\r')) is { Success: true } title)
+            {
+                if (audioTracks[^1].Title is null && title.Groups[1].Value.Trim() is { Length: > 0 } named) audioTracks[^1] = audioTracks[^1] with { Title = named };
+                continue;
+            }
             if (duration == 0 && DurationLine.Match(line) is { Success: true } time)
             {
                 duration = (long)((int.Parse(time.Groups[1].Value, CultureInfo.InvariantCulture) * 3600 + int.Parse(time.Groups[2].Value, CultureInfo.InvariantCulture) * 60 +
@@ -80,7 +93,13 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
                 if (time.Groups[4].Success) start = Math.Max(0, double.Parse(time.Groups[4].Value, CultureInfo.InvariantCulture));
                 continue;
             }
-            if (StreamLine.Match(line.TrimEnd('\r')) is not { Success: true } stream) continue;
+            if (StreamLine.Match(line.TrimEnd('\r')) is not { Success: true } stream)
+            {
+                // A stream's metadata is indented under it; a line less indented ends the stream.
+                if (!line.StartsWith("    ", StringComparison.Ordinal)) inAudio = false;
+                continue;
+            }
+            inAudio = stream.Groups[2].Value == "Audio";
             var index = int.Parse(stream.Groups[1].Value, CultureInfo.InvariantCulture); var codec = stream.Groups[3].Value; var rest = stream.Groups[4].Value;
             switch (stream.Groups[2].Value)
             {
@@ -89,12 +108,16 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
                     width = int.Parse(size.Groups[1].Value, CultureInfo.InvariantCulture); height = int.Parse(size.Groups[2].Value, CultureInfo.InvariantCulture);
                     hdr = rest.Contains("smpte2084") || rest.Contains("arib-std-b67");
                     break;
-                case "Audio": audio++; break;
+                case "Audio":
+                    audio++;
+                    var language = stream.Groups["language"].Value is { Length: > 0 } tag && tag != "und" ? tag : null;
+                    audioTracks.Add(new(language, null, codec, Layout.Match(rest) is { Success: true } layout ? layout.Groups[1].Value.Trim() : null, rest.Contains("(default)")));
+                    break;
                 case "Subtitle": subtitles.Add(new(codec, ImageSubtitles.Contains(codec))); break;
                 case "Attachment" when Fonts.Contains(codec): fonts.Add(index); break;
             }
         }
-        return duration > 0 && (height > 0 || sound && audio > 0) ? new(duration, start, width, height, hdr, audio, [.. subtitles], [.. fonts]) : null;
+        return duration > 0 && (height > 0 || sound && audio > 0) ? new(duration, start, width, height, hdr, audio, [.. subtitles], [.. fonts]) { Audio = [.. audioTracks] } : null;
     }
 
     public static async Task<VideoProbe?> ReadAsync(string ffmpeg, string path, CancellationToken ct, bool sound = false)
@@ -105,6 +128,35 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
     }
 }
 public sealed record ProbedSubtitle(string Codec, bool Image);
+// An audio track: its language tag ("jpn"; null when untagged), title, codec, channel layout ("5.1(side)", "stereo"),
+// and whether the file marks it as the one to play.
+public sealed record ProbedAudio(string? Language, string? Title, string Codec, string? Layout, bool Default)
+{
+    // The track to start with: the first language of Settings › Playback that a track has, as the PC's player picks;
+    // where none has one, the track the file marks, or else its first.
+    public static int? Preferred(IReadOnlyList<ProbedAudio> tracks, IReadOnlyList<string> preferences)
+    {
+        if (tracks.Count == 0) return null;
+        if (TrackLanguages.Select(tracks.Select((track, i) => new LanguageTrack(i, track.Title ?? "", track.Language)), preferences) is { } preferred) return preferred;
+        for (var i = 0; i < tracks.Count; i++) if (tracks[i].Default) return i;
+        return 0;
+    }
+
+    // ffmpeg reports a Matroska track that names no language as English, as players do (ContainerTrack.Untagged), and
+    // reads no BCP 47 language (LanguageBCP47) at all. Lined up with the container's own list (Matroska and MP4:
+    // SubtitleText.Tracks), a track has the language the file gives it; one that gives none has the one identified while
+    // it played (detected takes the player's track id, its position in the file), or none. Tracks that can't be lined up,
+    // as in other containers, keep what ffmpeg says.
+    public static ProbedAudio[] WithContainerLanguages(ProbedAudio[] audio, IReadOnlyList<ContainerTrack> container, Func<int, string?> detected)
+    {
+        var positions = container.Select((track, id) => (track, id)).Where(entry => entry.track.Type == ContainerTrackType.Audio).ToArray();
+        if (positions.Length != audio.Length) return audio;
+        return audio.Select((track, n) => track with
+        {
+            Language = !positions[n].track.Untagged ? positions[n].track.Language : detected(positions[n].id) is { Length: > 0 } found ? found : null,
+        }).ToArray();
+    }
+}
 
 // Which subtitles the converted picture carries: a subtitle track of the video, or a subtitle file beside it.
 public sealed record BurnedSubtitle(int? Track = null, string? File = null);
