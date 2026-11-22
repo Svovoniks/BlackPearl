@@ -86,6 +86,11 @@ static class PhoneHostFixture
             var saved = false;
             for (var waited = 0; waited < 5000 && !saved; waited += 100) { saved = store.Setting("position:" + id) == "754000" && store.Setting("played:" + id) is not null; if (!saved) await Task.Delay(100); }
             check(saved, "progress made on the phone while BlackPearl is closed is saved to the library");
+            // Next in the credits: the phone leaves the video in its last tenth.
+            link.Send(new { type = "progress", id, positionMs = 5900000, durationMs = 6300000, final = true });
+            var finished = false;
+            for (var waited = 0; waited < 5000 && !finished; waited += 100) { finished = store.Setting("watched:" + id) == "true" && store.Setting("position:" + id) == "0"; if (!finished) await Task.Delay(100); }
+            check(finished, "a video the phone leaves in its credits is marked watched");
 
             link.Send(new { type = "play", request = 3, id, positionMs = 1000 });
             check(await link.Next("error", 5000) is { } refusedPlay && refusedPlay.GetProperty("code").GetString() == "not-allowed",
