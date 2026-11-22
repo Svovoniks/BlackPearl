@@ -107,12 +107,49 @@ public partial class MainWindow
             detail = string.Join(" · ", new[] { item.Season is { } season ? $"Season {season}" : null, item.EpisodeDisplayTitle }.OfType<string>());
         else if (item?.Year is { } year) detail = year.ToString(CultureInfo.InvariantCulture);
         var position = Math.Max(0, PlaybackPosition());
+        var tracks = PhoneRemoteTracks();
         return new RemoteState(true, title, string.IsNullOrWhiteSpace(detail) ? null : detail, WantsMediaPlayback, position, Math.Max(0, player.Length),
             (int)Math.Round(Volume.Value), player.Mute, loopMode switch { LoopMode.All => "all", LoopMode.One => "one", _ => "off" }, fullscreen,
             PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom,
             // Only a video this PC plays on its own can move to the phone; a room's belongs to the room.
             room is null && item is { IsMusic: false } && InLibrary(item) ? item.Id : null,
-            room is null ? PhoneRemoteQueue(item) : null, shuffle);
+            room is null ? PhoneRemoteQueue(item) : null, shuffle,
+            tracks.Audio, tracks.AudioId, tracks.Subtitles, tracks.SubtitleId, tracks.CanChange);
+    }
+
+    // The player's Audio and Subtitles menus as they are now: their choices, the ticked one, and whether they can be
+    // changed (not in a room where only whoever plays the video picks them). The menus' lists are replaced only when
+    // they change, so each is converted once rather than four times a second.
+    private (TrackChoice[]? Source, RemoteTrack[] Tracks) phoneAudioTracks, phoneSubtitleTracks;
+    private (RemoteTrack[] Audio, int? AudioId, RemoteTrack[] Subtitles, int? SubtitleId, bool CanChange) PhoneRemoteTracks()
+    {
+        static RemoteTrack[] Convert(ListBox list, ref (TrackChoice[]? Source, RemoteTrack[] Tracks) cache)
+        {
+            var source = list.ItemsSource as TrackChoice[] ?? [];
+            if (!ReferenceEquals(cache.Source, source) || cache.Tracks is null)
+                cache = (source, [.. source.Select(t => new RemoteTrack(t.Id, t.Label, string.IsNullOrWhiteSpace(t.Detail) ? null : t.Detail))]);
+            return cache.Tracks;
+        }
+        var audio = Convert(AudioTracks, ref phoneAudioTracks);
+        var subtitles = Convert(SubtitleTracks, ref phoneSubtitleTracks);
+        return (audio, (AudioTracks.SelectedItem as TrackChoice)?.Id, subtitles, (SubtitleTracks.SelectedItem as TrackChoice)?.Id, CanChangeRoomTracks);
+    }
+
+    // `audio-track` and `subtitle-track` pick a choice of the player's menus by its id, through the same code as
+    // clicking it, so a room's rule on who picks tracks and the subtitle rules for the audio's language apply the same
+    // way. Returns the error to send, or null.
+    private (string Code, string Message)? RunPhoneTrackCommand(RemoteCommand command)
+    {
+        if (!HasMediaPlayback || player is null) return ("nothing-playing", "Nothing is playing on the PC.");
+        if (command.Number is not { } number || number != Math.Floor(number) || Math.Abs(number) > int.MaxValue) return null;
+        var list = command.Action == "audio-track" ? AudioTracks : SubtitleTracks;
+        if (!CanChangeRoomTracks)
+            return ("not-allowed", room is { } inRoom && inRoom.Identity?.Host != true && inRoom.Snapshot?.SharedControls != true
+                ? "In this room, only whoever plays the video picks the audio and subtitles."
+                : "The PC can't change tracks right now. Try again in a moment.");
+        if ((list.ItemsSource as TrackChoice[])?.FirstOrDefault(t => t.Id == (int)number) is not { } choice) return null;
+        if (!Equals(list.SelectedItem, choice)) list.SelectedItem = choice;
+        return null;
     }
 
     // The saved queue playing here and the video's place in it. The player's queue is the saved one's videos that the
@@ -152,6 +189,13 @@ public partial class MainWindow
         {
             if (action == "volume" && command.Number is { } level) Volume.Value = Math.Clamp(Math.Round(level), 0, 100);
             else if (action == "mute") MutePlayback(this, new RoutedEventArgs());
+            return;
+        }
+        if (action is "audio-track" or "subtitle-track")
+        {
+            if (RunPhoneTrackCommand(command) is { } error) remote.SendError(session, error.Code, error.Message);
+            // Also when nothing changed, so a phone waiting on its choice learns the outcome at once.
+            PublishPhoneRemoteState(force: true);
             return;
         }
         if (action is not ("toggle" or "play" or "pause" or "seek-by" or "seek-to" or "previous" or "next" or "stop" or "loop" or "shuffle" or "fullscreen")) return;
