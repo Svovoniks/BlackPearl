@@ -18,7 +18,7 @@ namespace BlackPearl.Desktop;
 internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> current, Action<Action> post, CancellationToken lifetime)
 {
     public const int PageSize = 40;
-    public static readonly string[] Features = ["library", "watch", "queues", "shuffle"];
+    public static readonly string[] Features = ["library", "watch", "queues"];
     public static string StreamCacheDirectory => Path.Combine(Path.GetTempPath(), "BlackPearl", "stream-cache");
 
     // The library's videos, read on the dispatcher thread.
