@@ -20,15 +20,16 @@ public sealed class ShuffleOrder(Random? random = null)
     private string? upcoming;
     // The pick starts a new round (Loop all after every video played).
     private bool upcomingStartsRound;
-    // What Previous offered: playing it is a step back, not a new pick of a video that already played.
-    private string? behindOffered;
+    // The video the player is going back to with Previous: playing it is a step back, not a new pick of a video that
+    // already played. Only GoingBack sets it; asking Previous, as the player does to enable its button, doesn't.
+    private string? goingBack;
 
     /// <summary>The list the order belongs to: a show or a queue.</summary>
     public string? Scope => scope;
 
     public void Reset()
     {
-        history.Clear(); position = -1; roundStart = 0; scope = null; upcoming = null; upcomingStartsRound = false; behindOffered = null;
+        history.Clear(); position = -1; roundStart = 0; scope = null; upcoming = null; upcomingStartsRound = false; goingBack = null;
     }
 
     /// <summary>Records that <paramref name="id"/> plays now, in the list <paramref name="scopeKey"/>. Another list starts a new order.</summary>
@@ -36,8 +37,8 @@ public sealed class ShuffleOrder(Random? random = null)
     {
         if (scope != scopeKey) { Reset(); scope = scopeKey; }
         if (position >= 0 && history[position] == id) return;
-        var back = behindOffered == id && position > 0 && history[position - 1] == id;
-        behindOffered = null;
+        var back = goingBack == id && position > 0 && history[position - 1] == id;
+        goingBack = null;
         if (back) position--;
         else if (position + 1 < history.Count && history[position + 1] == id) position++;
         else
@@ -94,7 +95,7 @@ public sealed class ShuffleOrder(Random? random = null)
         while (position > 0)
         {
             var behind = history[position - 1];
-            if (members.Contains(behind) && canPlay(behind)) return behindOffered = behind;
+            if (members.Contains(behind) && canPlay(behind)) return behind;
             history.RemoveAt(position - 1);
             position--;
             if (roundStart > position) roundStart = position;
@@ -102,12 +103,8 @@ public sealed class ShuffleOrder(Random? random = null)
         return null;
     }
 
-    /// <summary>How many videos of <paramref name="pool"/> this round has played, the playing one included.</summary>
-    public int PlayedCount(IReadOnlyList<string> pool)
-    {
-        var played = history.Skip(roundStart).ToHashSet();
-        return pool.Distinct().Count(played.Contains);
-    }
+    /// <summary>The player is about to play <paramref name="id"/>, which <see cref="Previous"/> offered: it plays as a step back.</summary>
+    public void GoingBack(string id) => goingBack = id;
 
     private string? Pick(List<string> candidates, Func<string, bool> canPlay)
     {

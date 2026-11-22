@@ -2056,13 +2056,19 @@ public partial class MainWindow : Window
     {
         if (ShowingEpisodeList)
         {
-            if (AdjacentEpisode(direction) is { } episode) await PlayListedEpisode(episode);
+            if (AdjacentEpisode(direction) is { } episode)
+            {
+                // Back with Shuffle retraces what played.
+                if (Shuffling && direction < 0) showShuffle.GoingBack(episode.Id);
+                await PlayListedEpisode(episode);
+            }
             else SetStatus(Shuffling ? direction > 0 ? "Shuffle has played every episode. Turn on Loop all to keep going." : "Nothing played before this episode."
                 : direction > 0 ? "This is the last episode." : "This is the first episode.");
             return;
         }
         if (!CanEditQueue()) return;
         var index = QueueStepIndex(direction, QueueItemAvailable);
+        if (Shuffling && direction < 0 && index >= 0) queueShuffle.GoingBack(queue[index].Id);
         if (index < 0)
         {
             SetStatus(Shuffling ? direction > 0 ? "Shuffle has played every video. Turn on Loop all to keep going." : "Nothing played before this video."

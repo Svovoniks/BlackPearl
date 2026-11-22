@@ -28,11 +28,15 @@ static class ShuffleOrderFixture
         for (var i = 0; i < 3; i++) path.Add(order.Next("show", path[^1], pool, false, Any)!);
         var back = order.Previous("show", path[3], pool, Any);
         check(back == path[2], "Previous goes to the episode that played before");
+        order.GoingBack(back!);
         back = order.Previous("show", back!, pool, Any);
         check(back == path[1], "Previous again goes one further back");
+        order.GoingBack(back!);
         check(order.Next("show", back!, pool, false, Any) == path[2], "Next after Previous retraces the path that played");
         back = order.Previous("show", path[2], pool, Any);
+        order.GoingBack(back!);
         back = order.Previous("show", back!, pool, Any);
+        order.GoingBack(back!);
         check(back == "e3" && order.Previous("show", "e3", pool, Any) is null, "the first video of the shuffle has nothing before it");
         // Unplayable videos are skipped on the way back.
         order = new ShuffleOrder(new Random(5));
@@ -61,6 +65,26 @@ static class ShuffleOrderFixture
         order = new ShuffleOrder(new Random(2));
         for (current = "e1"; order.Next("show", current, pool, false, Any) is { } next;) current = next;
         check(order.Next("queue:a", "e1", pool, false, Any) is not null && order.Scope == "queue:a", "switching to another list starts a fresh shuffle");
-        check(order.PlayedCount(pool) == 1, "a fresh shuffle counts only the playing video");
+
+        // The player asks Previous before every Next, to enable its button. A new round may pick the video that played
+        // before the one that ended; playing it must count as going forward, or the rounds repeat videos.
+        foreach (var seed in Enumerable.Range(0, 200))
+        {
+            order = new ShuffleOrder(new Random(seed));
+            current = "e1"; played = [current];
+            for (var i = 0; i < pool.Length * 4 - 1; i++)
+            {
+                order.Previous("show", current, pool, Any);
+                current = order.Next("show", current, pool, true, Any)!;
+                order.Previous("show", current, pool, Any);
+                played.Add(current);
+            }
+            if (!played.Chunk(pool.Length).All(round => round.Distinct().Count() == pool.Length) || Enumerable.Range(1, played.Count - 1).Any(i => played[i] == played[i - 1]))
+            {
+                check(false, $"asking Previous doesn't make Loop all repeat videos (seed {seed}: {string.Join(" ", played)})");
+                break;
+            }
+        }
+        check(true, "asking Previous before each Next keeps every round to each video once, over 200 seeds");
     }
 }

@@ -25,7 +25,8 @@ public partial class MainWindow
         showShuffle.Reset(); queueShuffle.Reset();
         RefreshShuffleButton();
         if (ShuffleButton.Visibility != Visibility.Visible) RefreshOverflowMenu();
-        SetStatus(shuffle ? "Shuffle on: every episode plays once, in a random order." : "Shuffle off: episodes play in order.");
+        var what = HasPlaybackQueue ? "video in the queue" : "episode";
+        SetStatus(shuffle ? $"Shuffle on: every {what} plays once, in a random order." : HasPlaybackQueue ? "Shuffle off: the queue plays in order." : "Shuffle off: episodes play in order.");
         // Next, Previous, the end-of-episode button and the queue menu's note all change with it.
         episodeActionItem = null;
         RefreshQueueList(true);
