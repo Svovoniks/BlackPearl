@@ -303,7 +303,8 @@ public partial class MainWindow : Window
             player.Vout += (_, _) => Dispatcher.BeginInvoke(() => { if (!closing) SubtitleOutputChanged(); });
             player.ESAdded += (_, _) => TracksChanged(); player.ESDeleted += (_, _) => TracksChanged(); player.ESSelected += (_, _) => TracksChanged();
             // A phone playing the sound follows the picture: from LibVLC's thread, as it happens.
-            player.Playing += (_, _) => phoneSoundClock.SetRunning(true);
+            // Each video starts quiet again while a phone has the sound, before the 250 ms tick would notice.
+            player.Playing += (_, _) => { phoneSoundClock.SetRunning(true); Dispatcher.BeginInvoke(ApplyPhoneSoundMute); };
             player.Paused += (_, _) => phoneSoundClock.SetRunning(false);
             player.Stopped += (_, _) => phoneSoundClock.SetRunning(false);
             player.EndReached += (_, _) => phoneSoundClock.SetRunning(false);
@@ -1905,7 +1906,7 @@ public partial class MainWindow : Window
         try { await StopNativePlayback(); }
         finally { loading.Release(); }
     });
-    private void MutePlayback(object sender, RoutedEventArgs e) { if (player is not null && !TakeSoundBackFromPhones()) { phoneSoundRestoredAt = long.MinValue / 2; player.Mute = !player.Mute; RefreshVolumeIndicator(); } }
+    private void MutePlayback(object sender, RoutedEventArgs e) { if (!TakeSoundBackFromPhones() && player is not null) { phoneSoundRestoredAt = long.MinValue / 2; player.Mute = !player.Mute; RefreshVolumeIndicator(); } }
     private void VolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         // While a phone has the sound, the PC stays quiet; raising its volume unmutes it once the sound is back.

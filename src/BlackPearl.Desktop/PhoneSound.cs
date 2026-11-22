@@ -12,11 +12,10 @@ namespace BlackPearl.Desktop;
 // The PC's own Mute brings the sound back here.
 public partial class MainWindow
 {
-    // How long a phone whose link dropped keeps the sound: it plays on from what it has read and usually reconnects
-    // within moments.
-    private const int PhoneSoundDropWaitMs = 15000;
-    // A listening phone asks where the player is every second; one silent this long is taken to be gone.
+    // A listening phone asks where the player is every second; one silent this long is taken to be gone, a dropped link
+    // included (it plays on from what it has read meanwhile, and asks again once it is back).
     private const int PhoneSoundSilenceMs = 10000;
+    private const string PhoneSoundInRoom = "Sound on the phone isn't available in a room.", PhoneSoundBack = "The sound is back on the PC.";
     private readonly PlaybackClock phoneSoundClock = new();
     // By phone id. Changed on the dispatcher thread; media reads look up the converter from others.
     private readonly ConcurrentDictionary<string, PhoneListener> phoneListeners = new();
@@ -36,7 +35,6 @@ public partial class MainWindow
         public SegmentStore? Store { get; set; }
         public string? Directory { get; set; }
         public int Generation { get; set; }
-        public long DroppedAt { get; set; }
         public long Since { get; set; } = Environment.TickCount64;
         public void CloseStream()
         {
@@ -59,10 +57,6 @@ public partial class MainWindow
         {
             if (type == "listen") Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) PhoneListen(remote, session, message); });
         };
-        remote.Disconnected += session => Dispatcher.BeginInvoke(() =>
-        {
-            if (phoneListeners.TryGetValue(session.PhoneId, out var listener) && listener.Session == session) listener.DroppedAt = Environment.TickCount64;
-        });
         // The library's resolver answers everything but the sound's pieces.
         var library = remote.ResolveMedia;
         remote.ResolveMedia = async (session, resource, ct) =>
@@ -87,14 +81,14 @@ public partial class MainWindow
         }
         if (room is not null)
         {
-            remote.SendMessage(session, new { type = "error", request, code = "in-room", message = "Sound on the phone isn't available in a room." });
+            remote.SendMessage(session, new { type = "error", request, code = "in-room", message = PhoneSoundInRoom });
             return;
         }
         var name = remote.Phones.FirstOrDefault(p => p.Id == session.PhoneId)?.Name ?? session.Device ?? "your phone";
         if (phoneListeners.TryGetValue(session.PhoneId, out var listener))
         {
             // The same phone again, as after its link came back: it keeps its stream.
-            listener.Session = session; listener.DroppedAt = 0; listener.Since = Environment.TickCount64;
+            listener.Session = session; listener.Since = Environment.TickCount64;
         }
         else
         {
@@ -114,7 +108,7 @@ public partial class MainWindow
     private SoundSource? CurrentSoundSource(out string? why)
     {
         why = null;
-        if (room is not null) { why = "Sound on the phone isn't available in a room."; return null; }
+        if (room is not null) { why = PhoneSoundInRoom; return null; }
         if (!ready || !HasMediaPlayback || player is null || playingItem is not { Path: { Length: > 0 } path }) return null;
         var choice = DescribeRoomTrack(player.AudioTrack, AudioTracks.ItemsSource as TrackChoice[] ?? [], false);
         if (choice is { Index: < 0 }) { why = "The PC's audio is turned off for this video."; return null; }
@@ -127,6 +121,8 @@ public partial class MainWindow
     // what plays now, and this PC stays quiet while any does.
     private void SyncPhoneSound()
     {
+        // Joining or hosting a room gives the sound back: the room's video plays here, and its sound with it.
+        if (room is not null) EndAllPhoneSound(PhoneSoundInRoom);
         if (phoneListeners.IsEmpty) { phoneSoundClock.Source = null; ApplyPhoneSoundMute(); return; }
         var source = CurrentSoundSource(out var why);
         phoneSoundClock.Source = source?.Clock;
@@ -134,7 +130,7 @@ public partial class MainWindow
         foreach (var listener in phoneListeners.Values.ToArray())
         {
             var silent = now - Math.Max(listener.Since, phoneSoundClock.LastHeard(listener.Session.PhoneId) ?? 0) > PhoneSoundSilenceMs;
-            if (silent || listener.DroppedAt != 0 && now - listener.DroppedAt > PhoneSoundDropWaitMs) { EndPhoneSound(listener, null); continue; }
+            if (silent) { EndPhoneSound(listener, null); continue; }
             if (listener.Source?.Key == source?.Key) continue;
             listener.CloseStream();
             listener.Source = source;
@@ -164,7 +160,9 @@ public partial class MainWindow
             }
             var probe = await probing;
             if (!Current()) return;
-            if (probe is not { AudioTracks: > 0 }) { failed = probe is null ? "The PC couldn't read this video's sound." : "This video has no sound."; return; }
+            if (probe is null) { failed = "The PC couldn't read this video's sound."; return; }
+            // A video without sound has nothing to send; the phone keeps listening for the next one.
+            if (probe.AudioTracks == 0) { TellPhoneSound(listener, "This video has no sound."); return; }
             var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
             var directory = Path.Combine(PhoneLibrary.StreamCacheDirectory, "sound-" + Guid.NewGuid().ToString("N"));
             var store = SegmentStore.TryCreate(directory, segments);
@@ -204,7 +202,7 @@ public partial class MainWindow
             catch (InvalidDataException) { }
         }
         ApplyPhoneSoundMute();
-        if (phoneListeners.IsEmpty) SetStatus(why is null ? "The sound is back on the PC." : why + " The sound is back on the PC.");
+        if (phoneListeners.IsEmpty) SetStatus(why is null or PhoneSoundBack ? PhoneSoundBack : why + " " + PhoneSoundBack);
     }
 
     private void EndAllPhoneSound(string why)
@@ -217,7 +215,7 @@ public partial class MainWindow
     {
         if (!phoneSoundMuted) return false;
         mutedBeforePhoneSound = false;
-        EndAllPhoneSound("The sound is back on the PC.");
+        EndAllPhoneSound(PhoneSoundBack);
         return true;
     }
 

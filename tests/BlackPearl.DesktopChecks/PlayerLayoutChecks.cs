@@ -69,6 +69,7 @@ static class PlayerLayoutChecks
         volumeText.Text = "Muted"; volumeText.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         Check(phoneWidth <= volumeText.DesiredSize.Width + 0.5, $"Phone takes no more room than Muted ({phoneWidth:0.0} against {volumeText.DesiredSize.Width:0.0} DIP)");
         volume.Value = 0; Invoke(window, "RefreshVolumeIndicator");
+        PhoneSoundHandOver(window, mute, volumeText);
         Check(!IsDescendant(volume, (Border)window.FindName("PlaybackControls")) && !((System.Windows.Controls.Primitives.Popup)window.FindName("VolumeFlyout")).IsOpen,
             "the volume slider stays out of the bar in a closed flyout until it is needed");
         volume.Value = 100;
@@ -449,6 +450,46 @@ static class PlayerLayoutChecks
         return false;
     }
     static void Invoke(object target, string name, params object[] args) => target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(target, args);
+
+    // Sound on the phone hands the PC's mute over and back: a listening phone mutes the PC without touching its own mute,
+    // the PC's Mute takes the sound back (and says so once), and a room gives it back too, so the PC is never left quiet.
+    static void PhoneSoundHandOver(MainWindow window, Button mute, TextBlock volumeText)
+    {
+        var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        T Get<T>(string name) => (T)typeof(MainWindow).GetField(name, flags)!.GetValue(window)!;
+        var listeners = typeof(MainWindow).GetField("phoneListeners", flags)!.GetValue(window)!;
+        var listenerType = typeof(MainWindow).GetNestedType("PhoneListener", BindingFlags.NonPublic)!;
+        var status = (TextBlock)window.FindName("StatusText");
+        var player = typeof(MainWindow).GetField("player", flags)!.GetValue(window) as LibVLCSharp.Shared.MediaPlayer;
+        void Listen(string id)
+        {
+            var session = (BlackPearl.Core.PhoneRemoteSession)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(BlackPearl.Core.PhoneRemoteSession));
+            typeof(BlackPearl.Core.PhoneRemoteSession).GetProperty("PhoneId")!.SetValue(session, id);
+            var listener = Activator.CreateInstance(listenerType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, [session, "Pixel 8"], null)!;
+            listeners.GetType().GetMethod("TryAdd")!.Invoke(listeners, [id, listener]);
+            Invoke(window, "ApplyPhoneSoundMute");
+        }
+        bool Empty() => (bool)listeners.GetType().GetProperty("IsEmpty")!.GetValue(listeners)!;
+
+        player?.SetPause(true);
+        if (player is not null) player.Mute = false;
+        Listen("phone-a");
+        Check(Get<bool>("phoneSoundMuted") && mute.Content as string == "" && (player is null || player.Mute),
+            "a phone taking the sound mutes the PC and shows the phone on the speaker button");
+        Invoke(window, "MutePlayback", window, new RoutedEventArgs());
+        Check(Empty() && !Get<bool>("phoneSoundMuted") && mute.Content as string != "" && (player is null || !player.Mute),
+            "the PC's Mute takes the sound back from the phone and unmutes the PC");
+        Check(status.Text == "The sound is back on the PC.", $"taking the sound back says so once (\"{status.Text}\")");
+
+        Listen("phone-b");
+        var room = typeof(MainWindow).GetField("room", flags)!;
+        room.SetValue(window, System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(room.FieldType));
+        try { Invoke(window, "SyncPhoneSound"); }
+        finally { room.SetValue(window, null); }
+        Check(Empty() && !Get<bool>("phoneSoundMuted") && (player is null || !player.Mute),
+            "joining a room gives the sound back to the PC rather than leaving it muted");
+        Check(status.Text == "Sound on the phone isn't available in a room. The sound is back on the PC.", $"and says why (\"{status.Text}\")");
+    }
     static void Check(bool condition, string message) { if (!condition) throw new Exception("FAIL: " + message); Console.WriteLine("PASS: " + message); }
     static void Save(FrameworkElement root, string name, double zoom = 1)
     {
