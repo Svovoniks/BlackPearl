@@ -172,6 +172,15 @@ static class PhoneRemoteFixture
             check(seek.Action == "seek-by" && seek.Number == -10000 && toggle.Action == "toggle" && toggle.Value is null, "the phone's commands reach the PC with their values");
             host.Publish(new RemoteState(true, "Night Signal", Playing: true, PositionMs: 5000, DurationMs: 60000));
             check(await phone.Next("state") is { } playing && playing.GetProperty("playing").GetBoolean(), "the PC's state reaches the phone");
+            // Sound on the phone: the PC answers where its player is at once, less the time its picture runs behind.
+            var clock = new PlaybackClock { Source = "film" };
+            clock.Report(90000); clock.SetRunning(true);
+            host.Clock = clock;
+            phone.Send(new { type = "clock", request = 41 });
+            var timed = await phone.Next("clock");
+            check(timed is { } answer && answer.GetProperty("request").GetInt64() == 41 && answer.GetProperty("source").GetString() == "film" && answer.GetProperty("playing").GetBoolean() &&
+                answer.GetProperty("positionMs").GetInt64() is >= 90000 - PlaybackClock.PictureLagMs and < 92000 && clock.LastHeard(phoneId) is not null,
+                "a phone asking where the player is gets the position of the picture at once, and the PC notes it asked");
             check(await phone.MediaOpened(), "the phone's media channel opens beside the remote's");
             var read = await phone.Read("file/test", 100000, 262144);
             check(read.Length == 600000 && read.Bytes.AsSpan().SequenceEqual(video.AsSpan(100000, 262144)), "the phone reads a range of a video in frames, and learns the whole video's size");

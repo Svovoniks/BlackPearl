@@ -447,6 +447,17 @@ if (args.FirstOrDefault() == "--stream-quality")
     Console.WriteLine($"{checks} stream quality checks passed.");
     return;
 }
+if (args.FirstOrDefault() == "--phone-sound")
+{
+    var checks = 0;
+    await PhoneSoundFixture.Run(Path.GetFullPath(args.ElementAtOrDefault(1) ?? Path.Combine("artifacts", "phone-sound-" + Guid.NewGuid().ToString("N")[..8])), (condition, name) =>
+    {
+        if (!condition) throw new Exception("FAIL: " + name);
+        Console.WriteLine("PASS: " + name); checks++;
+    });
+    Console.WriteLine($"{checks} phone sound checks passed.");
+    return;
+}
 if (args.FirstOrDefault() == "--forward-buffer")
 {
     await ForwardBufferFixture.Run(args[1], (condition, name) =>
@@ -515,6 +526,7 @@ SharedLibraryFixture.Run(Check);
 await StreamingAudioFixture.Run(Path.Combine(root, "streaming-audio"), Check);
 await ForwardBufferFixture.Run(Path.Combine(root, "forward-buffer"), Check);
 await StreamQualityFixture.Run(Path.Combine(root, "stream-quality"), Check);
+await PhoneSoundFixture.Run(Path.Combine(root, "phone-sound"), Check);
 await PeerMediaFixture.Run(Check);
 Check(MediaBridge.TryRange("bytes=-30", 100, out var s, out var e) && s == 70 && e == 99, "suffix byte ranges");
 Check(MediaBridge.TryRange("bytes=40-999", 100, out s, out e) && s == 40 && e == 99, "range end clamped");

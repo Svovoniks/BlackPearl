@@ -68,14 +68,16 @@ public partial class MainWindow
         // every phone, rather than holding the native thread until it can.
         remote.CurrentState = () => { Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) PublishPhoneRemoteState(force: true); }); return null; };
         AttachPhonePlayback(remote);
+        AttachPhoneSound(remote);
         remote.Start();
-        phoneRemoteTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => PublishPhoneRemoteState(), Dispatcher);
+        phoneRemoteTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => { SyncPhoneSound(); PublishPhoneRemoteState(); }, Dispatcher);
         phoneRemoteTimer.Start();
         RenderPhoneRemote();
     }
 
     private void StopPhoneRemote()
     {
+        foreach (var listener in phoneListeners.Values.ToArray()) EndPhoneSound(listener, null);
         phoneRemoteTimer?.Stop();
         pairingWindow?.Close();
         if (phoneRemote is { } remote) { phoneRemote = null; remote.Dispose(); }
@@ -109,12 +111,12 @@ public partial class MainWindow
         var position = Math.Max(0, PlaybackPosition());
         var tracks = PhoneRemoteTracks();
         return new RemoteState(true, title, string.IsNullOrWhiteSpace(detail) ? null : detail, WantsMediaPlayback, position, Math.Max(0, player.Length),
-            (int)Math.Round(Volume.Value), player.Mute, loopMode switch { LoopMode.All => "all", LoopMode.One => "one", _ => "off" }, fullscreen,
+            (int)Math.Round(Volume.Value), UserMuted, loopMode switch { LoopMode.All => "all", LoopMode.One => "one", _ => "off" }, fullscreen,
             PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom,
             // Only a video this PC plays on its own can move to the phone; a room's belongs to the room.
             room is null && item is { IsMusic: false } && InLibrary(item) ? item.Id : null,
             room is null ? PhoneRemoteQueue(item) : null, shuffle,
-            tracks.Audio, tracks.AudioId, tracks.Subtitles, tracks.SubtitleId, tracks.CanChange);
+            tracks.Audio, tracks.AudioId, tracks.Subtitles, tracks.SubtitleId, tracks.CanChange, phoneSoundMuted);
     }
 
     // The player's Audio and Subtitles menus as they are now: their choices, the ticked one, and whether they can be

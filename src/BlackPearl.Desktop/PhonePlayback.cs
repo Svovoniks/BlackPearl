@@ -8,8 +8,9 @@ namespace BlackPearl.Desktop;
 // playing here, progress shown on the cards, and Continue on the PC.
 public partial class MainWindow
 {
-    // The window also has a player, whose Shuffle a phone can turn on; the phone host (PhoneHost.cs) has none.
-    private static readonly string[] PhoneFeatures = [.. PhoneLibrary.Features, "shuffle", "tracks"];
+    // The window also has a player, whose Shuffle a phone can turn on, whose tracks it can change and whose sound it can
+    // play (PhoneSound.cs); the phone host (PhoneHost.cs) has none.
+    private static readonly string[] PhoneFeatures = [.. PhoneLibrary.Features, "shuffle", "tracks", "sound"];
     private PhoneLibrary? phoneLibrary;
     // The title of the video a phone took over, which the empty player names; see RefreshPlayerEmpty.
     private string? watchingOnPhone;
