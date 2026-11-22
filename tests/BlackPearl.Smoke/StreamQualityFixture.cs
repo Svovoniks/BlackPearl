@@ -307,6 +307,11 @@ static class StreamQualityFixture
         check(identified is [{ Language: "fr" }, { Language: "jpn" }, { Language: null }] && ProbedAudio.Preferred(identified, ["fr", "ja"]) == 0,
             "an untagged track takes the language identified while it played, by its place in the file");
         check(ProbedAudio.WithContainerLanguages(probe.Audio, [], _ => "fr") == probe.Audio, "tracks that can't be lined up keep what ffmpeg says");
+        // ffmpeg reads no LanguageBCP47: a track tagged only so is English to it, and Japanese to the file.
+        ContainerTrack[] bcp47 = [new(1, ContainerTrackType.Video, "V_MPEG4/ISO/AVC", null, false), new(2, ContainerTrackType.Audio, "A_AAC", "ja", false), new(3, ContainerTrackType.Audio, "A_AAC", "en-US", false)];
+        var tagged = ProbedAudio.WithContainerLanguages([new("eng", null, "aac", "stereo", true), new("eng", null, "aac", "stereo", false)], bcp47, _ => "fr");
+        check(tagged is [{ Language: "ja" }, { Language: "en-US" }] && ProbedAudio.Preferred(tagged, ["en"]) == 1,
+            "a track has the language its file gives it, also one ffmpeg doesn't read");
     }
 
     private static void Probing(Action<bool, string> check)
