@@ -378,6 +378,25 @@ static class ScreenRender
             if (wanted.FirstOrDefault(x => x.IsMovie) is { } wantedFilm && store.Get(wantedFilm.Id) is { } placeholder) { Call("Select", placeholder); await Capture($"{theme}-wanted-film"); }
             Call("NavigateLibrary", 0, null, null, null); Call("OpenSearch", false); await Capture($"{theme}-search");
             foreach (var page in new[] { "Queues", "Rooms", "Folders", "Room" }) { Call("ShowPage", page); await Capture($"{theme}-{page.ToLowerInvariant()}"); }
+            // The empty player after a phone took its video over (PhonePlayback.cs), with a long title.
+            typeof(MainWindow).GetField("watchingOnPhone", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, "Harbor Lights · S2 E7 · The Night the Lighthouse Went Dark");
+            var subtitle = (TextBlock)window.FindName("RoomSubtitle"); var resting = subtitle.Text; subtitle.Text = "Continuing on your phone";
+            Call("ShowPage", "Room"); Call("RefreshPlayerEmpty"); await Settle(1500);
+            // The player's controls and its empty state live in the video view's own overlay window, which a capture of the
+            // main window shows black: draw the overlay itself.
+            foreach (var empty in new[] { false, true })
+            {
+                if (empty) { typeof(MainWindow).GetField("watchingOnPhone", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, null); Call("RefreshPlayerEmpty"); subtitle.Text = resting; await Settle(500); }
+                var overlay = (FrameworkElement)window.FindName("PlayerOverlay");
+                // At the main window's scaling: --scale rescales the main window, and the overlay window keeps the display's.
+                var scale = VisualTreeHelper.GetDpi(window);
+                var shot = new RenderTargetBitmap((int)Math.Ceiling(overlay.ActualWidth * scale.DpiScaleX), (int)Math.Ceiling(overlay.ActualHeight * scale.DpiScaleY), scale.PixelsPerInchX, scale.PixelsPerInchY, PixelFormats.Pbgra32);
+                shot.Render(overlay);
+                var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(shot));
+                await using (var file = File.Create(Path.Combine(output, $"{theme}-room-{(empty ? "empty" : "phone")}.png"))) png.Save(file);
+                foreach (var finding in BorderAudit.Find(overlay)) Console.WriteLine($"CLIPPED {theme}-room-{(empty ? "empty" : "phone")}: {finding}");
+            }
+            typeof(MainWindow).GetField("watchingOnPhone", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, null); Call("RefreshPlayerEmpty");
             await CaptureSettings(theme, everyEnd: false);
             await CaptureDialogs(store, wanted, movie);
         }

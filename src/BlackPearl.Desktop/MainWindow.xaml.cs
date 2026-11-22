@@ -225,7 +225,8 @@ public partial class MainWindow : Window
             if (!openedFile && Program.PlayMediaId is { } handedOver && items.FirstOrDefault(x => x.Id == handedOver && x.Available && !x.IsVirtual) is { } fromPhone)
             {
                 Select(fromPhone);
-                queuePosition = -1;
+                // Played from a queue on the phone: the phone host saved the queue at its place, and Next goes on through it.
+                if (!(queuePosition >= 0 && queuePosition < queue.Count && queue[queuePosition].Id == fromPhone.Id)) queuePosition = -1;
                 _ = Guard(async () => { await PlayLocalItem(fromPhone); PublishQueue(); });
             }
             // Background work reads files and the whole catalog; while a video opened at launch starts, it waits.
@@ -286,6 +287,7 @@ public partial class MainWindow : Window
             PlaybackDiagnostics.Record("startup-stage", new { stage = "player" });
             player.TimeChanged += (_, e) =>
             {
+                phoneSoundClock.Report(e.Time);
                 var mono = Environment.TickCount64; playbackPosition.Observe(e.Time, mono);
                 if (PlaybackDiagnostics.Detailed) PlaybackDiagnostics.Record("native-time", new { position = e.Time });
                 Dispatcher.BeginInvoke(() => { if (!closing) settling.Observe(e.Time, mono); });
@@ -300,6 +302,12 @@ public partial class MainWindow : Window
             // Each new video output starts without the subtitle lift; it comes from LibVLC's thread.
             player.Vout += (_, _) => Dispatcher.BeginInvoke(() => { if (!closing) SubtitleOutputChanged(); });
             player.ESAdded += (_, _) => TracksChanged(); player.ESDeleted += (_, _) => TracksChanged(); player.ESSelected += (_, _) => TracksChanged();
+            // A phone playing the sound follows the picture: from LibVLC's thread, as it happens.
+            // Each video starts quiet again while a phone has the sound, before the 250 ms tick would notice.
+            player.Playing += (_, _) => { phoneSoundClock.SetRunning(true); Dispatcher.BeginInvoke(ApplyPhoneSoundMute); };
+            player.Paused += (_, _) => phoneSoundClock.SetRunning(false);
+            player.Stopped += (_, _) => phoneSoundClock.SetRunning(false);
+            player.EndReached += (_, _) => phoneSoundClock.SetRunning(false);
             player.Playing += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-playing", new { room = room is not null, targetPlaying = target?.Playing }); ready = true; firstPlayback.TrySetResult(); if (room is null && localResume > 0 && player is not null) { player.Time = localResume; localResume = 0; } RefreshTracks(); ReportReady(); if (playbackPause.Pending || target?.Playing == false) player?.SetPause(true); });
             player.EncounteredError += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-error", new { state = player?.State.ToString() }); SetStatus(room?.IsPeerRecovering == true ? "Connection interrupted · Reconnecting…" : "Playback failed. Check that the file is available and the connection is active."); });
             player.Buffering += (_, e) => Dispatcher.BeginInvoke(() =>
@@ -1898,10 +1906,11 @@ public partial class MainWindow : Window
         try { await StopNativePlayback(); }
         finally { loading.Release(); }
     });
-    private void MutePlayback(object sender, RoutedEventArgs e) { if (player is not null) { player.Mute = !player.Mute; RefreshVolumeIndicator(); } }
+    private void MutePlayback(object sender, RoutedEventArgs e) { if (!TakeSoundBackFromPhones() && player is not null) { phoneSoundRestoredAt = long.MinValue / 2; player.Mute = !player.Mute; RefreshVolumeIndicator(); } }
     private void VolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (player is not null) { ApplyPlayerVolume(); if (e.NewValue > 0) player.Mute = false; }
+        // While a phone has the sound, the PC stays quiet; raising its volume unmutes it once the sound is back.
+        if (player is not null) { ApplyPlayerVolume(); if (e.NewValue > 0) { if (phoneSoundMuted) mutedBeforePhoneSound = false; else player.Mute = false; } }
         RefreshVolumeIndicator();
         ShowVolumeFlyout();
     }
@@ -2055,18 +2064,31 @@ public partial class MainWindow : Window
     {
         if (ShowingEpisodeList)
         {
-            if (AdjacentEpisode(direction) is { } episode) await PlayListedEpisode(episode);
-            else SetStatus(direction > 0 ? "This is the last episode." : "This is the first episode.");
+            if (AdjacentEpisode(direction) is { } episode)
+            {
+                // Back with Shuffle retraces what played.
+                if (Shuffling && direction < 0) showShuffle.GoingBack(episode.Id);
+                await PlayListedEpisode(episode);
+            }
+            else SetStatus(Shuffling ? direction > 0 ? "Shuffle has played every episode. Turn on Loop all to keep going." : "Nothing played before this episode."
+                : direction > 0 ? "This is the last episode." : "This is the first episode.");
             return;
         }
         if (!CanEditQueue()) return;
-        var index = QueuePlayback.FindNext(queue, queuePosition, direction, QueueItemAvailable);
-        if (index < 0) { SetStatus(direction > 0 ? "End of queue." : "Start of queue."); return; }
+        var index = QueueStepIndex(direction, QueueItemAvailable);
+        if (Shuffling && direction < 0 && index >= 0) queueShuffle.GoingBack(queue[index].Id);
+        if (index < 0)
+        {
+            SetStatus(Shuffling ? direction > 0 ? "Shuffle has played every video. Turn on Loop all to keep going." : "Nothing played before this video."
+                : direction > 0 ? "End of queue." : "Start of queue.");
+            return;
+        }
         await PlayQueueAt(index);
     }
     private async void LeaveRoom(object sender, RoutedEventArgs e) => await Guard(async () => { var wasRoom = room is not null; ShowPage(wasRoom ? "Rooms" : "Library"); await Disconnect(); RoomHeading.Text = "BlackPearl player"; RoomSubtitle.Text = wasRoom ? "You left the room" : ""; RefreshSavedRooms(); });
     private async Task Disconnect(bool preserveFullscreen = false, bool reconnecting = false)
     {
+        watchingOnPhone = null;
         await VoiceRoomClosed(reconnecting);
         CancelPeerNotices();
         playbackRecovery.Clear();
@@ -2154,19 +2176,20 @@ public partial class MainWindow : Window
         PlayButton.IsEnabled = StopButton.IsEnabled = canControl && (ready || playingItem is not null && player?.State is VLCState.Stopped or VLCState.Ended);
         Timeline.IsEnabled = canControl && player?.Length > 0;
         // Previous and Next stay in the bar; they are disabled when there is nothing to step to.
-        NextButton.ToolTip = ShowingEpisodeList ? "Next episode (N)" : HasPlaybackQueue ? "Next in queue (N)" : "Next video (N)";
+        NextButton.ToolTip = Shuffling ? ShowingEpisodeList ? "Random episode (N)" : "Random video from the queue (N)"
+            : ShowingEpisodeList ? "Next episode (N)" : HasPlaybackQueue ? "Next in queue (N)" : "Next video (N)";
         var restarts = PreviousRestarts();
         var previousName = restarts ? "Back to the start" : ShowingEpisodeList ? "Previous episode" : "Previous video";
         PreviousButton.ToolTip = previousName + " (P)"; System.Windows.Automation.AutomationProperties.SetName(PreviousButton, previousName);
         RefreshEpisodeEndAction();
         var canManageEpisodes = room is null || connectedRoom && room!.Identity?.Host == true;
         NextButton.IsEnabled = ShowingEpisodeList ? canManageEpisodes && AdjacentEpisode(1) is not null
-            : QueuePlayback.FindNext(queue, queuePosition, 1, x => RecentlyExists(x.Path)) >= 0 && (room is null || connectedRoom && room!.Identity?.Host == true);
+            : QueueStepIndex(1, x => RecentlyExists(x.Path)) >= 0 && (room is null || connectedRoom && room!.Identity?.Host == true);
         PreviousButton.IsEnabled = restarts || (ShowingEpisodeList ? canManageEpisodes && AdjacentEpisode(-1) is not null
-            : QueuePlayback.FindNext(queue, queuePosition, -1, x => RecentlyExists(x.Path)) >= 0 && (room is null || connectedRoom && room!.Identity?.Host == true));
+            : QueueStepIndex(-1, x => RecentlyExists(x.Path)) >= 0 && (room is null || connectedRoom && room!.Identity?.Host == true));
         // Looping restarts the video when it ends, which whoever plays it decides in a room.
-        LoopButton.IsEnabled = canManageEpisodes;
-        RefreshLoopButton();
+        LoopButton.IsEnabled = ShuffleButton.IsEnabled = canManageEpisodes;
+        RefreshLoopButton(); RefreshShuffleButton();
         ReturnToRoomButton.IsEnabled = ready || room is not null;
         var canManageQueue = room is null || connectedRoom && room!.Identity?.Host == true;
         QueueEditActions.Visibility = canManageQueue && QueueList.HasItems ? Visibility.Visible : Visibility.Collapsed;
@@ -2347,7 +2370,7 @@ public partial class MainWindow : Window
         if (e.Key == Key.Escape && LibraryPage.Visibility == Visibility.Visible && SearchBox.IsKeyboardFocused)
         { SearchBox.Clear(); e.Handled = true; return; }
         if (Keyboard.FocusedElement is TextBox or PasswordBox or ComboBox or ListBox or ListBoxItem || !inPlayer) return;
-        if (e.Key == Key.Space && (Keyboard.FocusedElement is Button || Keyboard.FocusedElement == LoopButton)) return;
+        if (e.Key == Key.Space && (Keyboard.FocusedElement is Button || Keyboard.FocusedElement == LoopButton || Keyboard.FocusedElement == ShuffleButton)) return;
         if (e.Key is Key.F or Key.F11) { Fullscreen(sender, e); e.Handled = true; }
         else if (e.Key == Key.I) { SetPictureInPicture(!pictureInPicture); e.Handled = true; }
         else if (e.Key == Key.Space) { TogglePlayback(sender, e); e.Handled = true; }
@@ -2357,6 +2380,7 @@ public partial class MainWindow : Window
         else if (e.Key == Key.P) { PreviousQueued(sender, e); e.Handled = true; }
         else if (e.Key == Key.N) { NextQueued(sender, e); e.Handled = true; }
         else if (e.Key == Key.L) { ToggleLoop(sender, e); e.Handled = true; }
+        else if (e.Key == Key.R) { ToggleShuffle(sender, e); e.Handled = true; }
         else if (Keyboard.FocusedElement is not Slider && e.Key is Key.Up or Key.Down) { ShowPlayerControls(); Volume.Value = Math.Clamp(Volume.Value + (e.Key == Key.Up ? 5 : -5), 0, 100); e.Handled = true; }
     }
     private void ToggleTheme(object sender, RoutedEventArgs e)

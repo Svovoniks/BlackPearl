@@ -113,7 +113,7 @@ UTF-8 JSON text messages, at most 64 KiB, each with a `type`.
 ### Opening
 
 1. Phone → PC: `{"type":"hello","protocol":1,"app":"<app version>","device":"<phone model or name>"}`
-2. PC → phone: `{"type":"welcome","protocol":1,"app":"<desktop version>","pc":"<PC name>","pcId":"<PC id>","canStart":true,"features":["library","watch"]}`.
+2. PC → phone: `{"type":"welcome","protocol":1,"app":"<desktop version>","pc":"<PC name>","pcId":"<PC id>","canStart":true,"features":["library","watch","queues","shuffle","tracks","sound"]}`.
    `features` lists what the PC offers beyond the remote (see "The library and watching on the phone"); a PC from
    before them sends none.
    If the PC can't speak the phone's protocol it sends `{"type":"error","code":"protocol","message":"…"}` saying which
@@ -138,11 +138,18 @@ UTF-8 JSON text messages, at most 64 KiB, each with a `type`.
  "positionMs":1122000, "durationMs":2830000,
  "volume":64, "muted":false,
  "loop":"off|all|one",
+ "shuffle":false,             // PCs whose welcome lists `shuffle`; absent from older ones
  "fullscreen":false,
  "hasPrevious":true, "hasNext":true,
  "canControl":true,            // false in a room where only whoever plays the video may control it
  "room":null,                  // or {"name":"Movie club","people":3} while the PC is in a room
- "mediaId":"<library id>"}     // the library video the PC plays on its own, or null (nothing, music, or a room's video)
+ "mediaId":"<library id>",     // the library video the PC plays on its own, or null (nothing, music, or a room's video)
+ "audioTracks":[{"id":1,"name":"Japanese","detail":"Stereo"}],   // PCs whose welcome lists `tracks` (see "Tracks")
+ "audioTrack":1,
+ "subtitleTracks":[{"id":-1,"name":"Off","detail":null},{"id":3,"name":"English","detail":"Full"}],
+ "subtitleTrack":3,
+ "canChangeTracks":true,
+ "phoneSound":false}           // PCs whose welcome lists `sound`: true while a phone plays the PC's sound (`muted` is then the PC's own mute)
 ```
 
 While playing, the phone advances the position itself from when the message arrived; the PC also sends a fresh
@@ -168,11 +175,31 @@ paired link) and `protocol`.
 | `volume` | 0–100 | the volume slider |
 | `mute` | | M |
 | `loop` | | L (off → all → one) |
+| `shuffle` | | R (Shuffle on or off; PCs whose welcome lists `shuffle`) |
 | `fullscreen` | | F |
+| `audio-track` | a track's `id` from `audioTracks` | choosing it in the player's Audio menu (PCs whose welcome lists `tracks`) |
+| `subtitle-track` | a track's `id` from `subtitleTracks`, -1 for Off | choosing it in the player's Subtitles menu (same) |
 
 Commands go through the same code as the PC's keys and buttons, so a room's shared-controls rule applies to them
 the same way. With `canControl` false, every action except `volume`, `mute` and `fullscreen` is refused with
-`not-allowed`: those three change only this PC.
+`not-allowed`: those three change only this PC. The track actions follow `canChangeTracks` instead.
+
+### Tracks
+
+A PC whose welcome lists `tracks` puts its player's Audio and Subtitles menus in the `state`: `audioTracks` and
+`subtitleTracks` list the menus' choices in their order, each with the `name` the menu leads with (usually the
+language) and the muted `detail` under it, or null. Off is the choice with id -1, first in `subtitleTracks` (and
+in `audioTracks` when the player offers no audio as a choice). `audioTrack` and
+`subtitleTrack` are the ticked ids, or null when the menu has none ticked. The lists are the player's menus as they
+are: empty before the first video has opened, and still the previous video's for a moment while the next one opens.
+Ids are the player's own and last only for the loaded video.
+
+`audio-track` and `subtitle-track` choose as a click in the menu does: an audio track also switches the subtitles to
+the PC's rule for its language, and in a room the choice is the room's, for everyone. `canChangeTracks` is false where
+the menus are greyed out: while the player stops a video, and in a room also for everyone but whoever plays the video
+unless controls are shared, while the room's video loads or the room reconnects, and for a guest watching a converted
+stream. A track command is then refused with `not-allowed`, whose message says which. An id the menu doesn't have is
+ignored. The PC sends a fresh `state` after every track command, also one that changed nothing.
 
 Unknown message types and actions are ignored, so either side can add new ones within version 1. Changing the
 meaning of an existing message needs version 2.
@@ -208,7 +235,9 @@ resume point and watched mark. A failure is an `error` with code `browse` and th
 
 Phone → PC: `{"type":"watch","request":<n>,"id":"<entry id>","quality":"auto|original|1080p|720p|480p","network":"home|away|relayed","takeOver":false}`.
 `auto` plays the file itself on the home network and a 720p conversion elsewhere. `takeOver` true, for the video in
-the PC's `mediaId`, makes the PC save where it is and stop, so the phone continues it.
+the PC's `mediaId`, makes the PC save where it is and close its player, so the phone continues it. Nothing is left
+loaded on the PC for its Play, a media key or the remote's `play` to start again; the PC's empty player says the video
+went on to the phone.
 
 PC → phone, for the file itself:
 
@@ -240,7 +269,7 @@ new `watch` replaces it and `{"type":"stream-stop"}` ends it. A failure is an `e
 Phone → PC while watching, every 10 seconds, on pause, and when it stops:
 `{"type":"progress","id":"…","positionMs":1180000,"durationMs":2830000,"ended":false,"final":false}`. The PC saves it
 as its own playback: the resume point, when it was last played, and the watched mark once the position is within
-2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). `final` is true for the last report of a viewing. The PC ignores reports for
+2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). `final` is true for the last report of a viewing. A `final` report in the last tenth of the video, as when Next skips the credits, also marks it watched, as the PC's "Next episode" button does. The PC ignores reports for
 the video it is playing itself at that moment.
 
 ### Continuing on the PC
@@ -249,6 +278,31 @@ Phone → PC: `{"type":"play","request":<n>,"id":"…","positionMs":1180000}` pl
 position, and answers `{"type":"done","request":<n>}` once it has started. It needs `canStart`; a refusal is an
 `error` with code `not-allowed`, `in-room` (the PC is in a room), `gone`, or `opening` (BlackPearl is starting on the PC: ask again once the phone has reconnected to it). The PC ends the phone's stream before it
 answers: the phone is no longer watching, and an answer queued behind video it still reads can take seconds to arrive.
+
+### Queues
+
+The PC's saved queues, the ones on its Queues page, are shared with the phone when its `welcome` lists the `queues` feature. A video's place is its position in the
+saved queue (from 0), so a video queued twice has two places; videos the library no longer has keep their places but
+are never listed.
+
+Phone → PC: `{"type":"queues","request":<n>}`. PC → phone:
+`{"type":"queues","request":<n>,"queues":[{"id":"…","name":"Evening","count":12,"upNext":3,"active":true,"artwork":"<token>"}]}`.
+`count` is the videos the library has; `upNext` is the place Play continues from, as on the PC's Queues page (the
+queue's place when it is the PC's active one, otherwise its first unwatched video), or null; `active` marks the queue
+the PC's player uses.
+
+`browse` with `"queue":"<id>"` answers a `page` of that queue's videos in order, and with `"episodesOf":"<entry id>"`
+the show's episodes, in the order its Previous and Next follow. Their entries are the usual ones plus `"index"`, the
+place (for `episodesOf`, the position in the list). A queue that is gone is an `error` with code `browse`.
+
+`watch` and `play` take `"queue":"<id>","queueIndex":<place>`. The video plays as part of that queue: for `watch`, the
+answer's `previous`, `next` and `first` are the queue's playable videos around the place (each with a `queueIndex`),
+and `"queue":{"id":"…","name":"…","index":<place>}` echoes it. A place that no longer holds the video falls back to the
+video's first place, and a queue that doesn't have it to the show's episodes. On the PC, `play` makes the queue its
+player's, as playing it there does; with BlackPearl closed, the phone host saves it so BlackPearl opens on it.
+
+The `state` carries `"queue":{"id":"…","name":"…","index":<place>}` while the PC plays a video from a saved queue (not
+in a room), or null.
 
 ### The media channel, `media-v1`
 
@@ -276,6 +330,38 @@ little-endian header:
 A read that can't be answered gets a text `{"type":"read-error","id":<u32>,"code":"busy|gone|invalid|failed","message":"…"}`.
 `busy` means not ready yet (a piece still converting): ask again shortly. The PC queues at most 64 reads per phone and
 answers `busy` past that.
+
+## Sound on the phone
+
+A PC whose welcome lists `sound` plays the sound of what it plays on the phone instead, while its picture stays on the
+PC: headphones on the couch. The PC goes quiet (as muted, without changing its own mute) while any phone has the sound,
+and its Mute button, M or a phone's `mute` command brings the sound back to the PC.
+
+Phone → PC: `{"type":"listen","request":<n>,"on":true}` (or `false` to give the sound back). The PC answers
+`{"type":"listen","request":<n>,"on":true}`, or an `error` with the `request`: `in-room` (not while the PC is in a room).
+It then sends, unasked, what to play whenever that changes (another video, another audio track, nothing playing):
+
+```json
+{"type":"sound","on":true,"stream":{"streamId":"<32 hex>","source":"<16 hex>","segments":708,"segmentMs":4000,"durationMs":2830000},"why":null}
+```
+
+`stream` is the sound of the PC's current video in its current audio track, as AAC in MPEG-TS pieces of `segmentMs`,
+read on `media-v1` as `stream/<streamId>/<piece>` like a conversion, and on the video's own clock (piece 0 starts at
+0:00). It is null while there is nothing to play, with `why` saying why when it isn't simply that nothing plays
+(`"The PC's audio is turned off for this video."`, `"This video has no sound."`). `{"type":"sound","on":false,"why":"…"}` means the PC took the sound
+back (its Mute, or it couldn't convert the sound); the phone stops and says why.
+
+The phone follows the picture by asking where the player is, about once a second:
+`{"type":"clock","request":<n>}` → `{"type":"clock","request":<n>,"source":"<16 hex or null>","positionMs":1122340,"playing":true}`.
+The PC answers at once from the thread that received it, with the position of the picture on screen (libVLC's
+position less the 60 ms it runs ahead of its output), so the phone can take half the round trip as the answer's time on
+the way. `source` names the video, as `stream.source` does: an answer about another video means its sound is on the way.
+The phone plays a few percent faster or slower to close a small gap and seeks for one over 200 ms; its user can move
+the sound later or earlier for headphones that take their own time.
+
+A phone that stops asking for 10 seconds (its link dropped included) is taken to be gone, and the PC plays its sound
+again. A phone that comes back asks with `listen` again. Joining or hosting a room gives the sound back to the PC
+(`{"type":"sound","on":false,"why":"Sound on the phone isn't available in a room."}`).
 
 ## While BlackPearl is closed
 

@@ -123,7 +123,8 @@ public sealed class StreamConverter : IDisposable
     {
         this.ffmpeg = ffmpeg; this.input = input; Stream = stream; this.store = store;
         var known = Ffmpeg.Encoders[Volatile.Read(ref preferredEncoder)..];
-        encoders = hevcEncoder is null ? known : [hevcEncoder, .. known];
+        // Sound alone needs no picture encoder, so there is nothing else to try when it fails.
+        encoders = input.Sound ? ["aac"] : hevcEncoder is null ? known : [hevcEncoder, .. known];
     }
 
     private sealed class Run(int start)
@@ -317,7 +318,7 @@ public sealed class StreamConverter : IDisposable
             if (!encoderWorked && current.Produced == 0 && encoder + 1 < encoders.Length) { encoder++; Start(current.Start); return; }
             var attempts = retries[current.Next] = retries.GetValueOrDefault(current.Next) + 1;
             if (encoderWorked && attempts <= 2) { Start(current.Next); return; }
-            Fail(encoderWorked ? "The video could not be converted past this point." : "This PC has no video encoder that can convert the video.");
+            Fail(encoderWorked ? "The video could not be converted past this point." : input.Sound ? "The PC couldn't read the sound of this video." : "This PC has no video encoder that can convert the video.");
         }
     }
 

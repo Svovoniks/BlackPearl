@@ -41,6 +41,35 @@ static class PlayerLayoutChecks
         volume.Value = 50; Check(mute.Content as string == "\uE994" && volumeText.Text == "50%", "a middle volume shows two speaker waves");
         volume.Value = 20; Check(mute.Content as string == "\uE993", "a quiet volume shows one speaker wave");
         volume.Value = 0; Check(mute.Content as string == "\uE992" && volumeText.Text == "0%", "zero volume shows a speaker without waves");
+        // A phone playing the sound: the speaker is a phone, and its level reads Phone, no wider than Muted.
+        var soundFields = BindingFlags.NonPublic | BindingFlags.Instance;
+        typeof(MainWindow).GetField("phoneSoundMuted", soundFields)!.SetValue(window, true);
+        typeof(MainWindow).GetField("phoneSoundPhone", soundFields)!.SetValue(window, "Pixel 8");
+        Invoke(window, "RefreshVolumeIndicator");
+        volumeText.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var phoneWidth = volumeText.DesiredSize.Width;
+        Check(mute.Content as string == "\uE8EA" && volumeText.Text == "Phone" && mute.ToolTip is string tip && tip.Contains("Pixel 8") && tip.Contains("hear it here"),
+            "while a phone plays the sound, the speaker button shows a phone, names it, and says pressing it brings the sound back");
+        volume.Value = 40;
+        Check(volumeText.Text == "Phone" && mute.Content as string == "\uE8EA", "changing the volume while a phone has the sound keeps the phone shown");
+        if (Environment.GetEnvironmentVariable("BLACKPEARL_RENDER_DIR") is { Length: > 0 } renderDir)
+        {
+            var group = (FrameworkElement)window.FindName("VolumeGroup");
+            group.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity)); group.Arrange(new Rect(group.DesiredSize)); group.UpdateLayout();
+            var scale = 3.0;
+            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(group.ActualWidth * scale), (int)Math.Ceiling(group.ActualHeight * scale), 96 * scale, 96 * scale, System.Windows.Media.PixelFormats.Pbgra32);
+            var plate = new System.Windows.Media.DrawingVisual();
+            using (var dc = plate.RenderOpen()) dc.DrawRectangle(new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x17, 0x18, 0x1F)), null, new Rect(0, 0, group.ActualWidth, group.ActualHeight));
+            bitmap.Render(plate); bitmap.Render(group);
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+            using var file = File.Create(Path.Combine(renderDir, "volume-phone.png")); encoder.Save(file);
+        }
+        typeof(MainWindow).GetField("phoneSoundMuted", soundFields)!.SetValue(window, false);
+        Invoke(window, "RefreshVolumeIndicator");
+        volumeText.Text = "Muted"; volumeText.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        Check(phoneWidth <= volumeText.DesiredSize.Width + 0.5, $"Phone takes no more room than Muted ({phoneWidth:0.0} against {volumeText.DesiredSize.Width:0.0} DIP)");
+        volume.Value = 0; Invoke(window, "RefreshVolumeIndicator");
+        PhoneSoundHandOver(window, mute, volumeText);
         Check(!IsDescendant(volume, (Border)window.FindName("PlaybackControls")) && !((System.Windows.Controls.Primitives.Popup)window.FindName("VolumeFlyout")).IsOpen,
             "the volume slider stays out of the bar in a closed flyout until it is needed");
         volume.Value = 100;
@@ -225,18 +254,26 @@ static class PlayerLayoutChecks
             var box = element.TransformToAncestor(bar).TransformBounds(new Rect(new Point(), element.RenderSize));
             return box.Left >= 0 && box.Right <= bar.ActualWidth + 0.5;
         }
-        foreach (var width in new[] { 320, 400, 480, 560, 700 })
+        foreach (var width in new[] { 320, 400, 480, 560, 640, 700 })
         {
             Invoke(window, "ClosePlayerMenus"); Settle(width, 360);
-            var shown = new[] { "PlayButton", "PreviousButton", "NextButton", "MuteButton", "FullscreenButton", "OverflowPill", "AudioPill", "SubtitlePill", "QueuePill", "StopButton", "LoopButton", "PictureInPictureButton", "PlaybackTime" }
+            var shown = new[] { "PlayButton", "PreviousButton", "NextButton", "MuteButton", "FullscreenButton", "OverflowPill", "AudioPill", "SubtitlePill", "QueuePill", "StopButton", "ShuffleButton", "LoopButton", "PictureInPictureButton", "PlaybackTime" }
                 .Select(name => (FrameworkElement)window.FindName(name)).Where(element => element.Visibility == Visibility.Visible).ToList();
             Check(shown.All(InBar), $"every control shown in a {width}px player bar fits inside it");
             var folded = pills.Folded.Count; var stopHidden = ((Button)window.FindName("StopButton")).Visibility != Visibility.Visible;
             var loopHidden = ((FrameworkElement)window.FindName("LoopButton")).Visibility != Visibility.Visible;
-            Check((folded > 0 || stopHidden || loopHidden) == (overflowPill.Visibility == Visibility.Visible) &&
-                overflowItems.Children.OfType<Button>().Count() == folded + (stopHidden ? 1 : 0) + (loopHidden ? 1 : 0) + (((Button)window.FindName("PictureInPictureButton")).Visibility != Visibility.Visible ? 1 : 0),
+            var shuffleHidden = ((FrameworkElement)window.FindName("ShuffleButton")).Visibility != Visibility.Visible;
+            Check((folded > 0 || stopHidden || loopHidden || shuffleHidden) == (overflowPill.Visibility == Visibility.Visible) &&
+                overflowItems.Children.OfType<Button>().Count() == folded + (stopHidden ? 1 : 0) + (loopHidden ? 1 : 0) + (shuffleHidden ? 1 : 0) + (((Button)window.FindName("PictureInPictureButton")).Visibility != Visibility.Visible ? 1 : 0),
                 $"the … pill appears only when something is folded and lists each folded control at {width}px");
             if (width == 400) Save(bar, "player-bar-narrow.png");
+            if (width == 700)
+            {
+                Save(bar, "player-bar-700.png", 2);
+                var shuffleToggle = (System.Windows.Controls.Primitives.ToggleButton)window.FindName("ShuffleButton");
+                shuffleToggle.IsChecked = true; bar.UpdateLayout(); Save(bar, "player-bar-700-shuffle.png", 2); shuffleToggle.IsChecked = false;
+            }
+            if (width == 560) { Invoke(window, "RefreshOverflowMenu"); Save(bar, "player-bar-560.png", 2); }
         }
         Settle(320, 360);
         Check(pills.Folded.Count >= 2 && ((System.Windows.Controls.Primitives.Popup)window.FindName("SubtitleMenu")).PlacementTarget == overflowPill,
@@ -413,6 +450,46 @@ static class PlayerLayoutChecks
         return false;
     }
     static void Invoke(object target, string name, params object[] args) => target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(target, args);
+
+    // Sound on the phone hands the PC's mute over and back: a listening phone mutes the PC without touching its own mute,
+    // the PC's Mute takes the sound back (and says so once), and a room gives it back too, so the PC is never left quiet.
+    static void PhoneSoundHandOver(MainWindow window, Button mute, TextBlock volumeText)
+    {
+        var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+        T Get<T>(string name) => (T)typeof(MainWindow).GetField(name, flags)!.GetValue(window)!;
+        var listeners = typeof(MainWindow).GetField("phoneListeners", flags)!.GetValue(window)!;
+        var listenerType = typeof(MainWindow).GetNestedType("PhoneListener", BindingFlags.NonPublic)!;
+        var status = (TextBlock)window.FindName("StatusText");
+        var player = typeof(MainWindow).GetField("player", flags)!.GetValue(window) as LibVLCSharp.Shared.MediaPlayer;
+        void Listen(string id)
+        {
+            var session = (BlackPearl.Core.PhoneRemoteSession)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(BlackPearl.Core.PhoneRemoteSession));
+            typeof(BlackPearl.Core.PhoneRemoteSession).GetProperty("PhoneId")!.SetValue(session, id);
+            var listener = Activator.CreateInstance(listenerType, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, [session, "Pixel 8"], null)!;
+            listeners.GetType().GetMethod("TryAdd")!.Invoke(listeners, [id, listener]);
+            Invoke(window, "ApplyPhoneSoundMute");
+        }
+        bool Empty() => (bool)listeners.GetType().GetProperty("IsEmpty")!.GetValue(listeners)!;
+
+        player?.SetPause(true);
+        if (player is not null) player.Mute = false;
+        Listen("phone-a");
+        Check(Get<bool>("phoneSoundMuted") && mute.Content as string == "" && (player is null || player.Mute),
+            "a phone taking the sound mutes the PC and shows the phone on the speaker button");
+        Invoke(window, "MutePlayback", window, new RoutedEventArgs());
+        Check(Empty() && !Get<bool>("phoneSoundMuted") && mute.Content as string != "" && (player is null || !player.Mute),
+            "the PC's Mute takes the sound back from the phone and unmutes the PC");
+        Check(status.Text == "The sound is back on the PC.", $"taking the sound back says so once (\"{status.Text}\")");
+
+        Listen("phone-b");
+        var room = typeof(MainWindow).GetField("room", flags)!;
+        room.SetValue(window, System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(room.FieldType));
+        try { Invoke(window, "SyncPhoneSound"); }
+        finally { room.SetValue(window, null); }
+        Check(Empty() && !Get<bool>("phoneSoundMuted") && (player is null || !player.Mute),
+            "joining a room gives the sound back to the PC rather than leaving it muted");
+        Check(status.Text == "Sound on the phone isn't available in a room. The sound is back on the PC.", $"and says why (\"{status.Text}\")");
+    }
     static void Check(bool condition, string message) { if (!condition) throw new Exception("FAIL: " + message); Console.WriteLine("PASS: " + message); }
     static void Save(FrameworkElement root, string name, double zoom = 1)
     {

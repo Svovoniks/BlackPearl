@@ -155,6 +155,36 @@ static class Program
             };
             closeWindow.Show(); app.Run(); return;
         }
+        if (args.FirstOrDefault() == "--shuffle")
+        {
+            // Shuffle on its own, without the whole suite.
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var shuffleWindow = new MainWindow { Left = -20000, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual };
+            shuffleWindow.Loaded += async (_, _) =>
+            {
+                var count = 0;
+                void Pass(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }
+                try { await ShuffleChecks.Run(shuffleWindow, Pass); Console.WriteLine($"{count} shuffle checks passed."); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { if (shuffleWindow.IsLoaded) shuffleWindow.Close(); app.Shutdown(); }
+            };
+            shuffleWindow.Show(); app.Run(); return;
+        }
+        if (args.FirstOrDefault() == "--phone-takeover")
+        {
+            // A phone taking over the video playing here, without the whole suite.
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var takeOverWindow = new MainWindow { Left = -20000, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual };
+            takeOverWindow.Loaded += async (_, _) =>
+            {
+                var count = 0;
+                void Pass(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }
+                try { await PhoneTakeOverChecks.Run(takeOverWindow, Pass); Console.WriteLine($"{count} phone takeover checks passed."); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { if (takeOverWindow.IsLoaded) takeOverWindow.Close(); app.Shutdown(); }
+            };
+            takeOverWindow.Show(); app.Run(); return;
+        }
         if (args.FirstOrDefault() == "--guest-recovery")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -419,10 +449,12 @@ static class Program
                 await EpisodeEndChecks.Run(window, Check);
                 await MusicPlaybackChecks.Run(window, Check);
                 await LoopChecks.Run(window, Check);
+                await ShuffleChecks.Run(window, Check);
                 await OpenFileChecks.Run(window, Check);
                 RenameChecks.Run(Check);
                 await PictureInPictureChecks.Run(window, Check);
                 await EndedSeekChecks.Run(window, Check);
+                await PhoneTakeOverChecks.Run(window, Check);
                 await LocalAviAudioChecks.Run(window, Check);
                 await CheckBackNavigation(window, Check);
                 PlayerInteractionChecks.Run(window, Check);

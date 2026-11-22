@@ -66,7 +66,8 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
     // 1920x800 and 1920x1034 are 1080p films.
     public int ClassHeight => Math.Max(Height, (Width * 9 + 8) / 16);
 
-    public static VideoProbe? Parse(string output)
+    // A file with no picture (music) is described only when sound is all that is wanted: its height is 0.
+    public static VideoProbe? Parse(string output, bool sound = false)
     {
         long duration = 0; double start = 0; int width = 0, height = 0, audio = 0; var hdr = false;
         var subtitles = new List<ProbedSubtitle>(); var fonts = new List<int>();
@@ -93,14 +94,14 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
                 case "Attachment" when Fonts.Contains(codec): fonts.Add(index); break;
             }
         }
-        return duration > 0 && height > 0 ? new(duration, start, width, height, hdr, audio, [.. subtitles], [.. fonts]) : null;
+        return duration > 0 && (height > 0 || sound && audio > 0) ? new(duration, start, width, height, hdr, audio, [.. subtitles], [.. fonts]) : null;
     }
 
-    public static async Task<VideoProbe?> ReadAsync(string ffmpeg, string path, CancellationToken ct)
+    public static async Task<VideoProbe?> ReadAsync(string ffmpeg, string path, CancellationToken ct, bool sound = false)
     {
         // Without an output ffmpeg describes the input and exits with an error; the description is what is wanted.
         var (_, text) = await Ffmpeg.RunAsync(ffmpeg, ["-hide_banner", "-nostdin", "-i", path], null, TimeSpan.FromSeconds(30), ct);
-        return Parse(text);
+        return Parse(text, sound);
     }
 }
 public sealed record ProbedSubtitle(string Codec, bool Image);
@@ -108,8 +109,9 @@ public sealed record ProbedSubtitle(string Codec, bool Image);
 // Which subtitles the converted picture carries: a subtitle track of the video, or a subtitle file beside it.
 public sealed record BurnedSubtitle(int? Track = null, string? File = null);
 
-// The video as ffmpeg is to read it for one converted stream.
-public sealed record StreamInput(string Path, VideoProbe Probe, int? Audio, StreamSubtitle? Subtitle);
+// The video as ffmpeg is to read it for one converted stream. A Sound stream has no picture: only the Audio track, for a
+// phone that plays the PC's sound (PHONE-REMOTE.md, "Sound on the phone").
+public sealed record StreamInput(string Path, VideoProbe Probe, int? Audio, StreamSubtitle? Subtitle, bool Sound = false);
 // Text subtitles are drawn from File with the fonts in FontsDirectory; picture subtitles straight from the video's track.
 public sealed record StreamSubtitle(string? File, string? FontsDirectory, int? ImageTrack);
 
@@ -302,6 +304,15 @@ public static class Ffmpeg
         var arguments = new List<string> { "-hide_banner", "-nostdin", "-loglevel", "error" };
         // ffmpeg counts a seek from where the video starts.
         if (firstSegment > 0) arguments.AddRange(["-ss", Number(firstSegment * seconds)]);
+        // Sound alone: its pieces are cut at the first audio frame of each, all of which can start one. ffmpeg gives the
+        // only stream the video's usual identifier and marks every audio frame as one to start from.
+        if (input.Sound)
+        {
+            arguments.AddRange(["-copyts", "-i", input.Path, "-map", "0:a:" + (input.Audio ?? 0).ToString(CultureInfo.InvariantCulture), "-vn", "-sn", "-dn",
+                "-c:a", "aac", "-b:a", StreamQuality.AudioKbps.ToString(CultureInfo.InvariantCulture) + "k", "-ac", "2", "-ar", "48000",
+                "-output_ts_offset", TimestampOffsetSeconds.ToString(CultureInfo.InvariantCulture), "-muxdelay", "0", "-muxpreload", "0", "-mpegts_flags", "+resend_headers", "-flush_packets", "1", "-f", "mpegts", "pipe:1"]);
+            return arguments;
+        }
         arguments.AddRange(["-copyts", "-i", input.Path, "-filter_complex", FilterGraph(input, stream.Height), "-map", "[out]"]);
         if (input.Audio is { } audio) arguments.AddRange(["-map", "0:a:" + audio.ToString(CultureInfo.InvariantCulture), "-c:a", "aac", "-b:a", StreamQuality.AudioKbps.ToString(CultureInfo.InvariantCulture) + "k", "-ac", "2", "-ar", "48000"]);
         arguments.AddRange(["-sn", "-dn"]);

@@ -60,8 +60,8 @@ static class PhoneHostFixture
             if (link is null) return;
             link.Send(new { type = "hello", protocol = 1, app = "smoke", device = "Smoke phone" });
             var welcome = await link.Next("welcome", 10000);
-            check(welcome is { } w && w.GetProperty("features").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["library", "watch"]) && !w.GetProperty("canStart").GetBoolean(),
-                "the phone host welcomes the phone with the library and watching, and the PC's settings");
+            check(welcome is { } w && w.GetProperty("features").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["library", "watch", "queues"]) && !w.GetProperty("canStart").GetBoolean(),
+                "the phone host welcomes the phone with the library, watching and queues, and the PC's settings");
             check(await link.Next("state", 5000) is { } state && !state.GetProperty("media").GetBoolean(), "the phone host says nothing is playing");
             link.Send(new { type = "command", action = "toggle" });
             check(await link.Next("error", 5000) is { } nothing && nothing.GetProperty("code").GetString() == "nothing-playing" &&
@@ -86,6 +86,11 @@ static class PhoneHostFixture
             var saved = false;
             for (var waited = 0; waited < 5000 && !saved; waited += 100) { saved = store.Setting("position:" + id) == "754000" && store.Setting("played:" + id) is not null; if (!saved) await Task.Delay(100); }
             check(saved, "progress made on the phone while BlackPearl is closed is saved to the library");
+            // Next in the credits: the phone leaves the video in its last tenth.
+            link.Send(new { type = "progress", id, positionMs = 5900000, durationMs = 6300000, final = true });
+            var finished = false;
+            for (var waited = 0; waited < 5000 && !finished; waited += 100) { finished = store.Setting("watched:" + id) == "true" && store.Setting("position:" + id) == "0"; if (!finished) await Task.Delay(100); }
+            check(finished, "a video the phone leaves in its credits is marked watched");
 
             link.Send(new { type = "play", request = 3, id, positionMs = 1000 });
             check(await link.Next("error", 5000) is { } refusedPlay && refusedPlay.GetProperty("code").GetString() == "not-allowed",

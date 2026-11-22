@@ -148,9 +148,8 @@ public partial class MainWindow
         prefetchNext = null;
         if (playingItem is { } item && (room is null || room.Identity?.Host == true))
         {
-            var index = PlayingFromQueue(item) ? QueuePlayback.FindNext(queue, queuePosition, 1, QueueItemAvailable) : -1;
-            var next = index >= 0 ? queue[index] : EpisodePlayback.Next(items, items.FirstOrDefault(entry => entry.Id == item.Id) ?? item, false,
-                entry => File.Exists(entry.Path), PreferredVersion(item));
+            var index = PlayingFromQueue(item) ? QueueStepIndex(1, QueueItemAvailable) : -1;
+            var next = index >= 0 ? queue[index] : FollowingEpisode(items.FirstOrDefault(entry => entry.Id == item.Id) ?? item, entry => File.Exists(entry.Path));
             if (next is { IsMusic: false } && next.Path != item.Path && File.Exists(next.Path)) prefetchNext = next.Path;
         }
         StartPrefetch();
