@@ -478,10 +478,15 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var store = SegmentStore.TryCreate(directory, segments);
         if (store is null) return (null, "There is no room on the PC's disk to convert the video, so the phone plays the file as it is.");
         var stream = new RoomStream(Guid.NewGuid().ToString("N"), item.Id, plan.Quality.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
-        var audio = audioWanted is >= 0 && audioWanted < probe.Audio.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(probe.Audio, AudioLanguages());
+        // Languages as the PC's player knows them: a Matroska track ffmpeg calls English without the file saying so is
+        // unknown, or the language identified while it played here. The header is a few kilobytes off a drive the probe woke.
+        var container = await Task.Run(() => SubtitleText.Tracks(item.Path));
+        var fileKey = LibraryStore.TrackLanguageFile(item.Path);
+        var tracks = ProbedAudio.WithContainerLanguages(probe.Audio, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, true, id)));
+        var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(tracks, AudioLanguages());
         var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, audio, null), stream, store);
-        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = plan.VideoKbps, segments, audio, audioTracks = probe.Audio.Length });
-        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = probe.Audio, Audio = audio }, null);
+        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = plan.VideoKbps, segments, audio, audioTracks = tracks.Length });
+        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = tracks, Audio = audio }, null);
     }
 
     // The video's description, or null when the converter can't read it: it failed, took longer than its own 30 seconds

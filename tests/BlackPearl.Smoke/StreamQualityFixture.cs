@@ -25,6 +25,7 @@ static class StreamQualityFixture
         Probing(check);
         var ffmpeg = FindFfmpeg();
         check(ffmpeg is not null, "the converter is available to the checks");
+        await UntaggedAudio(ffmpeg!, directory, check);
         // Characters that mean something to ffmpeg's filter syntax, in the path the subtitles are drawn from.
         directory = Path.Combine(directory, "it's [odd], dir; x=1"); Directory.CreateDirectory(directory);
         var video = Path.Combine(directory, "sample.mkv");
@@ -288,6 +289,26 @@ static class StreamQualityFixture
             StreamQuality.For(360).Select(q => q.Id).SequenceEqual(["480p"]) && StreamQuality.For(2160).Length == 3 && StreamQuality.For(int.MaxValue).Length == 3, "a video is offered the qualities it is large enough for");
     }
 
+    // A Matroska track that names no language is English to ffmpeg, as to players. A converted stream takes it as unknown,
+    // or in the language identified while it played, as the PC's player does.
+    private static async Task UntaggedAudio(string ffmpeg, string directory, Action<bool, string> check)
+    {
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "untagged-audio.mkv");
+        MatroskaFixture.Write(path, [new(new short[16000 * 3], 16000), new(new short[16000 * 3], 16000, "jpn", "Commentary"), new(new short[16000 * 3], 16000, "und")], []);
+        var probe = await VideoProbe.ReadAsync(ffmpeg, path, default, sound: true);
+        check(probe?.Audio is [{ Language: "eng" }, { Language: "jpn", Title: "Commentary" }, { Language: null }],
+            "ffmpeg calls a Matroska audio track without a language English: " + string.Join(" | ", probe?.Audio.Select(a => a.ToString()) ?? []));
+        var container = SubtitleText.Tracks(path);
+        var lined = ProbedAudio.WithContainerLanguages(probe!.Audio, container, _ => null);
+        check(lined is [{ Language: null }, { Language: "jpn" }, { Language: null }] && ProbedAudio.Preferred(probe.Audio, ["en", "ja"]) == 0 && ProbedAudio.Preferred(lined, ["en", "ja"]) == 1,
+            "lined up with the file's own tracks, an untagged one has no language, so English doesn't pick it");
+        var identified = ProbedAudio.WithContainerLanguages(probe.Audio, container, id => id == 0 ? "fr" : id == 2 ? "" : null);
+        check(identified is [{ Language: "fr" }, { Language: "jpn" }, { Language: null }] && ProbedAudio.Preferred(identified, ["fr", "ja"]) == 0,
+            "an untagged track takes the language identified while it played, by its place in the file");
+        check(ProbedAudio.WithContainerLanguages(probe.Audio, [], _ => "fr") == probe.Audio, "tracks that can't be lined up keep what ffmpeg says");
+    }
+
     private static void Probing(Action<bool, string> check)
     {
         var film = VideoProbe.Parse("""
@@ -318,13 +339,13 @@ static class StreamQualityFixture
               Stream #0:0: Video: h264 (High), yuv420p(progressive), 1920x1080, 23.98 fps (default)
               Stream #0:1(jpn): Audio: flac, 48000 Hz, stereo, s16 (default)
               Stream #0:2(eng): Audio: eac3, 48000 Hz, 5.1(side), fltp, 640 kb/s
-                  Metadata:
-                    title           : Commentary
-                    BPS             : 640000
+                Metadata:
+                  title           : Commentary
+                  BPS             : 640000
               Stream #0:3: Audio: aac (LC), 44100 Hz, 6 channels, fltp
               Stream #0:4(eng): Subtitle: ass (ssa)
-                  Metadata:
-                    title           : Signs
+                Metadata:
+                  title           : Signs
               Stream #0:5(und): Audio: opus, 48000 Hz, mono, fltp
             """);
         check(tracks?.Audio is [("jpn", null, "flac", "stereo", true), ("eng", "Commentary", "eac3", "5.1(side)", false), (null, null, "aac", "6 channels", false), (null, null, "opus", "mono", false)],

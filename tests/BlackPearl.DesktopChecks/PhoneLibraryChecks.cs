@@ -56,6 +56,7 @@ static class PhoneLibraryChecks
             new LibraryPhoneStore(store).Save([paired]);
             var dual = await DualAudioVideo(data);
             store.Save(new MediaItem("dual-audio", dual, "Dual Audio", "Movie", 2025));
+            store.Save(new MediaItem("untagged-audio", UntaggedCopy(dual), "Untagged Audio", "Movie", 2025));
             IReadOnlyList<MediaItem> items = store.All();
             var hostKey = PersistentRooms.NewKey();
 
@@ -156,6 +157,21 @@ static class PhoneLibraryChecks
         return path;
     }
 
+    // The same film with its Japanese track's language taken out (an EBML Void of the same length in its place), as
+    // muxers leave a track whose language they don't know. ffmpeg then calls it English.
+    static string UntaggedCopy(string tagged)
+    {
+        var bytes = File.ReadAllBytes(tagged);
+        byte[] language = [0x22, 0xB5, 0x9C, 0x83, (byte)'j', (byte)'p', (byte)'n'];
+        var at = bytes.AsSpan(0, Math.Min(bytes.Length, 1 << 16)).IndexOf(language);
+        Check(at > 0, "the sample film's Japanese track names its language");
+        byte[] blank = [0xEC, 0x85, 0, 0, 0, 0, 0];
+        blank.CopyTo(bytes, at);
+        var path = Path.Combine(Path.GetDirectoryName(tagged)!, "Untagged Audio (2025).mkv");
+        File.WriteAllBytes(path, bytes);
+        return path;
+    }
+
     static async Task<(int ExitCode, string Errors)> RunFfmpeg(string[] arguments)
     {
         var start = new ProcessStartInfo(Ffmpeg.Find()!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
@@ -172,11 +188,11 @@ static class PhoneLibraryChecks
     static async Task ConvertedSound(LibraryStore store, FakePhone phone, string data)
     {
         store.Setting("audioLanguages", "en");
-        async Task<(System.Text.Json.JsonElement? Answer, double? Volume)> Watch(int request, int? audio)
+        async Task<(System.Text.Json.JsonElement? Answer, double? Volume)> Watch(int request, int? audio, string id = "dual-audio")
         {
             phone.Send(audio is { } track
-                ? new { type = "watch", request, id = "dual-audio", quality = "480p", network = "away", audio = track }
-                : (object)new { type = "watch", request, id = "dual-audio", quality = "480p", network = "away" });
+                ? new { type = "watch", request, id, quality = "480p", network = "away", audio = track }
+                : (object)new { type = "watch", request, id, quality = "480p", network = "away" });
             var answer = await phone.Next("stream", 60000);
             if (answer is not { } a || a.GetProperty("kind").GetString() != "hls") return (answer, null);
             // The first piece, read as the phone reads it, and how loud its sound is.
@@ -206,6 +222,17 @@ static class PhoneLibraryChecks
         Check(picked?.GetProperty("audioTrack").GetInt32() == 0 && quiet < -80, $"the phone picks another audio track of a conversion (mean {quiet} dB)");
         var (outOfRange, _) = await Watch(32, 7);
         Check(outOfRange?.GetProperty("audioTrack").GetInt32() == 1, "a track the file doesn't have falls back to the preferred one");
+        // A track the file names no language for is English to ffmpeg; the PC's player knows better, and so does this.
+        string? Language(System.Text.Json.JsonElement? answer, int index) => answer?.GetProperty("audioTracks")[index].GetProperty("language").GetString();
+        var (untagged, untaggedLoud) = await Watch(34, null, "untagged-audio");
+        Check(untagged?.GetProperty("audioTrack").GetInt32() == 1 && Language(untagged, 0) is null && Language(untagged, 1) == "eng" && untaggedLoud > -40,
+            $"a track without a language isn't taken for English (mean {untaggedLoud} dB)");
+        var fileKey = LibraryStore.TrackLanguageFile(Path.Combine(data, "Untagged Audio (2025).mkv"))!;
+        store.Setting(LibraryStore.TrackLanguageKey(fileKey, true, 1), "ja");
+        store.Setting("audioLanguages", "ja, en");
+        var (identified, _) = await Watch(35, null, "untagged-audio");
+        Check(identified?.GetProperty("audioTrack").GetInt32() == 0 && Language(identified, 0) == "ja",
+            "a track without a language has the one identified while it played on the PC, and Settings › Playback picks by it");
         store.Setting("audioLanguages", "");
         var (unranked, _) = await Watch(33, null);
         Check(unranked?.GetProperty("audioTrack").GetInt32() == 0, "with no preference that matches, a conversion starts with the file's default track");

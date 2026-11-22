@@ -141,6 +141,18 @@ public sealed record ProbedAudio(string? Language, string? Title, string Codec, 
         for (var i = 0; i < tracks.Count; i++) if (tracks[i].Default) return i;
         return 0;
     }
+
+    // ffmpeg reports a Matroska track that names no language as English, as players do (ContainerTrack.Untagged). Lined
+    // up with the container's own list (Matroska and MP4: SubtitleText.Tracks), such a track has no language, or the one
+    // identified while it played: detected takes the player's track id, its position in the file. Tracks that can't be
+    // lined up, as in other containers, keep what ffmpeg says.
+    public static ProbedAudio[] WithContainerLanguages(ProbedAudio[] audio, IReadOnlyList<ContainerTrack> container, Func<int, string?> detected)
+    {
+        var positions = container.Select((track, id) => (track, id)).Where(entry => entry.track.Type == ContainerTrackType.Audio).ToArray();
+        if (positions.Length != audio.Length) return audio;
+        return audio.Select((track, n) => !positions[n].track.Untagged ? track :
+            track with { Language = detected(positions[n].id) is { Length: > 0 } found ? found : null }).ToArray();
+    }
 }
 
 // Which subtitles the converted picture carries: a subtitle track of the video, or a subtitle file beside it.
