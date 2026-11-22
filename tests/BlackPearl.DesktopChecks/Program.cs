@@ -16,7 +16,7 @@ static class Program
         if (HiddenDesktop.Relaunch(out var hiddenExitCode)) { Environment.ExitCode = hiddenExitCode; return; }
         // Voice runs on simulated devices so the checks never open the microphone; --voice-devices checks the real ones,
         // and --voice-live watches the processing on a chosen one.
-        if (args.FirstOrDefault() is not ("--voice-devices" or "--voice-live")) Environment.SetEnvironmentVariable("BLACKPEARL_SIMULATED_AUDIO", "1");
+        if (args.FirstOrDefault() is not ("--voice-devices" or "--voice-live" or "--voice-echo")) Environment.SetEnvironmentVariable("BLACKPEARL_SIMULATED_AUDIO", "1");
         // Settings > Plugins checks an empty local catalog, so opening the tab never reaches GitHub.
         var emptyCatalog = Path.Combine(Path.GetTempPath(), "blackpearl-empty-catalog"); Directory.CreateDirectory(emptyCatalog);
         Environment.SetEnvironmentVariable("BLACKPEARL_PLUGIN_CATALOG", emptyCatalog);
@@ -249,6 +249,7 @@ static class Program
         }
         if (args.FirstOrDefault() == "--voice-probe") { VoiceProbe.Run(args[1], args.ElementAtOrDefault(2)); return; }
         if (args.FirstOrDefault() == "--voice-render") { VoiceProbe.Render(args[1], args[2], args.ElementAtOrDefault(3)); return; }
+        if (args.FirstOrDefault() == "--voice-echo") { Task.Run(() => VoiceProbe.Echo(args[1], args[2], args[3], args[4], args.ElementAtOrDefault(5))).GetAwaiter().GetResult(); return; }
         if (args.FirstOrDefault() == "--voice-compare") { VoiceProbe.Compare(args[1], args.ElementAtOrDefault(2)); return; }
         if (args.FirstOrDefault() == "--voice-live") { Task.Run(() => VoiceProbe.Live(args[1], int.Parse(args[2]), args.ElementAtOrDefault(3), args.ElementAtOrDefault(4), args.ElementAtOrDefault(5))).GetAwaiter().GetResult(); return; }
         if (args.FirstOrDefault() == "--voice-processing")

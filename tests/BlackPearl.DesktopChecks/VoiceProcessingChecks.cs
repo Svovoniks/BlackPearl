@@ -236,6 +236,24 @@ static class VoiceProcessingChecks
         var limited = new List<double>();
         for (var i = 0; i < 600; i++) { var louder = Louder(i); eased.Apply(louder); holding.Apply(louder); eased.Ease(holding.GainDb); limited.Add(holding.GainDb); }
         check(limited.Take(50).Min() < -4 && limited.Skip(500).Min() > -1.5, $"a voice that outgrows its gain is not left to the limiter (limited {limited.Take(50).Min():F1} dB at first, {limited.Skip(500).Min():F1} dB after five seconds, gain {eased.GainDb:F1} dB)");
+        // A level learned while WebRTC's canceller was taking some of the voice is too low. When the subtractor takes
+        // over the voice comes through whole, 6 dB louder here, and the level is learned again within a second
+        // instead of leaving the gain too high for minutes. A level that is long established stays.
+        VoiceProcessor.InputLevel.Forget();
+        var relearned = new VoiceProcessor.InputLevel(); var left = new VoiceProcessor.InputLevel();
+        float[] Whole(int block) => Enumerable.Range(0, Block).Select(i => (float)(0.006 * Math.Sin((block * Block + i) * 0.1))).ToArray();
+        for (var i = 0; i < 300; i++) { var faint = Faint(); relearned.Learn(faint, 1); relearned.Apply(faint); faint = Faint(); left.Learn(faint, 1); left.Apply(faint); }
+        var thinned = relearned.GainDb;
+        relearned.Again();
+        for (var i = 0; i < 100; i++) { var whole = Whole(i); relearned.Learn(whole, 1); relearned.Apply(whole); whole = Whole(i); left.Learn(whole, 1); left.Apply(whole); }
+        VoiceProcessor.InputLevel.Forget();
+        var established = new VoiceProcessor.InputLevel();
+        for (var i = 0; i < 1200; i++) { var faint = Faint(); established.Learn(faint, 1); established.Apply(faint); }
+        var settled = established.GainDb;
+        established.Again();
+        for (var i = 0; i < 100; i++) { var whole = Whole(i); established.Learn(whole, 1); established.Apply(whole); }
+        check(Math.Abs(thinned - relearned.GainDb - 6) < 1 && Math.Abs(left.GainDb - thinned) < 0.5 && Math.Abs(established.GainDb - settled) < 0.5,
+            $"a level learned from a voice the canceller had thinned is learned again once the voice comes through whole ({thinned:F1} to {relearned.GainDb:F1} dB; {left.GainDb:F1} dB without; {established.GainDb:F1} dB when long established)");
         VoiceProcessor.InputLevel.Forget();
         for (var i = 0; i < 200; i++) { var faint = Faint(); level.Learn(faint, 1); level.Apply(faint); }
         // The next time voice opens the level is already known. Another microphone, 20 dB louder, is then learned
@@ -310,6 +328,15 @@ static class VoiceProcessingChecks
         var second = queue.Read(handed, 0) && handed[0] == 2 * Block;
         var empty = !queue.Read(handed, 0) && handed.All(v => v == 0);
         check(!early && first && second && empty, "the speakers' sound reaches the subtractor in order, and silence when there is none");
+        // A delivery that comes a moment late does not move what follows against the microphone: the block that was
+        // missed is skipped, not handed over one block late from then on.
+        queue.Write(Numbered(3 * Block)); queue.Write(Numbered(4 * Block));
+        var inPlace = queue.Read(handed, 0) && handed[0] == 4 * Block;
+        // Running short again and again means the place is wrong: it is found afresh, with a little in hand.
+        var again = !queue.Read(handed, 0) && !queue.Read(handed, 0);
+        queue.Write(Numbered(5 * Block)); var waits = !queue.Read(handed, 0);
+        queue.Write(Numbered(6 * Block)); var afresh = queue.Read(handed, 0) && handed[0] == 5 * Block;
+        check(inPlace && again && waits && afresh, $"one late delivery of the speakers' sound does not move it against the microphone ({inPlace}, {again}, {waits}, {afresh})");
 
         // The microphone's buffers are handed to a thread of their own: however long one takes to process, handing the
         // next over takes no time, so Windows never has to drop audio, and they are still processed in order.

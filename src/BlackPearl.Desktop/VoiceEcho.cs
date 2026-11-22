@@ -223,11 +223,16 @@ internal sealed class EchoSubtractor
 // microphone gets silence until there is enough in hand again.
 internal sealed class SpeakerQueue
 {
-    private const int Block = VoiceProcessor.BlockSamples, InHand = 2 * Block, TooMuch = 12 * Block;
+    private const int Block = VoiceProcessor.BlockSamples, InHand = 2 * Block, TooMuch = 12 * Block, Often = 100;
     private readonly float[] samples = new float[VoicePacket.SampleRate * 2];
     private readonly object gate = new();
     private long written, read;
     private bool flowing;
+    private int shortfall;
+    // For the probe: times the speakers' sound was lined up with the microphone afresh, times there was none to give,
+    // and the least and most that was waiting.
+    internal int Anchored, Starved;
+    internal long Least = long.MaxValue, Most = long.MinValue;
     public void Write(ReadOnlySpan<float> block)
     {
         lock (gate)
@@ -236,15 +241,24 @@ internal sealed class SpeakerQueue
         }
     }
     // The next block, `late` samples older than the newest that could be given. False, and silence, when there is
-    // not enough to give.
+    // not enough to give. Windows now and then delivers the speakers' sound a moment late: the place is kept then,
+    // so what follows still lines up with the microphone as it did, and the subtractor has nothing to learn again.
+    // Running short three times within a second or two means the place itself is wrong, and it is found afresh.
     public bool Read(float[] block, int late)
     {
         lock (gate)
         {
             var waiting = written - read - late;
-            if (!flowing) { if (waiting < InHand) { Array.Clear(block); return false; } flowing = true; read = written - late - InHand; }
-            else if (waiting > TooMuch) read = written - late - InHand;
-            else if (waiting < Block) { flowing = false; Array.Clear(block); return false; }
+            if (flowing) { Least = Math.Min(Least, waiting); Most = Math.Max(Most, waiting); }
+            if (!flowing) { if (waiting < InHand) { Array.Clear(block); return false; } flowing = true; read = written - late - InHand; Anchored++; }
+            else if (waiting > TooMuch) { read = written - late - InHand; Anchored++; }
+            else if (waiting < Block)
+            {
+                Starved++; shortfall += Often; Array.Clear(block);
+                if (shortfall > 2 * Often) { flowing = false; shortfall = 0; read = written - late; } else read += Block;
+                return false;
+            }
+            shortfall = Math.Max(0, shortfall - 1);
             if (read < 0 || written - read > samples.Length) { flowing = false; Array.Clear(block); return false; }
             for (var i = 0; i < Block; i++) block[i] = samples[(read + i) % samples.Length];
             read += Block;

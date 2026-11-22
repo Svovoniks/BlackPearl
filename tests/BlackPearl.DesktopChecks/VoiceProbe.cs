@@ -156,6 +156,76 @@ static class VoiceProbe
         short[] back; lock (heardBack) back = heardBack.ToArray();
         Report("Through the real microphone path", played, back);
     }
+    // A real echo that nobody hears, for the echo handling on real devices:
+    // --voice-echo <part of a cable's microphone name> <part of its output name> <movie recording> <voice recording> [<file for the result>].
+    // The movie is played into the cable's output, which stands for the speakers: it comes back on the cable's
+    // microphone as echo, with the timing of two real devices, while that output's own sound is taken as what the
+    // speakers play. The voice is added to the microphone on the way in. Prints every ten seconds how the echo is
+    // being handled, then how the voice came through. It refuses when another program has that microphone open.
+    public static async Task Echo(string microphone, string speakers, string movie, string voice, string? result)
+    {
+        var (inputs, outputs) = await VoiceAudio.ListDevicesAsync();
+        var device = inputs.FirstOrDefault(d => d.Name.Contains(microphone, StringComparison.OrdinalIgnoreCase));
+        var output = outputs.FirstOrDefault(d => d.Name.Contains(speakers, StringComparison.OrdinalIgnoreCase));
+        if (device is null || output is null) { Console.WriteLine("The cable's microphone or output was not found."); Environment.ExitCode = 1; return; }
+        using (var enumerator = new NAudio.CoreAudioApi.MMDeviceEnumerator())
+        using (var endpoint = enumerator.GetDevice(device.Id))
+        {
+            var sessions = endpoint.AudioSessionManager.Sessions;
+            for (var i = 0; i < sessions.Count; i++)
+                if (sessions[i].State == NAudio.CoreAudioApi.Interfaces.AudioSessionState.AudioSessionStateActive && sessions[i].GetProcessID != Environment.ProcessId)
+                { Console.WriteLine("Not playing: another program has this microphone open and would pass the recording on."); Environment.ExitCode = 1; return; }
+        }
+        if (Read(movie) is not { } film || Read(voice) is not { } talk) { Console.WriteLine("A recording could not be read."); Environment.ExitCode = 1; return; }
+        var capture = new VoiceCapture { Transmitting = true };
+        var sent = 0; capture.Frame += _ => Interlocked.Increment(ref sent);
+        VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
+        long at = 0; var heardBack = new List<short>();
+        // A cable hands the sound over sooner than Windows reports it as played, which no speaker and room can do, and
+        // as loud as it was played. VOICE_PROBE_LATE_MS holds the echo back and VOICE_PROBE_ECHO_DB turns it down, to
+        // make it arrive as it would from speakers.
+        var late = new short[Math.Max(0, int.TryParse(Environment.GetEnvironmentVariable("VOICE_PROBE_LATE_MS"), out var ms) ? ms : 0) * Rate / 1000];
+        var quieter = Math.Pow(10, (double.TryParse(Environment.GetEnvironmentVariable("VOICE_PROBE_ECHO_DB"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var db) ? db : 0) / 20);
+        long held = 0;
+        await using var audio = new VoiceAudio(capture, null, new(device.Id, null, VoiceAudio.Processing.Standard))
+        {
+            ReferenceOutput = output.Id,
+            AddToMicrophone = (samples, count) =>
+            {
+                for (var i = 0; i < count; i++, held++)
+                {
+                    var echo = (short)Math.Round(samples[i] * quieter);
+                    if (late.Length == 0) { samples[i] = echo; continue; }
+                    var slot = (int)(held % late.Length);
+                    samples[i] = late[slot]; late[slot] = echo;
+                }
+                for (var i = 0; i < count && at + i < talk.Length; i++) samples[i] = (short)Math.Clamp(samples[i] + talk[at + i], short.MinValue, short.MaxValue);
+                at += count;
+            }
+        };
+        await audio.StartAsync();
+        if (!audio.MicrophoneReady || audio.Processor is not { } processor) { Console.WriteLine($"The microphone did not open: {audio.Problem}"); Environment.ExitCode = 1; return; }
+        lock (heardBack) processor.Processed = block => { lock (heardBack) heardBack.AddRange(block); };
+        // VOICE_PROBE_NO_SUBTRACTOR=1 leaves the echo to WebRTC's canceller, for comparison.
+        processor.NeverSubtract = Environment.GetEnvironmentVariable("VOICE_PROBE_NO_SUBTRACTOR") == "1";
+        var playing = VoiceAudio.PlayAsync(output.Id, film.Select(s => s / 32768f).ToArray(), CancellationToken.None);
+        Console.WriteLine($"Playing {Path.GetFileName(movie)} into {output.Name}, heard on {audio.InputName}; adding {Path.GetFileName(voice)} to the microphone");
+        Console.WriteLine("second  echo found  handled  subtracted  working dB  echo dB  voice dB  delay ms  similarity  gain dB  audio lost  speakers dB  speaker blocks  out dB");
+        var seconds = Math.Min(film.Length, talk.Length) / Rate;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        for (var second = 1; second <= seconds; second++)
+        {
+            float similarity = 0; double loudest = -120;
+            while (clock.Elapsed.TotalSeconds < second) { await Task.Delay(50); similarity = Math.Max(similarity, processor.EchoEvidence.Similarity); loudest = Math.Max(loudest, processor.PlayedDb); }
+            if (second % 5 != 0 && second != seconds) continue;
+            Console.WriteLine(FormattableString.Invariant($"{second,6}  {(processor.EchoPresent ? "yes" : "no"),10}  {(processor.EchoCancelled ? "yes" : "no"),7}  {(processor.EchoSubtracted ? "yes" : "no"),10}  {processor.SubtractionDb,10:F1}  {processor.EchoDb,7:F1}  {processor.SpeechDb,8:F1}  {processor.EchoEvidence.DelayMs,8}  {similarity,10:F2}  {processor.InputGainDb,7:F1}  {audio.InputGaps,10}  {loudest,11:F1}  {processor.PlayedBlocks,14}  {capture.LevelDb,6:F1}"));
+        }
+        await Task.Delay(500);
+        Console.WriteLine(FormattableString.Invariant($"Speakers lined up {processor.Speakers.Anchored} times, nothing to give {processor.Speakers.Starved} times, waiting {processor.Speakers.Least / 48.0:F0} to {processor.Speakers.Most / 48.0:F0} ms; subtractor restarted {processor.SubtractorRestarts} times; slowest buffer {audio.SlowestBufferMs:F0} ms"));
+        short[] back; lock (heardBack) back = heardBack.ToArray();
+        Report("The voice over a real echo", talk, back);
+        if (result is not null) Write(result, back);
+    }
     // The same report for a recording put through the processing directly, without audio devices, to tell what the
     // devices add: --voice-compare <recording> [Standard|Light|Off].
     public static void Compare(string recording, string? only)

@@ -42,7 +42,12 @@ internal sealed class VoiceProcessor : IDisposable
     private readonly DelayLine directDelay = new(EchoSubtractor.Delay), cancelledDelay = new(EchoSubtractor.Delay - WebRtcApm.CaptureDelay);
     private readonly float[] cancelled = new float[BlockSamples], subtracted = new float[BlockSamples], played = new float[BlockSamples], mixed = new float[BlockSamples];
     private readonly SpeakerQueue speakers = new();
+    internal SpeakerQueue Speakers => speakers;
+    internal int SubtractorRestarts => subtractor?.Restarts ?? 0;
+    // For the probe: leaves the echo to WebRTC's canceller alone, as before there was a subtractor, to compare.
+    internal bool NeverSubtract;
     private EchoSubtractor? subtractor;
+    private bool subtractedBefore;
     private int subtractorLate;
     private enum Source { Direct, Subtracted, Cancelled }
     private Source source, former;
@@ -67,6 +72,11 @@ internal sealed class VoiceProcessor : IDisposable
     // Whether the echo is being subtracted rather than suppressed, and how well the subtraction is working, in dB.
     internal bool EchoSubtracted => source == Source.Subtracted;
     internal double SubtractionDb => subtractor?.WorkingDb ?? 0;
+    // The level of the latest block the speakers played, and how many blocks have arrived, for the probe.
+    internal double PlayedDb => Volatile.Read(ref playedDb);
+    internal long PlayedBlocks => Interlocked.Read(ref playedBlocks);
+    private double playedDb = -120;
+    private long playedBlocks;
     internal double EchoDb => presence.EchoDb;
     internal double SpeechDb => level.SpeechDb;
     internal (float Similarity, int DelayMs) EchoEvidence => presence.Latest;
@@ -200,7 +210,10 @@ internal sealed class VoiceProcessor : IDisposable
         var apart = presence.EchoDb - level.SpeechDb;
         loudEcho = presence.Present && (double.IsNaN(apart) || apart > (loudEcho ? FaintEchoDb - 3 : FaintEchoDb));
         var left = apart - (subtractor?.WorkingDb ?? 0);
-        subtracting = presence.Present && subtractor is not null && !double.IsNaN(left) && left < (subtracting ? FaintEchoDb + 3 : FaintEchoDb);
+        subtracting = !NeverSubtract && presence.Present && subtractor is not null && !double.IsNaN(left) && left < (subtracting ? FaintEchoDb + 3 : FaintEchoDb);
+        // WebRTC's canceller takes some of the voice with the echo, so a level learned from it is too low, and the
+        // gain set from it too high for the voice the subtractor leaves whole.
+        if (subtracting && !subtractedBefore) { subtractedBefore = true; level.Again(); }
         var wanted = subtracting ? Source.Subtracted : loudEcho ? Source.Cancelled : Source.Direct;
         if (wanted != source && faded >= 1) { former = source; source = wanted; faded = 0; }
         var to = Pick(source);
@@ -253,6 +266,8 @@ internal sealed class VoiceProcessor : IDisposable
                 referenceFilled += count; samples = samples[count..];
                 if (referenceFilled < BlockSamples) continue;
                 referenceFilled = 0; presence.Speakers(reference); speakers.Write(reference); canceller.ProcessRender(reference);
+                double power = 0; foreach (var sample in reference) power += sample * sample;
+                Volatile.Write(ref playedDb, 10 * Math.Log10(power / BlockSamples + 1e-12)); Interlocked.Increment(ref playedBlocks);
             }
         }
     }
@@ -350,6 +365,8 @@ internal sealed class VoiceProcessor : IDisposable
         internal static void Forget() { remembered = double.NaN; rememberedMost = MaxGainDb; microphone = null; }
         // Starts over unless the level is long established; the gain stays where it is until speech is heard again.
         public void Doubt() { if (learned < AverageBlocks) { speechDb = recentDb = double.NaN; learned = 0; } }
+        // Learns the level again from what is heard next, unless it is long established, keeping it meanwhile.
+        public void Again() { if (learned < AverageBlocks) learned = 0; }
         // Another microphone has another level: what was learned from the last one is dropped.
         public void Microphone(string id)
         {

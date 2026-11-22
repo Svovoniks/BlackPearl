@@ -38,7 +38,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
     public static Task PlayTestSoundAsync(string? output) => PlayAsync(output, VoiceCues.Test, CancellationToken.None);
     // Plays 48 kHz mono samples on the chosen output, as voice plays; cancelling stops it early.
     public static Task PlayAsync(string? output, float[] samples, CancellationToken cancel) => Simulated
-        ? Task.Delay(samples.Length * 1000 / VoicePacket.SampleRate, cancel).ContinueWith(_ => { }, TaskScheduler.Default)
+        ? Task.Delay((int)(samples.Length * 1000L / VoicePacket.SampleRate), cancel).ContinueWith(_ => { }, TaskScheduler.Default)
         : Task.Run(async () =>
     {
         using var devices = new MMDeviceEnumerator();
@@ -52,7 +52,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
             using var player = new WasapiPlayerBuilder().WithDevice(device).WithLatency(60).WithCategory(OutputCategory).Build();
             player.Init(new MixerProvider(mixer));
             player.Play();
-            try { await Task.Delay(samples.Length * 1000 / VoicePacket.SampleRate + 250, cancel); }
+            try { await Task.Delay((int)(samples.Length * 1000L / VoicePacket.SampleRate) + 250, cancel); }
             catch (OperationCanceledException) { }
             player.Stop();
         }
@@ -135,6 +135,11 @@ internal sealed class VoiceAudio : IAsyncDisposable
     public event Action? Changed;
     // Device checks play voice at zero session volume so nothing is heard, and read back what was played.
     internal bool SilentOutput { get; init; }
+    // For the live probe: the output whose sound is taken as what the speakers play, instead of the Windows default,
+    // and something to add to the microphone before it is processed. Together with a virtual cable they make a real
+    // echo, with a voice over it, that nobody hears.
+    internal string? ReferenceOutput { get; init; }
+    internal Action<short[], int>? AddToMicrophone { get; init; }
     internal long SamplesPlayed => provider is { } played ? Interlocked.Read(ref played.Samples) : 0;
     internal float PeakPlayed { get => provider?.Peak ?? 0; set { if (provider is { } played) played.Peak = value; } }
     private MixerProvider? provider;
@@ -240,7 +245,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
             PlaybackDiagnostics.Record("voice-input-mode-unavailable", new { mode = "Raw", error = ex.GetType().Name, code = ex.HResult });
             created = Build(false);
         }
-        var handing = pump = new Pump((samples, count) => processing.Write(samples.AsSpan(0, count)));
+        var handing = pump = new Pump((samples, count) => { AddToMicrophone?.Invoke(samples, count); processing.Write(samples.AsSpan(0, count)); });
         created.DataAvailable += (buffer, flags, _, _) =>
         {
             // Audio lost before it reached the app is heard as a skip; the log says when it happens.
@@ -269,7 +274,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
     {
         try
         {
-            using var output = Find(enumerator, DataFlow.Render, null);
+            using var output = Find(enumerator, DataFlow.Render, ReferenceOutput);
             if (output is null) return;
             var created = new WasapiRecorderBuilder().WithDevice(output).WithLoopbackCapture().WithFormat(new WaveFormat(VoicePacket.SampleRate, 16, 1)).WithBufferLength(20).Build();
             created.DataAvailable += (buffer, flags, _, _) =>
