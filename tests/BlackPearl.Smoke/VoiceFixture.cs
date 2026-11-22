@@ -205,9 +205,17 @@ static class VoiceFixture
         jitter = new VoiceJitterBuffer();
         jitter.Push(0, 0, lead[0], now);
         for (ushort s = 1; s <= VoiceCapture.PrerollFrames; s++) jitter.Push(s, 0, encoded[s], now);
-        output.Clear(); Pull(VoiceCapture.PrerollFrames);
+        // The sentence goes on, a frame every 20 ms as each one is played, so the backlog stays as long as the
+        // opening was: nothing that sounds is skipped then either, and a pause brings it back down.
+        output.Clear();
+        for (ushort s = (ushort)(VoiceCapture.PrerollFrames + 1); s < 60; s++) { Pull(1); jitter.Push(s, 0, encoded[s], now); }
         var heardFrames = Enumerable.Range(0, output.Count / Frame).Count(i => output.Skip(i * Frame).Take(Frame).Any(x => Math.Abs(x) > 0.05));
-        check(jitter.Dropped <= 1 && heardFrames >= VoiceCapture.PrerollFrames - 1, $"the opening of a sentence is played whole: only the quiet before the first word is skipped ({jitter.Dropped} dropped, {heardFrames} frames of the word heard)");
+        var droppedTalking = jitter.Dropped;
+        var paused = Encode(440, 0, 20);
+        for (ushort s = 60; s < 80; s++) { Pull(1); jitter.Push(s, 0, paused[s - 60], now); }
+        Pull(4);
+        check(droppedTalking <= 1 && heardFrames >= 60 - VoiceCapture.PrerollFrames - 2 && jitter.Buffered <= jitter.TargetFrames + 4,
+            $"the opening of a sentence and what follows it are played whole: only the quiet is skipped ({droppedTalking} dropped while talking, {heardFrames} frames heard, {jitter.Buffered} waiting after a pause)");
 
         // Sequence wrap-around and a sender that rejoins with a new sequence.
         jitter = new VoiceJitterBuffer();

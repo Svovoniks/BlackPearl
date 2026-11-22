@@ -231,11 +231,14 @@ public sealed class VoiceJitterBuffer
     private readonly bool[] present = new bool[Capacity];
     private ushort expected, newest, lastPlayed, spurtFirst;
     private bool playing, started, ended, hasPlayed;
-    private int buffered, missing, lateRun, opening;
+    private int buffered, missing, lateRun;
     // A talk spurt opens with the frames from just before the speech gate opened, all at once: up to
-    // VoiceCapture.PrerollFrames of them and the first frame after. They hold the start of the first word, so they
-    // are given this much more room than a burst in the middle of a sentence before any of them is skipped.
+    // VoiceCapture.PrerollFrames of them and the first frame after. They hold the start of the first word, and the
+    // frames that follow arrive as fast as these are played, so the backlog stays that long until a pause lets it
+    // be trimmed. Until it has once come down to the usual limit, there is this much more room before any frame
+    // that sounds is skipped.
     private const int OpeningRoom = 6, OpeningMs = 100;
+    private bool roomy;
     private long firstArrival, lastArrival;
     private double delay, jitter;
     public int TargetFrames { get; set; } = MinTargetFrames;
@@ -271,7 +274,7 @@ public sealed class VoiceJitterBuffer
             if (!started || !playing && buffered == 0)
             {
                 // A new talk spurt: choose how much to prebuffer from the jitter seen so far.
-                started = true; expected = newest = spurtFirst = sequence; firstArrival = now; delay = 0; opening = 0;
+                started = true; expected = newest = spurtFirst = sequence; firstArrival = now; delay = 0; roomy = false;
                 TargetFrames = Math.Clamp((int)Math.Ceiling(jitter * 2.5 / VoicePacket.FrameMs) + 2, MinTargetFrames, MaxTargetFrames);
             }
             else
@@ -284,8 +287,8 @@ public sealed class VoiceJitterBuffer
             var index = sequence % Capacity;
             if (present[index]) return;
             var into = (short)(sequence - spurtFirst);
-            if (into >= 0 && into <= VoiceCapture.PrerollFrames && now - firstArrival <= OpeningMs) opening = Math.Max(opening, into + 1);
             present[index] = true; packets[index] = payload.ToArray(); endings[index] = (flags & VoicePacket.EndOfSpeech) != 0; buffered++;
+            if (into >= 0 && into <= VoiceCapture.PrerollFrames && now - firstArrival <= OpeningMs && buffered > TargetFrames + 8) roomy = true;
             if ((short)(sequence - newest) > 0) newest = sequence;
             if (!playing && (buffered >= TargetFrames || endings[index])) { playing = true; ended = false; missing = 0; }
         }
@@ -306,6 +309,7 @@ public sealed class VoiceJitterBuffer
                 if (buffered == 0 || now - firstArrival < TargetFrames * VoicePacket.FrameMs) return false;
                 playing = true; ended = false; missing = 0;
             }
+            if (buffered <= TargetFrames + 8) roomy = false;
             // Behind real time (a sender's clock running fast, or a burst after a network stall): catch up by
             // trimming the quiet between words first; speech itself is only skipped once far behind.
             while (buffered > TargetFrames + 4 && present[expected % Capacity])
@@ -314,8 +318,7 @@ public sealed class VoiceJitterBuffer
                 var last = endings[expected % Capacity];
                 Take(expected); Played();
                 // (After taking this frame: one less is buffered than when it was looked at.)
-                var most = TargetFrames + 8 + ((short)(lastPlayed - spurtFirst) < opening ? OpeningRoom : 0);
-                if (buffered > most || Quiet(output)) { Dropped++; continue; }
+                if (buffered > TargetFrames + 8 + (roomy ? OpeningRoom : 0) || Quiet(output)) { Dropped++; continue; }
                 missing = 0;
                 if (last) { playing = false; ended = true; }
                 return true;

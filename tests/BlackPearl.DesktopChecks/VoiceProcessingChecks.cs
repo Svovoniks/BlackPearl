@@ -65,6 +65,12 @@ static class VoiceProcessingChecks
         var spoken = Process(VoiceAudio.Processing.Standard, speech);
         var talking = speech.Length / Frame;
         check(spoken.Sent > talking * 0.6, $"synthesized speech is detected and sent ({spoken.Sent} of {talking} frames)");
+        // With the lighter denoiser the same detector decides; with processing off the one on the microphone does.
+        foreach (var mode in new[] { VoiceAudio.Processing.Light, VoiceAudio.Processing.Off })
+        {
+            var plain = Process(mode, speech);
+            check(plain.Sent > talking * 0.6, $"and in the other modes ({mode}: {plain.Sent} of {talking} frames)");
+        }
         // The same dropped and knocked objects once the voice's level is known, which is when speech is decided on
         // the cleaned sound alone: what is left of them is too faint, or too little of what was there, to start it.
         var afterTalk = speech.Concat(new short[Rate]).Concat(impacts.SelectMany(sound => sound)).ToArray();

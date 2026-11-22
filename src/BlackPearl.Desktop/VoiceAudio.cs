@@ -87,6 +87,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
         private readonly Action<short[], int> process;
         private readonly Thread thread;
         private double slowestMs;
+        private int failed;
         public double SlowestMs => Volatile.Read(ref slowestMs);
         // Buffers that could not be taken because four seconds of them were already waiting.
         public int Dropped { get; private set; }
@@ -110,7 +111,8 @@ internal sealed class VoiceAudio : IAsyncDisposable
             {
                 var began = Stopwatch.GetTimestamp();
                 try { process(samples, count); }
-                catch (Exception ex) when (ex is not OutOfMemoryException) { PlaybackDiagnostics.Record("voice-processing-failed", new { stage = "pump", error = ex.GetType().Name, ex.Message }); }
+                // A failure that repeats does so a hundred times a second: the log gets the first, tenth, hundredth...
+                catch (Exception ex) when (ex is not OutOfMemoryException) { if (++failed is 1 or 10 or 100 or 1000) PlaybackDiagnostics.Record("voice-processing-failed", new { stage = "pump", error = ex.GetType().Name, ex.Message, times = failed }); }
                 var took = Stopwatch.GetElapsedTime(began).TotalMilliseconds;
                 if (took > slowestMs) Volatile.Write(ref slowestMs, took);
                 ArrayPool<short>.Shared.Return(samples);
@@ -246,6 +248,8 @@ internal sealed class VoiceAudio : IAsyncDisposable
             created = Build(false);
         }
         var handing = pump = new Pump((samples, count) => { AddToMicrophone?.Invoke(samples, count); processing.Write(samples.AsSpan(0, count)); });
+        // The first buffer of a microphone just opened always says audio was lost before it.
+        Volatile.Write(ref inputBuffers, 0);
         created.DataAvailable += (buffer, flags, _, _) =>
         {
             // Audio lost before it reached the app is heard as a skip; the log says when it happens.

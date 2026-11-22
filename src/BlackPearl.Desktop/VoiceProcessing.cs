@@ -15,9 +15,10 @@ namespace BlackPearl.Desktop;
 // catches peaks. Apart from the noise, the voice is meant to leave as it arrived: nothing here compresses it or
 // changes its tone. A stage whose library is missing or fails is skipped, so voice keeps working with whatever remains.
 //
-// Whether it is speech is decided by Silero VAD twice: on the microphone after echo cancellation, and on the same
-// audio after noise removal. Both have to agree for 64 ms in a row. Each alone mistakes some knocks, drops, clicks and
-// clock ticks for a syllable; they rarely make the same mistake, and a sound that short rarely lasts two chunks.
+// Whether it is speech is decided by Silero VAD on what is about to be sent, for 64 ms in a row, and only on a
+// stretch that is still loud enough and mostly left by the noise removal (see Process). A second detector hears the
+// microphone before noise removal: it sets the level and guides the voice guard, and decides alone when there is no
+// noise removal.
 internal sealed class VoiceProcessor : IDisposable
 {
     public const int BlockSamples = VoicePacket.SampleRate / 100;
@@ -183,6 +184,8 @@ internal sealed class VoiceProcessor : IDisposable
         if (echo is not null || denoiser is not null)
             for (var i = 0; i < BlockSamples; i++) block[i] = rumble.Run(block[i]);
         CancelEcho();
+        // Counted before it hears this block: when it is the one that decides, this is how a new reading is noticed.
+        var heardChunks = heard?.Chunks ?? 0;
         if (heard is { } before && !before.Write(block)) StopDetecting();
         if (denoiser is not null)
         {
@@ -235,12 +238,12 @@ internal sealed class VoiceProcessor : IDisposable
         // everything one. On real conversation that kept back a third of the "mm-hm"s, a fifth of the one-word
         // answers and, over typing, nearly everything. It still sets the level and guides the voice guard.
         var decider = denoiser is not null ? cleaned ?? heard : heard;
-        var chunks = decider?.Chunks ?? 0;
+        var chunks = ReferenceEquals(decider, heard) ? heardChunks : decider?.Chunks ?? 0;
         if (denoiser is not null && cleaned is { } after)
         {
             for (var i = 0; i < BlockSamples; i++) { heardPower += noisy[i] * (double)noisy[i]; leftPower += block[i] * (double)block[i]; }
             heardBlocks++;
-            if (!after.Write(block)) { cleaned = null; after.Dispose(); decider = heard; chunks = heard?.Chunks ?? 0; }
+            if (!after.Write(block)) { cleaned = null; after.Dispose(); decider = heard; chunks = heardChunks; }
         }
         for (var i = 0; i < BlockSamples; i++) output[i] = (short)Math.Clamp(MathF.Round(block[i] * 32768f), short.MinValue, short.MaxValue);
         // Only changes are passed on.
