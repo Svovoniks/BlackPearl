@@ -219,14 +219,19 @@ internal sealed class VoiceGuard
     // here is 40 ms behind the speech detector, so a word's first sounds are covered as well.
     public const float Maybe = 0.15f, Surely = 0.4f;
     public const int HoldBlocks = 15, AheadBlocks = 4;
-    // "Almost nothing": less than a thirtieth of the window's power left (15 dB down). The other output comes in over
-    // about 40 ms and goes over about 30 ms.
+    // "Almost nothing": less than a thirtieth of the window's power left (15 dB down). The other output comes in at
+    // once, which the overlapping windows turn into a fade of 10 ms, and goes over about 30 ms.
     private const double Whole = 31.6;
-    private const float RescueAttack = 0.25f, RescueRelease = 0.7f;
+    private const float RescueRelease = 0.7f;
+    // Whether the latest block is the one on which the other output began to stand in. The caller then puts the
+    // start of that voice, written out before it was recognised, back as well.
+    public bool Began { get; private set; }
     private readonly float[] otherLast = new float[Block], otherReal = new float[Size], otherImaginary = new float[Size];
     private float rescue;
-    // Whether the other denoiser's output is standing in for a voice the main one removed, for the speech gate.
-    public bool Rescuing => rescue > 0.5f;
+    // Whether the other denoiser's output has been standing in for a voice the main one removed for 30 ms and more,
+    // for the speech gate: a block or two of it happens on other people's voices in the room as well.
+    public bool Rescuing => rescued >= 3;
+    private int rescued;
     private static readonly float[] Shape = MakeWindow();
     private static readonly int[] Edges = MakeEdges();
     private static readonly (int Band, float Next)[] Spread = MakeSpread();
@@ -282,7 +287,9 @@ internal sealed class VoiceGuard
             }
             removedWhole = voiced && wholeAfter * Whole < wholeBefore;
         }
-        rescue = removedWhole ? Math.Min(1, rescue + RescueAttack) : rescue * RescueRelease < 0.01f ? 0 : rescue * RescueRelease;
+        Began = removedWhole && rescue == 0;
+        rescued = removedWhole ? rescued + 1 : 0;
+        rescue = removedWhole ? 1 : rescue * RescueRelease < 0.01f ? 0 : rescue * RescueRelease;
         // A voice being given back is not the room's noise.
         if (rescue > 0) presence = Math.Max(presence, 0.01f);
         var restored = 0f;
@@ -459,6 +466,95 @@ internal sealed class HumEvidence
         run = hot ? run + 1 : 0;
         if (run >= Lasting) since = 0; else if (since < int.MaxValue) since++;
         return since <= Held;
+    }
+}
+
+// Gives a voice its beginning back. A denoiser needs about 100 ms of a new sound before it lets it through as a
+// voice, so the first sounds of a word after a silence came out 10 dB or more down: in one "mm-hm" in eight, one
+// short answer in eleven and one sentence in thirty on real conversation. Nothing that works as the audio passes can
+// know better at that moment. But by the time speech is confirmed those first sounds are still waiting, unsent, in
+// the speech gate, and by then it is known that they were the start of a voice.
+//
+// It keeps the last blocks as they were written to the gate, and the microphone (after the gain) lined up with
+// them. When speech starts it looks back from the present over the blocks in which the voice came through, to the
+// run just before them in which the microphone stood well above the room and the denoiser had taken much of it,
+// and hands back those blocks with the microphone in the denoiser's place. A sound that stopped before the voice
+// began is not part of it and is left as it was.
+internal sealed class SpeechOnset
+{
+    private const int Block = VoiceProcessor.BlockSamples, Kept = 26, Half = 50;
+    // Most: the longest beginning put back. Through: how many blocks of voice that came through may lie between it
+    // and the present. A block belongs to the beginning when the microphone was at least ReachDb, AboveDb over the
+    // quietest half second of the two seconds before, and came out TakenDb or more down.
+    public const int Most = 15, Through = 12;
+    public const double ReachDb = -40, AboveDb = 12, TakenDb = 6;
+    private readonly short[][] written = Enumerable.Range(0, Kept).Select(_ => new short[Block]).ToArray();
+    private readonly float[][] heard = Enumerable.Range(0, Kept).Select(_ => new float[Block]).ToArray();
+    private readonly double[] writtenDb = new double[Kept], heardDb = new double[Kept], roomDb = new double[Kept];
+    private readonly float[] waiting = new float[Block];
+    private readonly double[] powers = new double[4 * Half];
+    private readonly short[] restored = new short[(Most + Through + 1) * Block];
+    private int at, count, powerAt, powerCount;
+
+    // One block as it is written to the speech gate, and the microphone block that went into the guard with it: the
+    // guard's output is one block behind what it is given, so each written block goes with the one given before.
+    public void Add(ReadOnlySpan<float> microphone, ReadOnlySpan<short> output)
+    {
+        double sum = 0, out2 = 0;
+        for (var i = 0; i < Block; i++) { sum += waiting[i] * (double)waiting[i]; var o = output[i] / 32768.0; out2 += o * o; }
+        var quietest = double.MaxValue;
+        for (var half = 0; half < powerCount / Half; half++)
+        {
+            double mean = 0;
+            for (var i = 0; i < Half; i++) mean += powers[(powerAt - 1 - half * Half - i + 2 * powers.Length) % powers.Length];
+            quietest = Math.Min(quietest, mean / Half);
+        }
+        powers[powerAt] = sum / Block; powerAt = (powerAt + 1) % powers.Length; powerCount = Math.Min(powerCount + 1, powers.Length);
+        waiting.CopyTo(heard[at], 0); output.CopyTo(written[at]);
+        heardDb[at] = 10 * Math.Log10(sum / Block + 1e-12); writtenDb[at] = 10 * Math.Log10(out2 / Block + 1e-12);
+        roomDb[at] = quietest < double.MaxValue ? 10 * Math.Log10(quietest + 1e-12) : double.NaN;
+        at = (at + 1) % Kept; count = Math.Min(count + 1, Kept);
+        microphone.CopyTo(waiting);
+    }
+    // The gate's waiting audio was changed from outside (a voice given back whole): the newest blocks are these now.
+    public void Rewritten(ReadOnlySpan<short> recent)
+    {
+        for (var back = 1; back * Block <= recent.Length && back <= count; back++)
+            recent.Slice(recent.Length - back * Block, Block).CopyTo(written[(at - back + Kept) % Kept]);
+    }
+    // The newest blocks with the beginning of the voice put back, oldest first: to replace what the gate has waiting.
+    // Empty when there is no beginning to put back.
+    public ReadOnlySpan<short> Restore()
+    {
+        int Index(int back) => (at - back + Kept) % Kept;
+        bool Stands(int back) => heardDb[Index(back)] >= ReachDb && !double.IsNaN(roomDb[Index(back)]) && heardDb[Index(back)] >= roomDb[Index(back)] + AboveDb;
+        bool Taken(int back) => Stands(back) && writtenDb[Index(back)] <= heardDb[Index(back)] - TakenDb;
+        // Back over the voice that came through...
+        var newest = 1;
+        while (newest <= Through && newest < count && Stands(newest) && !Taken(newest)) newest++;
+        if (newest > Through || newest >= count || !Taken(newest)) return default;
+        // ...to the blocks before it that did not.
+        var oldest = newest;
+        while (oldest + 1 < count && oldest + 1 - newest < Most && Taken(oldest + 1)) oldest++;
+        for (var back = oldest; back >= 1; back--)
+        {
+            var into = restored.AsSpan((oldest - back) * Block, Block); var index = Index(back);
+            if (back > newest || back < newest - 1) { if (back > newest) Convert(heard[index], into); else written[index].CopyTo(into); }
+            if (back <= newest && back >= newest - 1 || back == oldest)
+                for (var i = 0; i < Block; i++)
+                {
+                    // It comes in over the first of its blocks and gives way to what came through over the block after its last.
+                    var mic = Math.Clamp(MathF.Round(heard[index][i] * 32768f), short.MinValue, short.MaxValue); var share = (i + 1f) / Block;
+                    var value = back == oldest && back != newest - 1 ? written[index][i] + share * (mic - written[index][i])
+                        : back == newest - 1 ? mic + share * (written[index][i] - mic) : mic;
+                    into[i] = (short)Math.Clamp(MathF.Round(value), short.MinValue, short.MaxValue);
+                }
+        }
+        return restored.AsSpan(0, oldest * Block);
+    }
+    private static void Convert(float[] from, Span<short> into)
+    {
+        for (var i = 0; i < Block; i++) into[i] = (short)Math.Clamp(MathF.Round(from[i] * 32768f), short.MinValue, short.MaxValue);
     }
 }
 

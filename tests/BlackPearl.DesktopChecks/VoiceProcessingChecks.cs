@@ -213,6 +213,48 @@ static class VoiceProcessingChecks
         for (var i = 0; i < 30; i++) { var heard = Hiss(0.2); talk = heard.Select(v => v / 2).ToArray(); guard.Process(heard, talk, 0, 0, heard.Select(v => v / 4).ToArray(), true); }
         check(givenBack is > 0.02 and < 0.04 && rescuing && notVoiced < 0.01 && Rms(talk) > 0.05 && !guard.Rescuing,
             $"a voice the denoiser removed whole comes back from the lighter denoiser while that hears a voice ({givenBack:F3} of 0.029; {notVoiced:F3} when it hears none; {Rms(talk):F3} of 0.058 kept where the main one kept it)");
+        // The start of such a voice has already been written to the speech gate, as silence, by the time it is
+        // recognised. As long as the gate has not sent it, it can be put right: the last 100 ms here, across the
+        // frame under way and the frames waiting before it.
+        var waiting = new VoiceCapture { Transmitting = true, SpeechDetected = false };
+        var went = new List<byte[]>(); waiting.Frame += packet => went.Add(packet.ToArray());
+        var nothing = new short[VoicePacket.FrameSamples];
+        for (var i = 0; i < 20; i++) waiting.Write(nothing);
+        waiting.Write(nothing.AsSpan(0, Block));
+        var note = Enumerable.Range(0, 10 * Block).Select(i => (short)(8000 * Math.Sin(i * 2 * Math.PI * 440 / VoicePacket.SampleRate))).ToArray();
+        var rewrote = waiting.Rewrite(note);
+        waiting.SpeechDetected = true; waiting.Write(nothing.AsSpan(0, Block));
+        var decoder = Concentus.OpusCodecFactory.CreateDecoder(VoicePacket.SampleRate, 1); var decodedBack = new List<short>(); var one = new short[VoicePacket.FrameSamples];
+        foreach (var packet in went) { VoicePacket.TryRead(packet, out _, out _, out _, out var payload); decoder.Decode(payload, one, one.Length, false); decodedBack.AddRange(one); }
+        double Power(int from, int to) => decodedBack.Skip(from).Take(to - from).Average(v => (double)v * v);
+        var end = decodedBack.Count - Block; var begin = end - note.Length;
+        check(rewrote && went.Count == VoiceCapture.PrerollFrames + 1 && Power(begin + Block, end - Block) > 1e7 && Power(0, begin - Block) < 1e3 && !waiting.Rewrite(note),
+            $"audio waiting in the speech gate can be put right before it is sent, and not after ({went.Count} frames; the note at {10 * Math.Log10(Power(begin + Block, end - Block) + 1):F0} dB, before it {10 * Math.Log10(Power(0, begin - Block) + 1):F0} dB)");
+        // A voice gets its beginning back. Here a room, then a voice of which the denoiser lets only a fifth through
+        // for its first 80 ms and all of it after: when speech starts, 60 ms later, those 80 ms come back from the
+        // microphone, and what came through whole stays as it was. A sound that ended before the voice is left alone.
+        short[] AsWritten(float[] samples, double share) => samples.Select(v => (short)Math.Round(v * share * 32768)).ToArray();
+        (SpeechOnset Onset, List<short[]> Written, List<float[]> Microphone) Heard(int gap)
+        {
+            var memory = new SpeechOnset(); var outs = new List<short[]>(); var mics = new List<float[]>(); var last = new float[Block];
+            void Next(float[] microphone, double share) { var o = AsWritten(last, share); memory.Add(microphone, o); outs.Add(o); mics.Add(last); last = microphone; }
+            // (What is written goes with the microphone block before it, so each share is given one block late.)
+            for (var i = 0; i < 120; i++) Next(Hiss(0.002), 1);
+            Next(Hiss(0.1), 1);
+            for (var i = 0; i < 7; i++) Next(Hiss(0.1), 0.2);
+            Next(gap > 0 ? Hiss(0.002) : Hiss(0.1), 0.2);
+            for (var i = 0; i < gap; i++) Next(Hiss(0.002), 1);
+            for (var i = 0; i < 6; i++) Next(Hiss(0.1), 1);
+            return (memory, outs, mics);
+        }
+        var (onset, wrote, microphones) = Heard(0);
+        var back = onset.Restore().ToArray();
+        double Level(IEnumerable<short> samples) => Math.Sqrt(samples.Average(v => (double)v * v)) / 32768;
+        var blocksBack = back.Length / Block;
+        var beginning = blocksBack >= 13 ? Level(back.Skip(Block).Take(6 * Block)) : 0; var asWas = blocksBack >= 13 ? Level(wrote[^(blocksBack - 1)].Concat(wrote[^(blocksBack - 2)])) : 1;
+        var untouched = blocksBack >= 13 && back.Skip((blocksBack - 4) * Block).SequenceEqual(wrote.Skip(wrote.Count - 4).SelectMany(b => b));
+        check(blocksBack is 13 or 14 && beginning > 0.05 && asWas < 0.02 && untouched && Heard(4).Onset.Restore().Length == 0,
+            $"a voice gets back the beginning the denoiser took ({blocksBack} blocks; its first 60 ms at {beginning:F3} of 0.058, were {asWas:F3}; what came through is untouched: {untouched}; a sound that had stopped is left alone: {Heard(4).Onset.Restore().Length == 0})");
         // What counts as hearing a voice: its voice estimate at 0.9 or more for 80 ms, loud enough to be the talker,
         // and well above the room as it was just before. A room that is that loud all the time is not a voice.
         var evidence = new HumEvidence(); var states = new List<bool>();

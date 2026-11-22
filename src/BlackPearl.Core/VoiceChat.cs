@@ -97,6 +97,25 @@ public sealed class VoiceCapture
             encoder.ResetState();
         }
     }
+    // Replaces the most recent samples written with others, as long as none of them has been sent: the frame being
+    // filled and the pre-roll before it. For a voice that was recognised only after its first sounds had been
+    // written here without it. False, and nothing changed, while the gate is open or when there are not that many.
+    public bool Rewrite(ReadOnlySpan<short> recent)
+    {
+        lock (gate)
+        {
+            if (open || recent.Length > filled + prerollCount * frame.Length) return false;
+            var left = recent.Length; var take = Math.Min(filled, left);
+            recent.Slice(left - take, take).CopyTo(frame.AsSpan(filled - take, take)); left -= take;
+            for (var back = 1; left > 0; back++)
+            {
+                var slot = preroll[(prerollNext - back + preroll.Length) % preroll.Length];
+                take = Math.Min(slot.Length, left);
+                recent.Slice(left - take, take).CopyTo(slot.AsSpan(slot.Length - take, take)); left -= take;
+            }
+            return true;
+        }
+    }
     public void Write(ReadOnlySpan<short> samples)
     {
         lock (gate)

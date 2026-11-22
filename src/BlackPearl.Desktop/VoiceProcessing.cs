@@ -87,7 +87,15 @@ internal sealed class VoiceProcessor : IDisposable
     private RnNoise? lighter;
     private DelayLine? lighterDelay;
     private readonly HumEvidence hum = new();
+    private readonly SpeechOnset onset = new();
     private readonly float[] lighterNow = new float[BlockSamples], lighterOut = new float[BlockSamples];
+    // The lighter denoiser's last blocks. A voice is recognised 120 ms after it began, by which time its first 70 ms
+    // have left here as the silence the main denoiser made of them; they are still waiting in the speech gate's
+    // pre-roll, and are put back from these. Two blocks more, for the sounds a voice begins with.
+    private const int StartBlocks = HumEvidence.Lasting - 5 + 2;
+    private readonly float[][] lighterPast = Enumerable.Range(0, StartBlocks + 2).Select(_ => new float[BlockSamples]).ToArray();
+    private readonly short[] voiceStart = new short[StartBlocks * BlockSamples];
+    private int lighterAt;
     public bool EchoCancelling => echo is not null;
     // Whether the speakers' sound is in the microphone, and whether it is loud enough that the echo canceller's
     // output is the one in use.
@@ -196,6 +204,27 @@ internal sealed class VoiceProcessor : IDisposable
             Denoise();
             beside = beside && denoiser is DeepFilter;
             guard.Process(noisy, block, heard?.Probability ?? 0, level.GainDb, beside ? lighterOut : default, voiced);
+            if (beside)
+            {
+                if (guard.Began)
+                {
+                    // What left here on each of the last blocks was the block before it of the lighter denoiser's
+                    // output, had that been standing in already: the same goes for this block.
+                    float[] Past(int back) => lighterPast[(lighterAt - back + 2 * lighterPast.Length) % lighterPast.Length];
+                    for (var b = 0; b < StartBlocks; b++)
+                    {
+                        var from = Past(StartBlocks + 1 - b);
+                        for (var i = 0; i < BlockSamples; i++)
+                        {
+                            // It comes in over the first of these blocks.
+                            var x = from[i] * (b == 0 ? (i + 1f) / BlockSamples : 1);
+                            voiceStart[b * BlockSamples + i] = (short)Math.Clamp(MathF.Round(x * 32768f), short.MinValue, short.MaxValue);
+                        }
+                    }
+                    if (capture.Rewrite(voiceStart)) { Past(1).CopyTo(block, 0); onset.Rewritten(voiceStart); }
+                }
+                lighterOut.CopyTo(lighterPast[lighterAt], 0); lighterAt = (lighterAt + 1) % lighterPast.Length;
+            }
             limiter.Apply(block);
             // A limiter that has to hold the voice down means the gain is too high for this voice.
             level.Ease(limiter.GainDb);
@@ -234,10 +263,13 @@ internal sealed class VoiceProcessor : IDisposable
             heardPower = leftPower = 0; heardBlocks = 0;
             // A voice the guard is giving back counts as speech whatever the detector makes of a hum.
             var now = decision.Next(denoiser is not null && guard.Rescuing ? 1f : decider.Probability, mayStart);
+            // Speech has started: the beginning the denoiser took, still waiting in the gate, is put back first.
+            if (now && !speaking && denoiser is not null && onset.Restore() is { Length: > 0 } beginning) capture.Rewrite(beginning);
             if (now != speaking) capture.SpeechDetected = speaking = now;
         }
         Processed?.Invoke(output);
         capture.Write(output);
+        if (denoiser is not null) onset.Add(noisy, output);
     }
     // WebRTC's canceller always hears the microphone, so it is ready when it is needed.
     private void CancelEcho()
