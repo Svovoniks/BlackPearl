@@ -242,7 +242,8 @@ static class VoiceProbe
     static void Report(string path, short[] played, short[] heardBack)
     {
         if (heardBack.Length < played.Length / 2) { Console.WriteLine("Too little came back to compare."); return; }
-        var kept = VoiceProcessingChecks.Compare(played, heardBack, 900);
+        // (A real microphone and speakers put the voice back up to a second and more after it was added.)
+        var kept = VoiceProcessingChecks.Compare(played, heardBack, 1500);
         // Where each three seconds of the recording turned up in what came back. A real path that drops or repeats
         // audio shows as a delay that changes on the way, and makes the comparison above meaningless.
         var delays = new List<int>();
@@ -251,7 +252,7 @@ static class VoiceProbe
             double energy = 0;
             for (var i = at; i < at + Rate * 3; i += 3) energy += played[i] * (double)played[i];
             if (energy / Rate < 20000) continue;
-            delays.Add(Enumerable.Range(0, 900).MaxBy(ms =>
+            delays.Add(Enumerable.Range(0, 1500).MaxBy(ms =>
             {
                 double sum = 0; var shift = ms * Rate / 1000;
                 for (var i = at; i < at + Rate * 3 && i + shift < heardBack.Length; i += 3) sum += played[i] * (double)heardBack[i + shift];
