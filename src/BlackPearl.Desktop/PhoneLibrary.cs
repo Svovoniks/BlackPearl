@@ -43,6 +43,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         public StreamConverter? Converter { get; init; }
         public SegmentStore? Store { get; init; }
         public string? Directory { get; init; }
+        // A conversion's choice of sound: the file's audio tracks, and the one the conversion carries (null: none).
+        public ProbedAudio[] AudioTracks { get; init; } = [];
+        public int? Audio { get; init; }
         public void Dispose() => CloseConversion(Converter, Store, Directory);
     }
     // By phone id: a phone whose link drops and comes back keeps reading the same stream.
@@ -264,7 +267,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         long durationMs = (long)((item.DurationSeconds ?? 0) * 1000);
         if (wanted != StreamQuality.OriginalId && !(wanted == "auto" && home) && !item.IsMusic)
         {
-            var (converted, why) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, qualities);
+            var (converted, why) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), qualities);
             if (current() != remote) { converted?.Dispose(); return; }
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
             else note = why;
@@ -294,7 +297,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         remote.SendMessage(session, stream.Converter is { } converter
             ? new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "hls", streamId = converter.Stream.Id,
                 segments = converter.Stream.Segments, segmentMs = converter.Stream.SegmentMs, quality = converter.Stream.Quality, qualities, note,
-                previous = back, next = forward, first = start, tracks, queue }
+                previous = back, next = forward, first = start, tracks, queue,
+                audioTracks = stream.AudioTracks.Select((a, index) => new { index, language = a.Language, title = a.Title, codec = a.Codec, layout = a.Layout }), audioTrack = stream.Audio }
             : (object)new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "file", resource = "file/" + item.Id,
                 length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note,
                 previous = back, next = forward, first = start, tracks, queue });
@@ -437,11 +441,15 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
 
     // Settings › Playback, as the window reads it: audio and subtitle language priorities, and subtitle rules by audio
     // language. The phone picks its starting tracks with them as the window would.
+    private string[] AudioLanguages()
+    {
+        try { return TrackLanguages.Parse(library.Setting("audioLanguages") ?? ""); } catch (ArgumentException) { return []; }
+    }
+
     private object TrackPreferences()
     {
-        string[] audio = [], subtitles = [];
+        string[] audio = AudioLanguages(), subtitles = [];
         SubtitleLanguageRule[] rules = [];
-        try { audio = TrackLanguages.Parse(library.Setting("audioLanguages") ?? ""); } catch (ArgumentException) { }
         try { subtitles = TrackLanguages.Parse(library.Setting("subtitleLanguages") ?? "", true); } catch (ArgumentException) { }
         try
         {
@@ -454,8 +462,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     }
 
     // A conversion of the video at the quality asked for, or why there is none: no converter, a file that can't be read,
-    // or a file already smaller than the conversion would be.
-    private async Task<(PhoneStream? Stream, string? Why)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, List<string> qualities)
+    // or a file already smaller than the conversion would be. It carries one audio track: the one the phone asked for, or
+    // the one the PC's player would start with.
+    private async Task<(PhoneStream? Stream, string? Why)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, List<string> qualities)
     {
         if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.");
         var probe = await Probe(ffmpeg, item, null);
@@ -469,9 +478,10 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var store = SegmentStore.TryCreate(directory, segments);
         if (store is null) return (null, "There is no room on the PC's disk to convert the video, so the phone plays the file as it is.");
         var stream = new RoomStream(Guid.NewGuid().ToString("N"), item.Id, plan.Quality.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
-        var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, null, null), stream, store);
-        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = plan.VideoKbps, segments });
-        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory }, null);
+        var audio = audioWanted is >= 0 && audioWanted < probe.Audio.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(probe.Audio, AudioLanguages());
+        var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, audio, null), stream, store);
+        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = plan.VideoKbps, segments, audio, audioTracks = probe.Audio.Length });
+        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = probe.Audio, Audio = audio }, null);
     }
 
     // The video's description, or null when the converter can't read it: it failed, took longer than its own 30 seconds

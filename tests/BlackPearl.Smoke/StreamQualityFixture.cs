@@ -304,6 +304,35 @@ static class StreamQualityFixture
             """);
         check(film is { DurationMs: 6650690, Width: 1920, Height: 1040, Hdr: false, AudioTracks: 2, StartSeconds: 0 } && film.Subtitles is [{ Image: true }, { Image: false, Codec: "ass" }] && film.FontStreams is [5, 6],
             "a film's description gives its size, length, audio, subtitle kinds and fonts, leaving its cover art aside");
+        // Each audio track's language, title, codec and layout, for the phone's Audio menu; a title elsewhere (the file's,
+        // a chapter's, a subtitle's) names no audio track.
+        var tracks = VideoProbe.Parse("""
+            Input #0, matroska,webm, from 'show.mkv':
+              Metadata:
+                title           : Night Signal
+              Duration: 00:24:00.00, start: 0.000000, bitrate: 4000 kb/s
+              Chapters:
+                Chapter #0:0: start 0.000000, end 90.000000
+                  Metadata:
+                    title           : Opening
+              Stream #0:0: Video: h264 (High), yuv420p(progressive), 1920x1080, 23.98 fps (default)
+              Stream #0:1(jpn): Audio: flac, 48000 Hz, stereo, s16 (default)
+              Stream #0:2(eng): Audio: eac3, 48000 Hz, 5.1(side), fltp, 640 kb/s
+                  Metadata:
+                    title           : Commentary
+                    BPS             : 640000
+              Stream #0:3: Audio: aac (LC), 44100 Hz, 6 channels, fltp
+              Stream #0:4(eng): Subtitle: ass (ssa)
+                  Metadata:
+                    title           : Signs
+              Stream #0:5(und): Audio: opus, 48000 Hz, mono, fltp
+            """);
+        check(tracks?.Audio is [("jpn", null, "flac", "stereo", true), ("eng", "Commentary", "eac3", "5.1(side)", false), (null, null, "aac", "6 channels", false), (null, null, "opus", "mono", false)],
+            "each audio track's language, title, codec and channel layout is read: " + string.Join(" | ", tracks?.Audio.Select(a => a.ToString()) ?? []));
+        check(ProbedAudio.Preferred(tracks!.Audio, ["en", "ja"]) == 1 && ProbedAudio.Preferred(tracks.Audio, ["ja"]) == 0 && ProbedAudio.Preferred(tracks.Audio, ["fr"]) == 0 &&
+            ProbedAudio.Preferred(tracks.Audio.Select(a => a with { Default = a.Codec == "aac" }).ToArray(), []) == 2 &&
+            ProbedAudio.Preferred(tracks.Audio.Select(a => a with { Default = false }).ToArray(), ["fr"]) == 0 && ProbedAudio.Preferred([], ["en"]) is null,
+            "a converted stream starts with the first preferred language a track has, else the file's default track, else its first");
         var phone = VideoProbe.Parse("""
               Duration: 00:01:05.77, start: 3595.827000, bitrate: 7036 kb/s
               Stream #0:0[0x100](und): Video: hevc (Main 10) (HEVC / 0x43564548), yuv420p10le(tv, bt2020nc/bt2020/smpte2084), 3840x2160 [SAR 1:1 DAR 16:9], 59.94 fps, 90k tbn, start 3595.827000

@@ -54,6 +54,8 @@ static class PhoneLibraryChecks
             store.Setting("watched:harbor-3", "true");
             var paired = new PairedPhone(PhoneRemoteProtocol.NewHex(16), "Check phone", PhoneRemoteProtocol.NewHex(32), Wire.Now, Wire.Now);
             new LibraryPhoneStore(store).Save([paired]);
+            var dual = await DualAudioVideo(data);
+            store.Save(new MediaItem("dual-audio", dual, "Dual Audio", "Movie", 2025));
             IReadOnlyList<MediaItem> items = store.All();
             var hostKey = PersistentRooms.NewKey();
 
@@ -128,6 +130,7 @@ static class PhoneLibraryChecks
                 store.Setting("queue") == Wire.Serialize(new[] { "harbor-3", "night-signal", "harbor-1", "harbor-3" }), "a queue handed to the PC is saved as its player's queue at the video's place");
             library.SaveNoQueueHandOver();
             Check(store.Setting("queuePosition") == "-1", "a video handed to the PC outside a queue plays on its own, not from the queue it was last in");
+            await ConvertedSound(store, phone, data);
             phone.Send(new { type = "watch", request = 16, id = "night-signal", quality = StreamQuality.OriginalId, network = "home" });
             await phone.Next("stream", 15000);
 
@@ -139,5 +142,72 @@ static class PhoneLibraryChecks
             Console.WriteLine($"{passed} phone library checks passed.");
         }
         finally { if (!server.HasExited) server.Kill(true); await server.WaitForExitAsync(); }
+    }
+
+    // A 720p film worth converting, with a silent Japanese track (the file's default) and an English one that sounds.
+    static async Task<string> DualAudioVideo(string data)
+    {
+        var path = Path.Combine(data, "Dual Audio (2025).mkv");
+        var (made, errors) = await RunFfmpeg(["-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24,format=yuv420p", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+            "-t", "12", "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "5M", "-maxrate", "5M", "-bufsize", "10M", "-g", "48", "-c:a", "aac",
+            "-metadata:s:a:0", "language=jpn", "-metadata:s:a:1", "language=eng", "-metadata:s:a:1", "title=English", "-disposition:a:0", "default", "-disposition:a:1", "0", path]);
+        Check(made == 0 && File.Exists(path), "a sample film with two audio tracks is made" + (made == 0 ? "" : ": " + errors));
+        return path;
+    }
+
+    static async Task<(int ExitCode, string Errors)> RunFfmpeg(string[] arguments)
+    {
+        var start = new ProcessStartInfo(Ffmpeg.Find()!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start)!;
+        var errors = process.StandardError.ReadToEndAsync();
+        using var limit = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        await process.WaitForExitAsync(limit.Token);
+        return (process.ExitCode, await errors);
+    }
+
+    // A converted stream carries sound: the track Settings › Playback prefers, then the one the phone picks. A conversion
+    // for the phone once mapped no audio at all, and played silent.
+    static async Task ConvertedSound(LibraryStore store, FakePhone phone, string data)
+    {
+        store.Setting("audioLanguages", "en");
+        async Task<(System.Text.Json.JsonElement? Answer, double? Volume)> Watch(int request, int? audio)
+        {
+            phone.Send(audio is { } track
+                ? new { type = "watch", request, id = "dual-audio", quality = "480p", network = "away", audio = track }
+                : (object)new { type = "watch", request, id = "dual-audio", quality = "480p", network = "away" });
+            var answer = await phone.Next("stream", 60000);
+            if (answer is not { } a || a.GetProperty("kind").GetString() != "hls") return (answer, null);
+            // The first piece, read as the phone reads it, and how loud its sound is.
+            var resource = "stream/" + a.GetProperty("streamId").GetString() + "/0";
+            var piece = new MemoryStream();
+            for (var (offset, length, tries) = (0L, long.MaxValue, 0); offset < length && tries < 120;)
+            {
+                var read = await phone.Read(resource, offset, 262144);
+                if (read.Error is not null) { Console.WriteLine($"read {resource} at {offset}: {read.Error}"); tries++; await Task.Delay(500); continue; }
+                length = read.Length; piece.Write(read.Bytes); offset += read.Bytes.Length;
+                if (read.Bytes.Length == 0) break;
+            }
+            var file = Path.Combine(data, $"piece-{request}.ts");
+            await File.WriteAllBytesAsync(file, piece.ToArray());
+            var (_, report) = await RunFfmpeg(["-hide_banner", "-nostdin", "-i", file, "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"]);
+            var mean = System.Text.RegularExpressions.Regex.Match(report, @"mean_volume: (-?[\d.]+|-inf) dB");
+            return (answer, !mean.Success ? null : mean.Groups[1].Value == "-inf" ? double.NegativeInfinity : double.Parse(mean.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        var (preferred, loud) = await Watch(30, null);
+        var tracks = preferred?.GetProperty("audioTracks").EnumerateArray().Select(t => (t.GetProperty("index").GetInt32(), t.GetProperty("language").GetString(), t.GetProperty("title").ToString())).ToArray() ?? [];
+        Check(preferred?.GetProperty("kind").GetString() == "hls" && tracks.SequenceEqual([(0, "jpn", ""), (1, "eng", "English")]),
+            "a 480p conversion lists the file's audio tracks for the phone: " + string.Join(", ", tracks));
+        Check(preferred?.GetProperty("audioTrack").GetInt32() == 1 && loud > -40,
+            $"a 480p conversion has sound, in the language Settings › Playback prefers over the file's default (mean {loud} dB)");
+        var (picked, quiet) = await Watch(31, 0);
+        Check(picked?.GetProperty("audioTrack").GetInt32() == 0 && quiet < -80, $"the phone picks another audio track of a conversion (mean {quiet} dB)");
+        var (outOfRange, _) = await Watch(32, 7);
+        Check(outOfRange?.GetProperty("audioTrack").GetInt32() == 1, "a track the file doesn't have falls back to the preferred one");
+        store.Setting("audioLanguages", "");
+        var (unranked, _) = await Watch(33, null);
+        Check(unranked?.GetProperty("audioTrack").GetInt32() == 0, "with no preference that matches, a conversion starts with the file's default track");
     }
 }
