@@ -171,6 +171,22 @@ static class VoiceProbe
     {
         if (heardBack.Length < played.Length / 2) { Console.WriteLine("Too little came back to compare."); return; }
         var kept = VoiceProcessingChecks.Compare(played, heardBack, 900);
+        // Where each three seconds of the recording turned up in what came back. A real path that drops or repeats
+        // audio shows as a delay that changes on the way, and makes the comparison above meaningless.
+        var delays = new List<int>();
+        for (var at = Rate * 2; at + Rate * 3 <= played.Length; at += Rate * 3)
+        {
+            double energy = 0;
+            for (var i = at; i < at + Rate * 3; i += 3) energy += played[i] * (double)played[i];
+            if (energy / Rate < 20000) continue;
+            delays.Add(Enumerable.Range(0, 900).MaxBy(ms =>
+            {
+                double sum = 0; var shift = ms * Rate / 1000;
+                for (var i = at; i < at + Rate * 3 && i + shift < heardBack.Length; i += 3) sum += played[i] * (double)heardBack[i + shift];
+                return Math.Abs(sum);
+            }));
+        }
+        Console.WriteLine($"Delay of each three seconds, ms: {string.Join(", ", delays)}");
         Console.WriteLine(FormattableString.Invariant($"{path}: gain {kept.Gain:+0.0;-0.0} dB, moving {kept.Moves:F1} dB between strong syllables, {kept.Dips:P0} of them more than 6 dB down; below 1 kHz {kept.Low:+0.0;-0.0} dB and above 4 kHz {kept.High:+0.0;-0.0} dB against the middle."));
     }
     static void Write(string path, short[] samples)

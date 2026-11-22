@@ -156,6 +156,8 @@ internal sealed class VoiceProcessor : IDisposable
         {
             guard.Process(noisy, block, heard?.Probability ?? 0, level.GainDb);
             limiter.Apply(block);
+            // A limiter that has to hold the voice down means the gain is too high for this voice.
+            level.Ease(limiter.GainDb);
         }
         for (var i = 0; i < BlockSamples; i++) output[i] = (short)Math.Clamp(MathF.Round(block[i] * 32768f), short.MinValue, short.MaxValue);
         // Speech is decided before the samples reach the gate, so the gate acts on what it is about to encode.
@@ -277,7 +279,9 @@ internal sealed class VoiceProcessor : IDisposable
     // level. The last level learned carries over to the next time voice opens, for the same microphone.
     //
     // The level aimed for leaves a voice's own peaks below full scale. 2 dB higher, the limiter had to hold peaks
-    // in 2 to 10% of the frames of ordinary speech; here it is under 1%.
+    // in 2 to 10% of the frames of ordinary speech; here it is under 1%. A voice that still drives the limiter,
+    // because it grew louder than when its level was learned, has its gain taken down until it no longer does: the
+    // limiter is for the odd peak, not for holding a voice in.
     internal sealed class InputLevel
     {
         public const double TargetDb = -23, MaxGainDb = 30;
@@ -285,8 +289,12 @@ internal sealed class VoiceProcessor : IDisposable
         private const int SettleBlocks = 100, AverageBlocks = 1000;
         private const double SettleStepDb = 0.5, StepDb = 0.02, StartDb = 3, StopDb = 0.25, AfreshDb = 15;
         private const int AfreshBlocks = 200;
-        private static double remembered = double.NaN;
+        private static double remembered = double.NaN, rememberedMost = MaxGainDb;
         private static string? microphone;
+        // The most gain this voice takes without driving the limiter. It comes down 2 dB a second while the limiter
+        // holds the voice by more than 1 dB, and returns by about a decibel a minute.
+        private double mostDb = rememberedMost;
+        private const double LimitedDb = -1, EaseDb = 0.02, ReturnDb = 0.0002;
         // The voice's level as the microphone delivers it, before any gain; NaN until it has been heard.
         public double SpeechDb => speechDb;
         private double speechDb = remembered, recentDb = double.NaN;
@@ -296,6 +304,17 @@ internal sealed class VoiceProcessor : IDisposable
         private bool moving;
         public double GainDb => gainDb;
         private static double Wanted(double speechDb) => double.IsNaN(speechDb) ? 0 : Math.Clamp(TargetDb - speechDb, 0, MaxGainDb);
+        // limiterDb: how far the limiter is holding the audio down at the moment, in dB (0 when it is not).
+        public void Ease(double limiterDb)
+        {
+            if (limiterDb < LimitedDb && gainDb > 0)
+            {
+                mostDb = Math.Max(0, Math.Min(mostDb, gainDb) - EaseDb);
+                gainDb = Math.Min(gainDb, mostDb);
+            }
+            else if (limiterDb >= 0) mostDb = Math.Min(MaxGainDb, mostDb + ReturnDb);
+            rememberedMost = mostDb;
+        }
         public void Learn(float[] samples, float probability)
         {
             if (probability < Confident) return;
@@ -312,20 +331,34 @@ internal sealed class VoiceProcessor : IDisposable
             speechDb = double.IsNaN(speechDb) ? db : speechDb + (db - speechDb) / learned;
             remembered = speechDb;
         }
+        // What has been learned, as the app keeps it between runs (see Voice.cs): the voice's level, the most gain it
+        // takes, and which microphone that was. Without it every run would spend its first sentences finding the
+        // level again, moving the gain while it does.
+        internal static string? Saved
+        {
+            get => double.IsNaN(remembered) ? null : FormattableString.Invariant($"{remembered:F1};{rememberedMost:F1};{microphone}");
+            set
+            {
+                var parts = value?.Split(';', 3);
+                if (parts is not { Length: 3 } || !double.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var level)
+                    || !double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var most) || level is < -80 or > 0) return;
+                remembered = level; rememberedMost = Math.Clamp(most, 0, MaxGainDb); microphone = parts[2].Length > 0 ? parts[2] : null;
+            }
+        }
         // Forgets the level carried over between sessions, so checks start from the same place.
-        internal static void Forget() { remembered = double.NaN; microphone = null; }
+        internal static void Forget() { remembered = double.NaN; rememberedMost = MaxGainDb; microphone = null; }
         // Starts over unless the level is long established; the gain stays where it is until speech is heard again.
         public void Doubt() { if (learned < AverageBlocks) { speechDb = recentDb = double.NaN; learned = 0; } }
         // Another microphone has another level: what was learned from the last one is dropped.
         public void Microphone(string id)
         {
-            if (microphone is not null && microphone != id) { speechDb = remembered = recentDb = double.NaN; learned = 0; gainDb = 0; moving = false; }
+            if (microphone is not null && microphone != id) { speechDb = remembered = recentDb = double.NaN; learned = 0; gainDb = 0; moving = false; mostDb = rememberedMost = MaxGainDb; }
             microphone = id;
         }
         // Rises or falls smoothly across each block. Peaks are the limiter's concern, after noise removal.
         public void Apply(float[] samples)
         {
-            var wanted = double.IsNaN(speechDb) ? gainDb : Wanted(speechDb);
+            var wanted = Math.Min(double.IsNaN(speechDb) ? gainDb : Wanted(speechDb), mostDb);
             double step;
             if (learned < SettleBlocks) step = SettleStepDb;
             else

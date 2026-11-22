@@ -227,10 +227,29 @@ static class VoiceProcessingChecks
         var loudest = shouts.Max(s => s.Max(Math.Abs));
         check(gain > 20 && loudest <= PeakLimiter.Ceiling + 1e-6f, $"a loud sound after quiet speech is not clipped (gain {gain:F0} dB, peak {loudest:F2})");
         check(gain - level.GainDb < 0.5, $"and one loud moment does not change the gain ({gain - level.GainDb:F2} dB)");
+        // A voice that turns out louder than when its level was learned drives the limiter; the gain comes down until
+        // it no longer does, instead of the limiter holding the voice in for good.
+        VoiceProcessor.InputLevel.Forget();
+        var eased = new VoiceProcessor.InputLevel(); var holding = new PeakLimiter();
+        for (var i = 0; i < 200; i++) { var faint = Faint(); eased.Learn(faint, 1); eased.Apply(faint); }
+        float[] Louder(int block) => Enumerable.Range(0, Block).Select(i => (float)(0.06 * Math.Sin((block * Block + i) * 0.1))).ToArray();
+        var limited = new List<double>();
+        for (var i = 0; i < 600; i++) { var louder = Louder(i); eased.Apply(louder); holding.Apply(louder); eased.Ease(holding.GainDb); limited.Add(holding.GainDb); }
+        check(limited.Take(50).Min() < -4 && limited.Skip(500).Min() > -1.5, $"a voice that outgrows its gain is not left to the limiter (limited {limited.Take(50).Min():F1} dB at first, {limited.Skip(500).Min():F1} dB after five seconds, gain {eased.GainDb:F1} dB)");
+        VoiceProcessor.InputLevel.Forget();
+        for (var i = 0; i < 200; i++) { var faint = Faint(); level.Learn(faint, 1); level.Apply(faint); }
         // The next time voice opens the level is already known. Another microphone, 20 dB louder, is then learned
         // afresh within a few seconds instead of over minutes.
         level = new VoiceProcessor.InputLevel();
         check(Math.Abs(level.GainDb - gain) < 1, $"the level learned carries over to the next time ({level.GainDb:F0} dB)");
+        // And to the next run of the app, as the text it is kept as.
+        var kept = VoiceProcessor.InputLevel.Saved;
+        VoiceProcessor.InputLevel.Forget();
+        var forgotten = new VoiceProcessor.InputLevel().GainDb;
+        VoiceProcessor.InputLevel.Saved = kept;
+        check(kept is not null && forgotten == 0 && Math.Abs(new VoiceProcessor.InputLevel().GainDb - gain) < 1, $"and to the next run of the app (\"{kept}\")");
+        VoiceProcessor.InputLevel.Saved = "not a level";
+        check(Math.Abs(new VoiceProcessor.InputLevel().GainDb - gain) < 1, "a damaged saved level is ignored");
         float[] Nearer() => Enumerable.Range(0, Block).Select(i => (float)(0.03 * Math.Sin(i * 0.1))).ToArray();
         for (var i = 0; i < 400; i++) { var nearer = Nearer(); level.Learn(nearer, 1); level.Apply(nearer); }
         var asked = VoiceProcessor.InputLevel.TargetDb - 20 * Math.Log10(0.03 / Math.Sqrt(2));
