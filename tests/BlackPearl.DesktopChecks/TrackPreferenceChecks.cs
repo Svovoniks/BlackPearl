@@ -162,7 +162,7 @@ static class TrackPreferenceChecks
                 "an id the menu doesn't have changes nothing");
             typeof(MainWindow).GetField("nativeStopCount", flags)!.SetValue(window, 1);
             var refused = Command("audio-track", english);
-            check(refused is { Code: "not-allowed" } && player.AudioTrack == russian && !(bool)Item(Call("PhoneRemoteTracks")!, 5)!,
+            check(refused is { Code: "not-allowed", Message: var why } && !why.Contains("room") && player.AudioTrack == russian && !(bool)Item(Call("PhoneRemoteTracks")!, 5)!,
                 "while the menus are greyed out a phone's choice is refused and the state says so");
             typeof(MainWindow).GetField("nativeStopCount", flags)!.SetValue(window, 0);
             check(Command("audio-track", english) is null, "the phone's audio choice works again once the menus do");

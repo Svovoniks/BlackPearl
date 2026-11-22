@@ -144,7 +144,9 @@ public partial class MainWindow
         if (command.Number is not { } number || number != Math.Floor(number) || Math.Abs(number) > int.MaxValue) return null;
         var list = command.Action == "audio-track" ? AudioTracks : SubtitleTracks;
         if (!CanChangeRoomTracks)
-            return ("not-allowed", room is not null ? "In this room, only whoever plays the video picks the audio and subtitles." : "The PC can't change tracks right now.");
+            return ("not-allowed", room is { } inRoom && inRoom.Identity?.Host != true && inRoom.Snapshot?.SharedControls != true
+                ? "In this room, only whoever plays the video picks the audio and subtitles."
+                : "The PC can't change tracks right now. Try again in a moment.");
         if ((list.ItemsSource as TrackChoice[])?.FirstOrDefault(t => t.Id == (int)number) is not { } choice) return null;
         if (!Equals(list.SelectedItem, choice)) list.SelectedItem = choice;
         return null;
@@ -192,7 +194,8 @@ public partial class MainWindow
         if (action is "audio-track" or "subtitle-track")
         {
             if (RunPhoneTrackCommand(command) is { } error) remote.SendError(session, error.Code, error.Message);
-            PublishPhoneRemoteState();
+            // Also when nothing changed, so a phone waiting on its choice learns the outcome at once.
+            PublishPhoneRemoteState(force: true);
             return;
         }
         if (action is not ("toggle" or "play" or "pause" or "seek-by" or "seek-to" or "previous" or "next" or "stop" or "loop" or "shuffle" or "fullscreen")) return;

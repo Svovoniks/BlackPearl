@@ -98,7 +98,8 @@ static class RoomTrackChecks
                 var emptyPlayers = new[] { hostWindow, guestWindow }.Select(w => (FrameworkElement)w.FindName("PlayerEmpty")).ToArray();
                 var emptyBefore = emptyPlayers.Select(e => e.Visibility).ToArray();
                 foreach (var empty in emptyPlayers) empty.Visibility = Visibility.Collapsed;
-                Check(PhoneTrack(guestWindow, "audio-track", russian) is { Code: "not-allowed" } && guestPlayer.AudioTrack == english && hostPlayer.AudioTrack == english,
+                Check(PhoneTrack(guestWindow, "audio-track", russian) is { Code: "not-allowed", Message: var why } && why.Contains("only whoever plays the video")
+                    && guestPlayer.AudioTrack == english && hostPlayer.AudioTrack == english,
                     "a guest's phone can't change the room's tracks while only whoever plays the video picks them");
                 Check(PhoneTrack(hostWindow, "audio-track", russian) is null, "the host's phone picks the room's audio");
                 await Wait(() => guestPlayer.AudioTrack == russian && hostPlayer.AudioTrack == russian, Refresh);
