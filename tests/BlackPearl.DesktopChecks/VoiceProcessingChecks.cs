@@ -292,8 +292,8 @@ static class VoiceProcessingChecks
                 heardBlock[i] = spoken[i] + (n >= 1440 ? 0.5f * movie[n - 1440] / 32768f : 0) + (n >= 4000 ? 0.2f * movie[n - 4000] / 32768f : 0);
             }
             subtractor.Process(heardBlock, playedBlock, cleaned);
-            // The output is one block late; the last five seconds are measured, away from where talking starts or stops.
-            var before = at - Block; var steady = before % (Rate / 2) is >= 4800 and < Rate / 2 - 9600;
+            // The last five seconds are measured, away from where talking starts or stops.
+            var before = at; var steady = before % (Rate / 2) is >= 4800 and < Rate / 2 - 9600;
             if (at >= Rate * 15 && steady)
             {
                 var wasTalking = before / (Rate / 2) % 2 == 1;
@@ -309,6 +309,38 @@ static class VoiceProcessingChecks
         var removed = 10 * Math.Log10(echoIn / (echoOut + 1e-12)); var keptTalk = 10 * Math.Log10(talkOut / talkIn);
         check(removed > 15 && Math.Abs(keptTalk) < 1.5 && subtractor.Restarts == 0, $"subtracting takes the echo away and leaves the talking over it ({removed:F0} dB less echo, talking {keptTalk:+0.0;-0.0} dB)");
         check(subtractor.WorkingDb > 15, $"and it knows that it is working ({subtractor.WorkingDb:F0} dB)");
+        // Speakers and a microphone that are separate devices count time by clocks of their own. Here the speakers'
+        // runs 40 parts per million fast: the echo slides two samples every second against what was played. The
+        // subtractor finds how far apart the clocks are and has the speakers' sound read that much faster, so it
+        // goes on subtracting; left alone, the slide leaves it behind.
+        // (A movie's sound is mostly low: noise below about 3 kHz stands for it.)
+        var hiss = Noise(Rate * 31 + 8, 0.05, 23); var lowFilm = new short[Rate * 31];
+        for (var i = 0; i < lowFilm.Length; i++) { var sum = 0; for (var j = 0; j < 8; j++) sum += hiss[i + j]; lowFilm[i] = (short)(sum / 3); }
+        double followed = 0;
+        foreach (var following in new[] { true, false })
+        {
+            var drifting = new EchoSubtractor(); var line = new SpeakerQueue(); var read = new float[Block];
+            const double Apart = 40e-6; double driftIn = 0, driftOut = 0; var trace = new List<string>();
+            for (var at = Rate; at + Block <= Rate * 30; at += Block)
+            {
+                var playedBlock = new float[Block]; var heardBlock = new float[Block];
+                for (var i = 0; i < Block; i++)
+                {
+                    playedBlock[i] = lowFilm[at + i] / 32768f;
+                    var place = (at + i - 1440 - Rate) * (1 + Apart) + Rate; var whole = (int)Math.Floor(place); var part = (float)(place - whole);
+                    heardBlock[i] = 0.5f * (lowFilm[whole] + part * (lowFilm[whole + 1] - lowFilm[whole])) / 32768f;
+                }
+                line.Write(playedBlock);
+                line.Read(read, 0, following ? 1 + drifting.Skew : 1);
+                drifting.Process(heardBlock, read, cleaned);
+                if (at >= Rate * 20) for (var i = 0; i < Block; i++) { driftIn += heardBlock[i] * (double)heardBlock[i]; driftOut += cleaned[i] * (double)cleaned[i]; }
+                if (at % (Rate * 2) < Block) trace.Add((drifting.Skew * 1e6).ToString("F0"));
+            }
+            var driftRemoved = 10 * Math.Log10(driftIn / (driftOut + 1e-12));
+            if (following) followed = driftRemoved;
+            if (following) check(Math.Abs(drifting.Skew - Apart) < 15e-6 && driftRemoved > 30, $"speakers on a clock of their own are followed ({drifting.Skew * 1e6:F0} of 40 parts per million found, {driftRemoved:F0} dB less echo; every 2 s: {string.Join(" ", trace)})");
+            else check(driftRemoved < followed - 15, $"which is needed: left alone, such a clock leaves the subtractor behind ({driftRemoved:F0} dB less echo)");
+        }
         // With the speakers' sound arriving after its echo, there is nothing to subtract, and it says so.
         var hopeless = new EchoSubtractor();
         for (var at = Rate; at + Block <= Rate * 8; at += Block)
@@ -324,18 +356,35 @@ static class VoiceProcessingChecks
         queue.Write(Numbered(0));
         var early = queue.Read(handed, 0);
         queue.Write(Numbered(Block)); queue.Write(Numbered(2 * Block));
-        var first = queue.Read(handed, 0) && handed[0] == Block;
-        var second = queue.Read(handed, 0) && handed[0] == 2 * Block;
+        // (Two and a half blocks are kept in hand, and eight samples for reading between samples.)
+        const int Back = 5 * Block / 2 + 8;
+        var first = queue.Read(handed, 0) && handed[0] == 3 * Block - Back;
+        var second = queue.Read(handed, 0) && handed[0] == 4 * Block - Back;
         var empty = !queue.Read(handed, 0) && handed.All(v => v == 0);
         check(!early && first && second && empty, "the speakers' sound reaches the subtractor in order, and silence when there is none");
         // A delivery that comes a moment late does not move what follows against the microphone: the block that was
         // missed is skipped, not handed over one block late from then on.
         queue.Write(Numbered(3 * Block)); queue.Write(Numbered(4 * Block));
-        var inPlace = queue.Read(handed, 0) && handed[0] == 4 * Block;
+        var inPlace = queue.Read(handed, 0) && handed[0] == 6 * Block - Back;
         // Running short again and again means the place is wrong: it is found afresh, with a little in hand.
         var again = !queue.Read(handed, 0) && !queue.Read(handed, 0);
         queue.Write(Numbered(5 * Block)); var waits = !queue.Read(handed, 0);
-        queue.Write(Numbered(6 * Block)); var afresh = queue.Read(handed, 0) && handed[0] == 5 * Block;
+        queue.Write(Numbered(6 * Block)); queue.Write(Numbered(7 * Block)); var afresh = queue.Read(handed, 0) && handed[0] == 8 * Block - Back;
+        // Speakers whose clock runs fast are read that much faster: between the samples, and exactly.
+        // A low note and a high one together: the high one is where reading between samples goes wrong first.
+        var fast = new SpeakerQueue(); var taken = new float[Block]; const double Faster = 1.0005; double worst = 0;
+        static double Notes(double at) => 0.5 * Math.Sin(at * 2 * Math.PI * 1000 / 48000) + 0.5 * Math.Sin(at * 2 * Math.PI * 9000 / 48000);
+        float[] Whistle(int from) => Enumerable.Range(from, Block).Select(v => (float)Notes(v)).ToArray();
+        for (var b = 0; b < 4; b++) fast.Write(Whistle(b * Block));
+        for (var b = 0; b < 200; b++)
+        {
+            fast.Write(Whistle((b + 4) * Block));
+            if (!fast.Read(taken, 0, Faster)) { worst = 1; break; }
+            // The first block starts two and a half blocks and eight samples behind the five written.
+            var from = 5 * Block - Back + b * Block * Faster;
+            for (var i = 0; i < Block; i++) worst = Math.Max(worst, Math.Abs(taken[i] - Notes(from + i * Faster)));
+        }
+        check(worst < 1e-3, $"speakers on a faster clock are read that much faster, between the samples (off by at most {worst:E1})");
         check(inPlace && again && waits && afresh, $"one late delivery of the speakers' sound does not move it against the microphone ({inPlace}, {again}, {waits}, {afresh})");
 
         // The microphone's buffers are handed to a thread of their own: however long one takes to process, handing the

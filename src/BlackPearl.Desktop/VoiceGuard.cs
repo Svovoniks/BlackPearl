@@ -52,6 +52,12 @@ internal sealed class EchoPresence
     // How long after the speakers the echo arrives, in milliseconds, when it was last found.
     public int EchoDelayMs { get; private set; }
     private double echoPower;
+    // How much of the speakers' sound reaches the microphone, as a ratio of powers within the compared band: 0.01
+    // is an echo 20 dB under what was played. 0 until an echo is found. The subtractor starts from it.
+    public double PathPower { get; private set; }
+    // The subtractor has just removed an echo: it is still there, however little the microphone resembles the
+    // speakers under a voice. Without this an echo 12 dB under a talker was taken to be gone every half minute.
+    public void StillThere() { lock (gate) quiet = 0; }
     // The latest comparison, for diagnostics and checks: how similar, and at which delay in milliseconds.
     internal (float Similarity, int DelayMs) Latest { get; private set; }
     internal static void Forget() => remembered = null;
@@ -107,6 +113,8 @@ internal sealed class EchoPresence
         {
             quiet = 0;
             echoPower = echoPower > 0 ? echoPower + (explained - echoPower) * 0.3 : explained;
+            var path = explained / (Dot(matched, matched, Window) / Window);
+            PathPower = PathPower > 0 ? PathPower + (path - PathPower) * 0.3 : path;
             EchoDelayMs = delay * 1000 / Rate;
             Set(true);
         }

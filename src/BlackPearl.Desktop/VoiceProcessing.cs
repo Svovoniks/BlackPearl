@@ -39,7 +39,10 @@ internal sealed class VoiceProcessor : IDisposable
     private readonly float[] direct = new float[BlockSamples], noisy = new float[BlockSamples];
     // Three versions of the microphone, lined up one block late: as it is, with the echo subtracted, and from
     // WebRTC's canceller.
-    private readonly DelayLine directDelay = new(EchoSubtractor.Delay), cancelledDelay = new(EchoSubtractor.Delay - WebRtcApm.CaptureDelay);
+    // WebRTC's canceller hands the microphone back 238 samples late and the subtractor at once; the other two
+    // versions are held back as long, so that changing from one to another does not skip or repeat anything.
+    private readonly DelayLine directDelay = new(WebRtcApm.CaptureDelay), subtractedDelay = new(WebRtcApm.CaptureDelay);
+    private readonly float[] subtractedNow = new float[BlockSamples];
     private readonly float[] cancelled = new float[BlockSamples], subtracted = new float[BlockSamples], played = new float[BlockSamples], mixed = new float[BlockSamples];
     private readonly SpeakerQueue speakers = new();
     internal SpeakerQueue Speakers => speakers;
@@ -48,6 +51,11 @@ internal sealed class VoiceProcessor : IDisposable
     internal bool NeverSubtract;
     private EchoSubtractor? subtractor;
     private bool subtractedBefore;
+    private int proofs, anchored;
+    // How far apart the speakers' and the microphone's clocks run, as the subtractor last found it. The devices
+    // usually stay the same, so the next subtractor starts from it.
+    private static double knownSkew;
+    internal double EchoSkew => subtractor?.Skew ?? 0;
     private int subtractorLate;
     private enum Source { Direct, Subtracted, Cancelled }
     private Source source, former;
@@ -59,6 +67,9 @@ internal sealed class VoiceProcessor : IDisposable
     private readonly PeakLimiter limiter = new();
     // An echo this far under the voice, in dB, is not cancelled.
     public const double FaintEchoDb = -20;
+    // The subtractor is used once it has been seen to take this much off the echo: until its filter has found the
+    // room, what it gives is the microphone with the filter's guesses added.
+    private const double UsefulDb = 3;
     private bool loudEcho, echoFound;
     // Below 60 Hz there is no voice, only rumble, hum and the thump of a desk. The denoiser removes far less of any
     // noise when that is left in: in pauses a living room's noise stayed 25 dB louder without this filter.
@@ -189,16 +200,22 @@ internal sealed class VoiceProcessor : IDisposable
         directDelay.Run(block, direct);
         if (echoFound)
         {
-            // The speakers' sound is given a head start of all but 80 ms of the echo's delay, so the echo falls
-            // inside the 240 ms the subtractor can follow; a delay that has moved on starts it afresh.
-            var late = Math.Max(0, presence.EchoDelayMs - 80) * VoicePacket.SampleRate / 1000;
-            if (subtractor is null || Math.Abs(late - subtractorLate) > VoicePacket.SampleRate * 30 / 1000) { subtractor = new(); subtractorLate = late; subtracting = false; }
-            speakers.Read(played, subtractorLate);
-            subtractor.Process(block, played, subtracted);
+            // The speakers' sound is held back until its echo is about 20 ms away (the delay is known to within
+            // 10 ms or so), so that the echo and the 220 ms of room after it fall inside what the subtractor can
+            // follow, and as much of the speakers' sound as possible is in hand when Windows delivers it late. A
+            // delay that has moved on starts the subtractor afresh.
+            var late = Math.Max(0, presence.EchoDelayMs - 45) * VoicePacket.SampleRate / 1000;
+            if (subtractor is null || Math.Abs(late - subtractorLate) > VoicePacket.SampleRate * 30 / 1000) { subtractor = new(knownSkew, presence.PathPower); subtractorLate = late; subtracting = false; proofs = 0; }
+            speakers.Read(played, subtractorLate, 1 + subtractor.Skew);
+            if (speakers.Anchored != anchored) { if (anchored != 0) subtractor.Relearn(forget: true); anchored = speakers.Anchored; }
+            subtractor.Process(block, played, subtractedNow);
+            subtractedDelay.Run(subtractedNow, subtracted);
+            knownSkew = subtractor.Skew;
+            if (subtractor.Proofs != proofs) { proofs = subtractor.Proofs; presence.StillThere(); }
         }
         else { subtractor = null; subtracting = false; }
         canceller.ProcessCapture(block);
-        cancelledDelay.Run(block, cancelled);
+        block.CopyTo(cancelled, 0);
         // Until an echo is found the speech detector hears the movie's dialogue as speech, so a level learned in
         // that time may be the movie's and not the voice's.
         if (presence.Present && !echoFound) level.Doubt();
@@ -210,7 +227,7 @@ internal sealed class VoiceProcessor : IDisposable
         var apart = presence.EchoDb - level.SpeechDb;
         loudEcho = presence.Present && (double.IsNaN(apart) || apart > (loudEcho ? FaintEchoDb - 3 : FaintEchoDb));
         var left = apart - (subtractor?.WorkingDb ?? 0);
-        subtracting = !NeverSubtract && presence.Present && subtractor is not null && !double.IsNaN(left) && left < (subtracting ? FaintEchoDb + 3 : FaintEchoDb);
+        subtracting = !NeverSubtract && presence.Present && subtractor is { WorkingDb: >= UsefulDb } && !double.IsNaN(left) && left < (subtracting ? FaintEchoDb + 3 : FaintEchoDb);
         // WebRTC's canceller takes some of the voice with the echo, so a level learned from it is too low, and the
         // gain set from it too high for the voice the subtractor leaves whole.
         if (subtracting && !subtractedBefore) { subtractedBefore = true; level.Again(); }
@@ -364,9 +381,10 @@ internal sealed class VoiceProcessor : IDisposable
         // Forgets the level carried over between sessions, so checks start from the same place.
         internal static void Forget() { remembered = double.NaN; rememberedMost = MaxGainDb; microphone = null; }
         // Starts over unless the level is long established; the gain stays where it is until speech is heard again.
-        public void Doubt() { if (learned < AverageBlocks) { speechDb = recentDb = double.NaN; learned = 0; } }
+        // What held the gain down so far may have been the echo driving the limiter, not the voice.
+        public void Doubt() { mostDb = rememberedMost = MaxGainDb; if (learned < AverageBlocks) { speechDb = recentDb = double.NaN; learned = 0; } }
         // Learns the level again from what is heard next, unless it is long established, keeping it meanwhile.
-        public void Again() { if (learned < AverageBlocks) learned = 0; }
+        public void Again() { mostDb = rememberedMost = MaxGainDb; if (learned < AverageBlocks) learned = 0; }
         // Another microphone has another level: what was learned from the last one is dropped.
         public void Microphone(string id)
         {

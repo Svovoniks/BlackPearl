@@ -64,7 +64,7 @@ static class VoiceProbe
             VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
             using var processor = new VoiceProcessor(capture, mode);
             processor.Processed = block => processed.AddRange(block);
-            var rows = new System.Text.StringBuilder("frame,heard,cleaned,sent,gain,limiter,restored,echo,similarity,delay,cancelled,echoDb,speechDb,subtracted,working\n");
+            var rows = new System.Text.StringBuilder("frame,heard,cleaned,sent,gain,limiter,restored,echo,similarity,delay,cancelled,echoDb,speechDb,subtracted,working,skew\n");
             var decoded = new short[Frame];
             for (var frame = 0; frame < frames; frame++)
             {
@@ -79,7 +79,7 @@ static class VoiceProbe
                     if (at >= 0) decoded.CopyTo(sent, at * Frame);
                 }
                 var (heard, cleaned) = processor.SpeechProbability;
-                rows.Append(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{heard:F3},{cleaned:F3},{packets.Count},{processor.InputGainDb:F1},{processor.LimiterDb:F1},{processor.Restored:F2},{(processor.EchoPresent ? 1 : 0)},{processor.EchoEvidence.Similarity:F2},{processor.EchoEvidence.DelayMs},{(processor.EchoCancelled ? 1 : 0)},{processor.EchoDb:F1},{processor.SpeechDb:F1},{(processor.EchoSubtracted ? 1 : 0)},{processor.SubtractionDb:F1}\n");
+                rows.Append(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{heard:F3},{cleaned:F3},{packets.Count},{processor.InputGainDb:F1},{processor.LimiterDb:F1},{processor.Restored:F2},{(processor.EchoPresent ? 1 : 0)},{processor.EchoEvidence.Similarity:F2},{processor.EchoEvidence.DelayMs},{(processor.EchoCancelled ? 1 : 0)},{processor.EchoDb:F1},{processor.SpeechDb:F1},{(processor.EchoSubtracted ? 1 : 0)},{processor.SubtractionDb:F1},{processor.EchoSkew * 1e6:F1}\n");
                 packets.Clear();
             }
             var name = Path.Combine(output, Path.GetFileNameWithoutExtension(file));
@@ -210,7 +210,7 @@ static class VoiceProbe
         processor.NeverSubtract = Environment.GetEnvironmentVariable("VOICE_PROBE_NO_SUBTRACTOR") == "1";
         var playing = VoiceAudio.PlayAsync(output.Id, film.Select(s => s / 32768f).ToArray(), CancellationToken.None);
         Console.WriteLine($"Playing {Path.GetFileName(movie)} into {output.Name}, heard on {audio.InputName}; adding {Path.GetFileName(voice)} to the microphone");
-        Console.WriteLine("second  echo found  handled  subtracted  working dB  echo dB  voice dB  delay ms  similarity  gain dB  audio lost  speakers dB  speaker blocks  out dB");
+        Console.WriteLine("second  echo found  handled  subtracted  working dB  echo dB  voice dB  delay ms  similarity  gain dB  audio lost  speakers dB  speaker blocks  out dB  clocks apart ppm");
         var seconds = Math.Min(film.Length, talk.Length) / Rate;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         for (var second = 1; second <= seconds; second++)
@@ -218,7 +218,7 @@ static class VoiceProbe
             float similarity = 0; double loudest = -120;
             while (clock.Elapsed.TotalSeconds < second) { await Task.Delay(50); similarity = Math.Max(similarity, processor.EchoEvidence.Similarity); loudest = Math.Max(loudest, processor.PlayedDb); }
             if (second % 5 != 0 && second != seconds) continue;
-            Console.WriteLine(FormattableString.Invariant($"{second,6}  {(processor.EchoPresent ? "yes" : "no"),10}  {(processor.EchoCancelled ? "yes" : "no"),7}  {(processor.EchoSubtracted ? "yes" : "no"),10}  {processor.SubtractionDb,10:F1}  {processor.EchoDb,7:F1}  {processor.SpeechDb,8:F1}  {processor.EchoEvidence.DelayMs,8}  {similarity,10:F2}  {processor.InputGainDb,7:F1}  {audio.InputGaps,10}  {loudest,11:F1}  {processor.PlayedBlocks,14}  {capture.LevelDb,6:F1}"));
+            Console.WriteLine(FormattableString.Invariant($"{second,6}  {(processor.EchoPresent ? "yes" : "no"),10}  {(processor.EchoCancelled ? "yes" : "no"),7}  {(processor.EchoSubtracted ? "yes" : "no"),10}  {processor.SubtractionDb,10:F1}  {processor.EchoDb,7:F1}  {processor.SpeechDb,8:F1}  {processor.EchoEvidence.DelayMs,8}  {similarity,10:F2}  {processor.InputGainDb,7:F1}  {audio.InputGaps,10}  {loudest,11:F1}  {processor.PlayedBlocks,14}  {capture.LevelDb,6:F1}  {processor.EchoSkew * 1e6,16:F0}"));
         }
         await Task.Delay(500);
         Console.WriteLine(FormattableString.Invariant($"Speakers lined up {processor.Speakers.Anchored} times, nothing to give {processor.Speakers.Starved} times, waiting {processor.Speakers.Least / 48.0:F0} to {processor.Speakers.Most / 48.0:F0} ms; subtractor restarted {processor.SubtractorRestarts} times; slowest buffer {audio.SlowestBufferMs:F0} ms"));
