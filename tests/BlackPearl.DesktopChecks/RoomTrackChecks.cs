@@ -88,7 +88,24 @@ static class RoomTrackChecks
                 var russianSubtitles = hostMedia.Tracks.Single(track => track.TrackType == TrackType.Text && track.Language == "rus").Id;
                 await Wait(() => hostPlayer.Spu == russianSubtitles && guestPlayer.Spu == russianSubtitles, Refresh);
                 Check(true, "changing host audio publishes its matching subtitle choice to the guest");
+                // Rooms share controls by default; only whoever plays the video picks tracks once that is off.
+                host.Send(new("controls", Number: 0)); await Wait(() => guest.Snapshot?.SharedControls == false);
+                Refresh();
                 Check(!((ListBox)guestWindow.FindName("AudioTracks")).IsEnabled, "guest track picker respects host-only controls");
+                // A phone's choice (PHONE-REMOTE.md, "Tracks") is a click in that PC's menu: refused for a guest here, the room's for the host.
+                (string Code, string Message)? PhoneTrack(MainWindow window, string action, int id) => ((string, string)?)Call(window, "RunPhoneTrackCommand",
+                    new RemoteCommand(action, System.Text.Json.JsonDocument.Parse(id.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement.Clone()));
+                var emptyPlayers = new[] { hostWindow, guestWindow }.Select(w => (FrameworkElement)w.FindName("PlayerEmpty")).ToArray();
+                var emptyBefore = emptyPlayers.Select(e => e.Visibility).ToArray();
+                foreach (var empty in emptyPlayers) empty.Visibility = Visibility.Collapsed;
+                Check(PhoneTrack(guestWindow, "audio-track", russian) is { Code: "not-allowed" } && guestPlayer.AudioTrack == english && hostPlayer.AudioTrack == english,
+                    "a guest's phone can't change the room's tracks while only whoever plays the video picks them");
+                Check(PhoneTrack(hostWindow, "audio-track", russian) is null, "the host's phone picks the room's audio");
+                await Wait(() => guestPlayer.AudioTrack == russian && hostPlayer.AudioTrack == russian, Refresh);
+                Check(true, "the host's phone changes the audio for the whole room, as the host's menu does");
+                PhoneTrack(hostWindow, "audio-track", english);
+                await Wait(() => guestPlayer.AudioTrack == english && hostPlayer.Spu == russianSubtitles && guestPlayer.Spu == russianSubtitles, Refresh);
+                for (var i = 0; i < emptyPlayers.Length; i++) emptyPlayers[i].Visibility = emptyBefore[i];
                 var embeddedSubtitles = (ListBox)hostWindow.FindName("SubtitleTracks");
                 var manualSubtitleChoice = embeddedSubtitles.Items.Cast<object>().First(t => (int)t.GetType().GetProperty("Id")!.GetValue(t)! >= 0);
                 var manualSubtitle = (int)manualSubtitleChoice.GetType().GetProperty("Id")!.GetValue(manualSubtitleChoice)!;

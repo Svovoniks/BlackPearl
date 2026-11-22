@@ -8,7 +8,7 @@ namespace BlackPearl.Desktop;
 public partial class MainWindow
 {
     // The window also has a player, whose Shuffle a phone can turn on; the phone host (PhoneHost.cs) has none.
-    private static readonly string[] PhoneFeatures = [.. PhoneLibrary.Features, "shuffle"];
+    private static readonly string[] PhoneFeatures = [.. PhoneLibrary.Features, "shuffle", "tracks"];
     private PhoneLibrary? phoneLibrary;
     private PhoneLibrary PhoneLibrary => phoneLibrary ??= new(library, () => phoneRemote, action => Dispatcher.BeginInvoke(action), lifetime.Token)
     {

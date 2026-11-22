@@ -57,11 +57,15 @@ public record RemoteCommand(string Action, JsonElement? Value)
 public record RemoteRoom(string Name, int People);
 // The saved queue the PC plays from, and the playing video's place in it (PHONE-REMOTE.md, "Queues").
 public record RemoteQueue(string Id, string Name, int Index);
+// A choice in the PC player's Audio or Subtitles menu (PHONE-REMOTE.md, "Tracks"), as the menu shows it: the language
+// first and the rest muted under it. Subtitles' -1 is Off.
+public record RemoteTrack(int Id, string Name, string? Detail);
 // What the phone shows. Null fields are left out when nothing is loaded. MediaId names the library video the PC plays on
 // its own (not in a room), for the phone to take it over.
 public record RemoteState(bool Media, string? Title = null, string? Detail = null, bool? Playing = null, long? PositionMs = null, long? DurationMs = null,
     int Volume = 100, bool Muted = false, string Loop = "off", bool Fullscreen = false, bool HasPrevious = false, bool HasNext = false, bool CanControl = true, RemoteRoom? Room = null,
-    string? MediaId = null, RemoteQueue? Queue = null, bool? Shuffle = null)
+    string? MediaId = null, RemoteQueue? Queue = null, bool? Shuffle = null,
+    RemoteTrack[]? AudioTracks = null, int? AudioTrack = null, RemoteTrack[]? SubtitleTracks = null, int? SubtitleTrack = null, bool? CanChangeTracks = null)
 {
     public string Type => "state";
 }
