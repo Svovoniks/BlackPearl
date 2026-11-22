@@ -225,18 +225,26 @@ static class PlayerLayoutChecks
             var box = element.TransformToAncestor(bar).TransformBounds(new Rect(new Point(), element.RenderSize));
             return box.Left >= 0 && box.Right <= bar.ActualWidth + 0.5;
         }
-        foreach (var width in new[] { 320, 400, 480, 560, 700 })
+        foreach (var width in new[] { 320, 400, 480, 560, 640, 700 })
         {
             Invoke(window, "ClosePlayerMenus"); Settle(width, 360);
-            var shown = new[] { "PlayButton", "PreviousButton", "NextButton", "MuteButton", "FullscreenButton", "OverflowPill", "AudioPill", "SubtitlePill", "QueuePill", "StopButton", "LoopButton", "PictureInPictureButton", "PlaybackTime" }
+            var shown = new[] { "PlayButton", "PreviousButton", "NextButton", "MuteButton", "FullscreenButton", "OverflowPill", "AudioPill", "SubtitlePill", "QueuePill", "StopButton", "ShuffleButton", "LoopButton", "PictureInPictureButton", "PlaybackTime" }
                 .Select(name => (FrameworkElement)window.FindName(name)).Where(element => element.Visibility == Visibility.Visible).ToList();
             Check(shown.All(InBar), $"every control shown in a {width}px player bar fits inside it");
             var folded = pills.Folded.Count; var stopHidden = ((Button)window.FindName("StopButton")).Visibility != Visibility.Visible;
             var loopHidden = ((FrameworkElement)window.FindName("LoopButton")).Visibility != Visibility.Visible;
-            Check((folded > 0 || stopHidden || loopHidden) == (overflowPill.Visibility == Visibility.Visible) &&
-                overflowItems.Children.OfType<Button>().Count() == folded + (stopHidden ? 1 : 0) + (loopHidden ? 1 : 0) + (((Button)window.FindName("PictureInPictureButton")).Visibility != Visibility.Visible ? 1 : 0),
+            var shuffleHidden = ((FrameworkElement)window.FindName("ShuffleButton")).Visibility != Visibility.Visible;
+            Check((folded > 0 || stopHidden || loopHidden || shuffleHidden) == (overflowPill.Visibility == Visibility.Visible) &&
+                overflowItems.Children.OfType<Button>().Count() == folded + (stopHidden ? 1 : 0) + (loopHidden ? 1 : 0) + (shuffleHidden ? 1 : 0) + (((Button)window.FindName("PictureInPictureButton")).Visibility != Visibility.Visible ? 1 : 0),
                 $"the … pill appears only when something is folded and lists each folded control at {width}px");
             if (width == 400) Save(bar, "player-bar-narrow.png");
+            if (width == 700)
+            {
+                Save(bar, "player-bar-700.png", 2);
+                var shuffleToggle = (System.Windows.Controls.Primitives.ToggleButton)window.FindName("ShuffleButton");
+                shuffleToggle.IsChecked = true; bar.UpdateLayout(); Save(bar, "player-bar-700-shuffle.png", 2); shuffleToggle.IsChecked = false;
+            }
+            if (width == 560) { Invoke(window, "RefreshOverflowMenu"); Save(bar, "player-bar-560.png", 2); }
         }
         Settle(320, 360);
         Check(pills.Folded.Count >= 2 && ((System.Windows.Controls.Primitives.Popup)window.FindName("SubtitleMenu")).PlacementTarget == overflowPill,

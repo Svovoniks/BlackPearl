@@ -112,7 +112,7 @@ public partial class MainWindow
             PreviousButton.IsEnabled, NextButton.IsEnabled, CanControlMediaPlayback, inRoom,
             // Only a video this PC plays on its own can move to the phone; a room's belongs to the room.
             room is null && item is { IsMusic: false } && InLibrary(item) ? item.Id : null,
-            room is null ? PhoneRemoteQueue(item) : null);
+            room is null ? PhoneRemoteQueue(item) : null, shuffle);
     }
 
     // The saved queue playing here and the video's place in it. The player's queue is the saved one's videos that the
@@ -154,7 +154,7 @@ public partial class MainWindow
             else if (action == "mute") MutePlayback(this, new RoutedEventArgs());
             return;
         }
-        if (action is not ("toggle" or "play" or "pause" or "seek-by" or "seek-to" or "previous" or "next" or "stop" or "loop" or "fullscreen")) return;
+        if (action is not ("toggle" or "play" or "pause" or "seek-by" or "seek-to" or "previous" or "next" or "stop" or "loop" or "shuffle" or "fullscreen")) return;
         if (!HasMediaPlayback)
         {
             // Play continues the up-next countdown even with the player's video ended.
@@ -178,6 +178,7 @@ public partial class MainWindow
             case "next": if (NextButton.IsEnabled) NextQueued(this, new RoutedEventArgs()); break;
             case "stop": StopPlayback(this, new RoutedEventArgs()); break;
             case "loop": ToggleLoop(this, new RoutedEventArgs()); break;
+            case "shuffle": ToggleShuffle(this, new RoutedEventArgs()); break;
             case "fullscreen":
                 if (RoomPage.Visibility != Visibility.Visible) remote.SendError(session, "not-shown", "Open the player on the PC to go fullscreen.");
                 else SetFullscreen(!fullscreen);

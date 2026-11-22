@@ -61,7 +61,7 @@ public record RemoteQueue(string Id, string Name, int Index);
 // its own (not in a room), for the phone to take it over.
 public record RemoteState(bool Media, string? Title = null, string? Detail = null, bool? Playing = null, long? PositionMs = null, long? DurationMs = null,
     int Volume = 100, bool Muted = false, string Loop = "off", bool Fullscreen = false, bool HasPrevious = false, bool HasNext = false, bool CanControl = true, RemoteRoom? Room = null,
-    string? MediaId = null, RemoteQueue? Queue = null)
+    string? MediaId = null, RemoteQueue? Queue = null, bool? Shuffle = null)
 {
     public string Type => "state";
 }

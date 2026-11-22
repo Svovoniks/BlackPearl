@@ -157,6 +157,14 @@ if (args.FirstOrDefault() == "--episode-playback")
     Console.WriteLine($"{checks} episode continuation and watched-state checks passed."); return;
 }
 
+if (args.FirstOrDefault() == "--shuffle")
+{
+    var checks = 0;
+    ShuffleOrderFixture.Run((condition, name) =>
+    { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); checks++; });
+    Console.WriteLine($"{checks} shuffle checks passed."); return;
+}
+
 if (args.FirstOrDefault() == "--opened-files")
 {
     var checks = 0;
@@ -467,6 +475,7 @@ if (part != 2)
     VideoFileDetailsFixture.Run(Check);
     await LibraryPicturesFixture.Run(Path.Combine(root, "library-pictures"), Check);
     EpisodePlaybackFixture.Run(Check);
+    ShuffleOrderFixture.Run(Check);
     OpenedFileFixture.Run(Check);
     await DiagnosticLogFixture.Run(Path.Combine(root, "diagnostic-log"), Check);
     await RecoveryFixture.Run(Check);

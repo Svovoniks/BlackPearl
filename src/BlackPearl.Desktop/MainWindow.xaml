@@ -1340,7 +1340,7 @@
          <!-- Bottom bar: timeline, transport, track and queue pills, and output. Each pill opens its menu above itself, so the bar never changes height. -->
          <Border x:Name="PlaybackControls" Background="{StaticResource PlayerControlsFade}" Padding="16,40,16,16" PreviewMouseMove="ControlsMouseMoved" PreviewKeyDown="ControlsKeyPressed">
           <!-- The dock: one glass capsule holding the timeline and every control, centred over the video. -->
-          <Border x:Name="PlaybackDock" Background="#D9111116" BorderBrush="#1FFFFFFF" BorderThickness="1" CornerRadius="16" Padding="10,2,10,8" MaxWidth="980" SizeChanged="PlaybackControlsSizeChanged">
+          <Border x:Name="PlaybackDock" Background="#D9111116" BorderBrush="#1FFFFFFF" BorderThickness="1" CornerRadius="16" Padding="10,2,10,8" MaxWidth="1010" SizeChanged="PlaybackControlsSizeChanged">
            <!-- The timeline spans the dock; while the episode pill shows, it stops at the output pill's column, and the episode pill centres over that pill. -->
            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <Slider x:Name="Timeline" Grid.ColumnSpan="3" Margin="0,0,0,2" PreviewMouseWheel="TimelineWheel" Style="{StaticResource PlayerSlider}" Minimum="0" Maximum="1" IsMoveToPointEnabled="False" PreviewMouseLeftButtonDown="SeekStarted" PreviewMouseLeftButtonUp="SeekFinished" PreviewMouseMove="SeekMoved" LostMouseCapture="SeekCaptureLost" PreviewKeyDown="SeekKeyStarted" PreviewKeyUp="SeekKeyFinished" AutomationProperties.Name="Playback position"/>
@@ -1351,6 +1351,7 @@
               <Button x:Name="PlayButton" Content="&#xF5B0;" Click="TogglePlayback" Style="{StaticResource PlayerSegmentPlay}" ToolTip="Play / pause (Space)" AutomationProperties.Name="Play or pause"/>
               <Button x:Name="NextButton" IsEnabled="False" ToolTipService.ShowOnDisabled="True" Content="&#xE893;" Click="NextQueued" Style="{StaticResource PlayerSegmentIcon}" ToolTip="Next video (N)" AutomationProperties.Name="Next video"/>
               <Button x:Name="StopButton" Content="&#xEE95;" Click="StopPlayback" Style="{StaticResource PlayerSegmentIcon}" ToolTip="Stop (S)" AutomationProperties.Name="Stop playback"/>
+              <ToggleButton x:Name="ShuffleButton" Content="&#xE8B1;" Click="ShuffleClicked" Style="{StaticResource PlayerSegmentToggle}" ToolTipService.ShowOnDisabled="True" ToolTip="Shuffle off (R)" AutomationProperties.Name="Shuffle off"/>
               <ToggleButton x:Name="LoopButton" Content="&#xE8EE;" Click="LoopClicked" Style="{StaticResource PlayerSegmentToggle}" ToolTipService.ShowOnDisabled="True" ToolTip="Loop off (L)" AutomationProperties.Name="Loop off"/>
              </StackPanel></Border>
              <Border x:Name="PlaybackTimePill" Style="{StaticResource PlayerPillGroup}" Padding="10,0"><TextBlock x:Name="PlaybackTime" Text="00:00 / 00:00" Foreground="#D9DAE2" FontSize="11.5" VerticalAlignment="Center" Typography.NumeralAlignment="Tabular"/></Border>

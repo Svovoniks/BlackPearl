@@ -7,7 +7,8 @@ namespace BlackPearl.Desktop;
 // playing here, progress shown on the cards, and Continue on the PC.
 public partial class MainWindow
 {
-    private static readonly string[] PhoneFeatures = PhoneLibrary.Features;
+    // The window also has a player, whose Shuffle a phone can turn on; the phone host (PhoneHost.cs) has none.
+    private static readonly string[] PhoneFeatures = [.. PhoneLibrary.Features, "shuffle"];
     private PhoneLibrary? phoneLibrary;
     private PhoneLibrary PhoneLibrary => phoneLibrary ??= new(library, () => phoneRemote, action => Dispatcher.BeginInvoke(action), lifetime.Token)
     {

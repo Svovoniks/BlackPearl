@@ -114,6 +114,10 @@ static class StreamQualityChecks
             var qualityFolded = strip.Folded.Contains(Control<ToggleButton>("QualityPill"));
             check(strip.Folded.All(pill => pill == Control<ToggleButton>("QualityPill")) && (!qualityFolded || window.ActualWidth < 1200),
                 $"the bar grows by the quality pill's width, so no other pill is pushed out of it{(qualityFolded ? "; this window is too narrow for it, and the quality pill is the one that folds" : "")}");
+            // Shuffle gives way to the pills: it folds into the … menu only when a pill would otherwise fold.
+            var shuffleShown = Control<ToggleButton>("ShuffleButton").Visibility == Visibility.Visible;
+            check(qualityFolded ? !shuffleShown : shuffleShown,
+                qualityFolded ? "Shuffle folds into the … menu before any pill does" : "with room for every pill, Shuffle keeps its place in the bar");
             check(Choices().SequenceEqual(["Original", "1080p", "720p", "480p"]) && Control<ListBox>("QualityChoices").IsEnabled, "whoever plays the video chooses among the qualities it is large enough for");
             await Shot("1-streamer-pill");
             // The pill opens its menu like the others: above the pill, and gone when another pill's menu opens.
