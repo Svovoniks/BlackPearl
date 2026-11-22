@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
@@ -66,6 +68,61 @@ internal sealed class VoiceAudio : IAsyncDisposable
     private VoiceProcessor? processor;
     // The processing behind the open microphone, for the live probe.
     internal VoiceProcessor? Processor => processor;
+    // Times Windows reported that microphone audio was lost between two buffers (the first buffer after opening always
+    // says so and is not counted), the samples received, and the longest the processing of one buffer took.
+    internal int InputGaps => Volatile.Read(ref inputGaps);
+    internal long InputSamples => Interlocked.Read(ref inputSamples);
+    internal double SlowestBufferMs => pump?.SlowestMs ?? 0;
+    private int inputGaps, inputBuffers;
+    private long inputSamples;
+    private Pump? pump;
+
+    // Takes microphone buffers from Windows' capture thread and processes them on a thread of its own. Windows keeps
+    // only a little audio waiting; when the capture thread is busy for longer than that, as it was each time the
+    // speech gate opened and a burst of frames was encoded, the audio that arrives meanwhile is lost and the voice
+    // skips. The capture thread now only hands its buffer over.
+    internal sealed class Pump : IDisposable
+    {
+        private readonly BlockingCollection<(short[] Samples, int Count)> waiting = new(200);
+        private readonly Action<short[], int> process;
+        private readonly Thread thread;
+        private double slowestMs;
+        public double SlowestMs => Volatile.Read(ref slowestMs);
+        // Buffers that could not be taken because four seconds of them were already waiting.
+        public int Dropped { get; private set; }
+        public Pump(Action<short[], int> process)
+        {
+            this.process = process;
+            thread = new Thread(Run) { IsBackground = true, Name = "Voice processing", Priority = ThreadPriority.AboveNormal };
+            thread.Start();
+        }
+        public void Post(ReadOnlySpan<short> samples)
+        {
+            var copy = ArrayPool<short>.Shared.Rent(samples.Length);
+            samples.CopyTo(copy);
+            try { if (waiting.TryAdd((copy, samples.Length))) return; }
+            catch (InvalidOperationException) { }   // closing
+            ArrayPool<short>.Shared.Return(copy); Dropped++;
+        }
+        private void Run()
+        {
+            foreach (var (samples, count) in waiting.GetConsumingEnumerable())
+            {
+                var began = Stopwatch.GetTimestamp();
+                try { process(samples, count); }
+                catch (Exception ex) when (ex is not OutOfMemoryException) { PlaybackDiagnostics.Record("voice-processing-failed", new { stage = "pump", error = ex.GetType().Name, ex.Message }); }
+                var took = Stopwatch.GetElapsedTime(began).TotalMilliseconds;
+                if (took > slowestMs) Volatile.Write(ref slowestMs, took);
+                ArrayPool<short>.Shared.Return(samples);
+            }
+        }
+        // Processes what is still waiting, then stops.
+        public void Dispose()
+        {
+            waiting.CompleteAdding();
+            if (Thread.CurrentThread != thread) thread.Join(3000);
+        }
+    }
     private WasapiPlayer? player;
     private Settings settings;
     private int restartQueued;
@@ -183,10 +240,15 @@ internal sealed class VoiceAudio : IAsyncDisposable
             PlaybackDiagnostics.Record("voice-input-mode-unavailable", new { mode = "Raw", error = ex.GetType().Name, code = ex.HResult });
             created = Build(false);
         }
+        var handing = pump = new Pump((samples, count) => processing.Write(samples.AsSpan(0, count)));
         created.DataAvailable += (buffer, flags, _, _) =>
         {
-            if ((flags & AudioClientBufferFlags.Silent) != 0) { Span<short> silence = stackalloc short[buffer.Length / 2]; silence.Clear(); processing.Write(silence); }
-            else processing.Write(MemoryMarshal.Cast<byte, short>(buffer));
+            // Audio lost before it reached the app is heard as a skip; the log says when it happens.
+            if (Interlocked.Increment(ref inputBuffers) > 1 && (flags & AudioClientBufferFlags.DataDiscontinuity) != 0 && Interlocked.Increment(ref inputGaps) is 1 or 10 or 100)
+                PlaybackDiagnostics.Record("voice-input-gap", new { gaps = InputGaps, buffers = Volatile.Read(ref inputBuffers), slowestMs = Math.Round(SlowestBufferMs, 1) });
+            Interlocked.Add(ref inputSamples, buffer.Length / 2);
+            if ((flags & AudioClientBufferFlags.Silent) != 0) { Span<short> silence = stackalloc short[buffer.Length / 2]; silence.Clear(); handing.Post(silence); }
+            else handing.Post(MemoryMarshal.Cast<byte, short>(buffer));
         };
         created.RecordingStopped += (_, e) =>
         {
@@ -278,6 +340,8 @@ internal sealed class VoiceAudio : IAsyncDisposable
         simulatedInput = false;
         var old = recorder; recorder = null; MicrophoneReady = false;
         try { old?.Dispose(); } catch (Exception ex) when (ex is COMException or InvalidOperationException) { }
+        var handing = pump; pump = null;
+        handing?.Dispose();
         CloseReference();
         // The recorders have stopped calling it, so the models can be released.
         var models = processor; processor = null;

@@ -104,7 +104,8 @@ static class VoiceProbe
         var (inputs, _) = await VoiceAudio.ListDevicesAsync();
         var device = inputs.FirstOrDefault(d => d.Name.Contains(microphone, StringComparison.OrdinalIgnoreCase));
         if (device is null) { Console.WriteLine($"No microphone named like \"{microphone}\". Found: {string.Join("; ", inputs.Select(d => d.Name))}"); Environment.ExitCode = 1; return; }
-        var capture = new VoiceCapture { Transmitting = true };
+        // VOICE_PROBE_MUTED=1 keeps the speech gate shut, so nothing is encoded: for telling the encoder's cost apart.
+        var capture = new VoiceCapture { Transmitting = Environment.GetEnvironmentVariable("VOICE_PROBE_MUTED") != "1" };
         var sent = 0; capture.Frame += _ => Interlocked.Increment(ref sent);
         VoiceProcessor.InputLevel.Forget(); EchoPresence.Forget();
         await using var audio = new VoiceAudio(capture, null, new(device.Id, null, mode));
@@ -149,6 +150,7 @@ static class VoiceProbe
             if (played is not null && second % 5 != 0 && second != seconds) continue;
             Console.WriteLine(FormattableString.Invariant($"{second,6}  {peak,10:F1}  {heard,6:F2}  {Volatile.Read(ref sent) - before,11}  {(processor.EchoPresent ? "yes" : "no"),10}  {(processor.EchoCancelled ? "yes" : "no"),10}  {similarity,10:F2}  {delay,8}  {processor.EchoDb,7:F1}  {processor.SpeechDb,8:F1}  {processor.InputGainDb,7:F1}  {limiter,10:F1}  {restored,10:F2}"));
         }
+        Console.WriteLine(FormattableString.Invariant($"Microphone audio lost {audio.InputGaps} times; {audio.InputSamples / (double)Rate:F2} s received; slowest buffer took {audio.SlowestBufferMs:F1} ms to process"));
         if (played is null || playing is null) return;
         await playing;
         short[] back; lock (heardBack) back = heardBack.ToArray();

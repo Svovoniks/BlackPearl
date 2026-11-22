@@ -84,6 +84,18 @@ public sealed class VoiceCapture
         encoder.Bitrate = 32000; encoder.UseInbandFEC = true; encoder.PacketLossPercent = 10;
         encoder.SignalType = OpusSignal.OPUS_SIGNAL_VOICE; encoder.Complexity = 8; encoder.UseVBR = true;
     }
+    // The encoder's code is compiled the first time it runs, which takes tens of milliseconds: on the microphone's
+    // thread that was long enough for Windows to drop the audio that arrived meanwhile, at the start of the first
+    // sentence. Encoding a little silence before the microphone starts spends that time early.
+    public void Warm()
+    {
+        lock (gate)
+        {
+            var silence = new short[VoicePacket.FrameSamples];
+            for (var i = 0; i < PrerollFrames + 2; i++) encoder.Encode(silence, VoicePacket.FrameSamples, encoded, encoded.Length);
+            encoder.ResetState();
+        }
+    }
     public void Write(ReadOnlySpan<short> samples)
     {
         lock (gate)

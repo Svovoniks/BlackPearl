@@ -98,6 +98,7 @@ internal sealed class VoiceProcessor : IDisposable
     // well; until then a knock can pass for speech. A second of silence brings them there before the microphone starts.
     private void Settle()
     {
+        capture.Warm();
         var silence = new float[BlockSamples];
         for (var i = 0; i < 100; i++)
         {

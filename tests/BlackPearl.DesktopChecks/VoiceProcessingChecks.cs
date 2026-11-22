@@ -311,6 +311,19 @@ static class VoiceProcessingChecks
         var empty = !queue.Read(handed, 0) && handed.All(v => v == 0);
         check(!early && first && second && empty, "the speakers' sound reaches the subtractor in order, and silence when there is none");
 
+        // The microphone's buffers are handed to a thread of their own: however long one takes to process, handing the
+        // next over takes no time, so Windows never has to drop audio, and they are still processed in order.
+        var order = new List<short>();
+        using (var pump = new VoiceAudio.Pump((samples, count) => { if (order.Count == 0) Thread.Sleep(150); lock (order) order.Add(samples[0]); }))
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            for (short i = 0; i < 20; i++) pump.Post(new[] { i, i });
+            var handedIn = clock.ElapsedMilliseconds;
+            for (var wait = 0; wait < 100 && order.Count < 20; wait++) Thread.Sleep(20);
+            check(handedIn < 100 && order.SequenceEqual(Enumerable.Range(0, 20).Select(i => (short)i)) && pump.SlowestMs >= 100,
+                $"a slow moment in the processing never holds up the microphone ({handedIn} ms to hand over 20 buffers while the first took {pump.SlowestMs:F0} ms)");
+        }
+
         // Whether the speakers reach the microphone: none is assumed until an echo is found, which takes a second or
         // two; it is taken to be gone after ten seconds of the speakers playing without it, and silence from the
         // speakers says nothing either way.
