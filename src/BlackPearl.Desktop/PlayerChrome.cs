@@ -429,7 +429,16 @@ public partial class MainWindow
     // The speaker shows more waves as the volume rises; the level reads beside it.
     private void RefreshVolumeIndicator()
     {
-        var muted = player?.Mute == true;
+        // While a phone plays the sound, the speaker is a phone, and pressing it brings the sound back.
+        if (PhoneSoundName is { } phone)
+        {
+            MuteButton.Content = "";
+            MuteButton.ToolTip = $"The sound is playing on {phone}. Press to hear it here (M)";
+            System.Windows.Automation.AutomationProperties.SetName(MuteButton, "Play the sound on the PC");
+            VolumeText.Text = "Phone";
+            return;
+        }
+        var muted = UserMuted;
         var level = (int)Volume.Value;
         MuteButton.Content = muted ? "" : level == 0 ? "" : level < 34 ? "" : level < 67 ? "" : "";
         MuteButton.ToolTip = muted ? "Unmute (M)" : "Mute (M)";

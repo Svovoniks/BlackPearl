@@ -287,6 +287,7 @@ public partial class MainWindow : Window
             PlaybackDiagnostics.Record("startup-stage", new { stage = "player" });
             player.TimeChanged += (_, e) =>
             {
+                phoneSoundClock.Report(e.Time);
                 var mono = Environment.TickCount64; playbackPosition.Observe(e.Time, mono);
                 if (PlaybackDiagnostics.Detailed) PlaybackDiagnostics.Record("native-time", new { position = e.Time });
                 Dispatcher.BeginInvoke(() => { if (!closing) settling.Observe(e.Time, mono); });
@@ -301,6 +302,11 @@ public partial class MainWindow : Window
             // Each new video output starts without the subtitle lift; it comes from LibVLC's thread.
             player.Vout += (_, _) => Dispatcher.BeginInvoke(() => { if (!closing) SubtitleOutputChanged(); });
             player.ESAdded += (_, _) => TracksChanged(); player.ESDeleted += (_, _) => TracksChanged(); player.ESSelected += (_, _) => TracksChanged();
+            // A phone playing the sound follows the picture: from LibVLC's thread, as it happens.
+            player.Playing += (_, _) => phoneSoundClock.SetRunning(true);
+            player.Paused += (_, _) => phoneSoundClock.SetRunning(false);
+            player.Stopped += (_, _) => phoneSoundClock.SetRunning(false);
+            player.EndReached += (_, _) => phoneSoundClock.SetRunning(false);
             player.Playing += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-playing", new { room = room is not null, targetPlaying = target?.Playing }); ready = true; firstPlayback.TrySetResult(); if (room is null && localResume > 0 && player is not null) { player.Time = localResume; localResume = 0; } RefreshTracks(); ReportReady(); if (playbackPause.Pending || target?.Playing == false) player?.SetPause(true); });
             player.EncounteredError += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-error", new { state = player?.State.ToString() }); SetStatus(room?.IsPeerRecovering == true ? "Connection interrupted · Reconnecting…" : "Playback failed. Check that the file is available and the connection is active."); });
             player.Buffering += (_, e) => Dispatcher.BeginInvoke(() =>
@@ -1899,10 +1905,11 @@ public partial class MainWindow : Window
         try { await StopNativePlayback(); }
         finally { loading.Release(); }
     });
-    private void MutePlayback(object sender, RoutedEventArgs e) { if (player is not null) { player.Mute = !player.Mute; RefreshVolumeIndicator(); } }
+    private void MutePlayback(object sender, RoutedEventArgs e) { if (player is not null && !TakeSoundBackFromPhones()) { phoneSoundRestoredAt = long.MinValue / 2; player.Mute = !player.Mute; RefreshVolumeIndicator(); } }
     private void VolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (player is not null) { ApplyPlayerVolume(); if (e.NewValue > 0) player.Mute = false; }
+        // While a phone has the sound, the PC stays quiet; raising its volume unmutes it once the sound is back.
+        if (player is not null) { ApplyPlayerVolume(); if (e.NewValue > 0) { if (phoneSoundMuted) mutedBeforePhoneSound = false; else player.Mute = false; } }
         RefreshVolumeIndicator();
         ShowVolumeFlyout();
     }

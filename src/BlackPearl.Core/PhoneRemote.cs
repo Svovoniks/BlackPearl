@@ -58,10 +58,11 @@ public record RemoteRoom(string Name, int People);
 // The saved queue the PC plays from, and the playing video's place in it (PHONE-REMOTE.md, "Queues").
 public record RemoteQueue(string Id, string Name, int Index);
 // What the phone shows. Null fields are left out when nothing is loaded. MediaId names the library video the PC plays on
-// its own (not in a room), for the phone to take it over.
+// its own (not in a room), for the phone to take it over. PhoneSound is true while a phone plays the PC's sound, which
+// leaves the PC muted; Muted is then the PC's own mute from before.
 public record RemoteState(bool Media, string? Title = null, string? Detail = null, bool? Playing = null, long? PositionMs = null, long? DurationMs = null,
     int Volume = 100, bool Muted = false, string Loop = "off", bool Fullscreen = false, bool HasPrevious = false, bool HasNext = false, bool CanControl = true, RemoteRoom? Room = null,
-    string? MediaId = null, RemoteQueue? Queue = null, bool? Shuffle = null)
+    string? MediaId = null, RemoteQueue? Queue = null, bool? Shuffle = null, bool? PhoneSound = null)
 {
     public string Type => "state";
 }
@@ -147,6 +148,10 @@ public sealed class PhoneRemoteHost : IDisposable
     // Called for every phone that opens a link, to send it the current state. Null sends nothing; the caller then
     // publishes the state itself.
     public Func<RemoteState?>? CurrentState { get; set; }
+    // Where the player is now, for a phone's `clock` (PHONE-REMOTE.md, "Sound on the phone"). Asked from a native
+    // thread and answered there at once: the phone times the round trip, and a wait for the dispatcher would count as
+    // distance. Null where nothing plays (the phone host).
+    public PlaybackClock? Clock { get; set; }
 
     public IReadOnlyList<PairedPhone> Phones { get { lock (gate) return phones.ToArray(); } }
     public IReadOnlyList<PhoneRemoteSession> Connected { get { lock (gate) return sessions.Values.Where(s => s.Open && s.PhoneId != "pair").ToArray(); } }
@@ -474,7 +479,12 @@ public sealed class PhoneRemoteHost : IDisposable
                 JsonElement? value = message.TryGetProperty("value", out var v) && v.ValueKind is JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False ? v.Clone() : null;
                 Command?.Invoke(session, new RemoteCommand(action, value));
                 break;
-            case { Length: > 0 and <= 40 } type when session.Greeted && session.PhoneId != "pair" && type is not ("hello" or "pair" or "command"):
+            case "clock" when session.Greeted && session.PhoneId != "pair" && message.TryGetProperty("request", out var r) && r.TryGetInt64(out var request):
+                Clock?.Heard(session.PhoneId);
+                var (source, position, playing) = Clock?.Read() ?? (null, 0, false);
+                Send(session, Wire.Serialize(new { type = "clock", request, source, positionMs = Math.Max(0, position - PlaybackClock.PictureLagMs), playing }));
+                break;
+            case { Length: > 0 and <= 40 } type when session.Greeted && session.PhoneId != "pair" && type is not ("hello" or "pair" or "command" or "clock"):
                 Request?.Invoke(session, type, message.Clone());
                 break;
         }

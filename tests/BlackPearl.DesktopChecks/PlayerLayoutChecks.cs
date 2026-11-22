@@ -41,6 +41,34 @@ static class PlayerLayoutChecks
         volume.Value = 50; Check(mute.Content as string == "\uE994" && volumeText.Text == "50%", "a middle volume shows two speaker waves");
         volume.Value = 20; Check(mute.Content as string == "\uE993", "a quiet volume shows one speaker wave");
         volume.Value = 0; Check(mute.Content as string == "\uE992" && volumeText.Text == "0%", "zero volume shows a speaker without waves");
+        // A phone playing the sound: the speaker is a phone, and its level reads Phone, no wider than Muted.
+        var soundFields = BindingFlags.NonPublic | BindingFlags.Instance;
+        typeof(MainWindow).GetField("phoneSoundMuted", soundFields)!.SetValue(window, true);
+        typeof(MainWindow).GetField("phoneSoundPhone", soundFields)!.SetValue(window, "Pixel 8");
+        Invoke(window, "RefreshVolumeIndicator");
+        volumeText.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var phoneWidth = volumeText.DesiredSize.Width;
+        Check(mute.Content as string == "\uE8EA" && volumeText.Text == "Phone" && mute.ToolTip is string tip && tip.Contains("Pixel 8") && tip.Contains("hear it here"),
+            "while a phone plays the sound, the speaker button shows a phone, names it, and says pressing it brings the sound back");
+        volume.Value = 40;
+        Check(volumeText.Text == "Phone" && mute.Content as string == "\uE8EA", "changing the volume while a phone has the sound keeps the phone shown");
+        if (Environment.GetEnvironmentVariable("BLACKPEARL_RENDER_DIR") is { Length: > 0 } renderDir)
+        {
+            var group = (FrameworkElement)window.FindName("VolumeGroup");
+            group.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity)); group.Arrange(new Rect(group.DesiredSize)); group.UpdateLayout();
+            var scale = 3.0;
+            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(group.ActualWidth * scale), (int)Math.Ceiling(group.ActualHeight * scale), 96 * scale, 96 * scale, System.Windows.Media.PixelFormats.Pbgra32);
+            var plate = new System.Windows.Media.DrawingVisual();
+            using (var dc = plate.RenderOpen()) dc.DrawRectangle(new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x17, 0x18, 0x1F)), null, new Rect(0, 0, group.ActualWidth, group.ActualHeight));
+            bitmap.Render(plate); bitmap.Render(group);
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder(); encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+            using var file = File.Create(Path.Combine(renderDir, "volume-phone.png")); encoder.Save(file);
+        }
+        typeof(MainWindow).GetField("phoneSoundMuted", soundFields)!.SetValue(window, false);
+        Invoke(window, "RefreshVolumeIndicator");
+        volumeText.Text = "Muted"; volumeText.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        Check(phoneWidth <= volumeText.DesiredSize.Width + 0.5, $"Phone takes no more room than Muted ({phoneWidth:0.0} against {volumeText.DesiredSize.Width:0.0} DIP)");
+        volume.Value = 0; Invoke(window, "RefreshVolumeIndicator");
         Check(!IsDescendant(volume, (Border)window.FindName("PlaybackControls")) && !((System.Windows.Controls.Primitives.Popup)window.FindName("VolumeFlyout")).IsOpen,
             "the volume slider stays out of the bar in a closed flyout until it is needed");
         volume.Value = 100;
