@@ -2080,6 +2080,7 @@ public partial class MainWindow : Window
     private async void LeaveRoom(object sender, RoutedEventArgs e) => await Guard(async () => { var wasRoom = room is not null; ShowPage(wasRoom ? "Rooms" : "Library"); await Disconnect(); RoomHeading.Text = "BlackPearl player"; RoomSubtitle.Text = wasRoom ? "You left the room" : ""; RefreshSavedRooms(); });
     private async Task Disconnect(bool preserveFullscreen = false, bool reconnecting = false)
     {
+        watchingOnPhone = null;
         await VoiceRoomClosed(reconnecting);
         CancelPeerNotices();
         playbackRecovery.Clear();
