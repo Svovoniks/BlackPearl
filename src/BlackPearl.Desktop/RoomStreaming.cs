@@ -120,9 +120,12 @@ public partial class MainWindow
     {
         if (PlayerEmptyTitle is null) return;
         var inRoom = room?.IsConnected == true;
-        PlayerEmptyTitle.Text = inRoom ? "Nothing is playing in this room" : "Choose a video to play";
-        PlayerEmptyHint.Text = inRoom ? "Pick a video from your library and choose Watch together. Everyone here watches it with you." : "";
-        PlayerEmptyHint.Visibility = inRoom ? Visibility.Visible : Visibility.Collapsed;
+        // A video a phone took over (PhonePlayback.cs) says where it went until anything else plays.
+        var onPhone = !inRoom ? watchingOnPhone : null;
+        PlayerEmptyTitle.Text = inRoom ? "Nothing is playing in this room" : onPhone is not null ? "Playing on your phone" : "Choose a video to play";
+        PlayerEmptyHint.Text = inRoom ? "Pick a video from your library and choose Watch together. Everyone here watches it with you."
+            : onPhone is not null ? $"{onPhone} continues on the phone. Continue on PC there brings it back here." : "";
+        PlayerEmptyHint.Visibility = inRoom || onPhone is not null ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // In a room, Library, Home and Queues show this app's own unless the user chose to look through the streamer's,
