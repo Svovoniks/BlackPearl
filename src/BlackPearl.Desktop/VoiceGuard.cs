@@ -197,6 +197,11 @@ internal sealed class Biquad
 // itself let through in that band over the last moments. A room's tail and a fading syllable follow the voice and
 // come back; a slammed door in a band where there was no voice does not.
 //
+// One thing a denoiser removes whole is a voice all the same: a closed-mouth "hmm", steady enough to pass for a hum
+// in the room. A lighter denoiser beside it keeps such sounds and says how surely it hears a voice. When that says
+// a voice has been sounding (HumEvidence) and the main denoiser has left almost nothing, the lighter one's output
+// is given in its place for as long as that lasts.
+//
 // In a quiet room that leaves the voice as the microphone heard it; the more noise there is, the more the denoiser
 // is allowed to do. It works on 20 ms windows that overlap by half, and delays the audio by 10 ms.
 internal sealed class VoiceGuard
@@ -214,6 +219,14 @@ internal sealed class VoiceGuard
     // here is 40 ms behind the speech detector, so a word's first sounds are covered as well.
     public const float Maybe = 0.15f, Surely = 0.4f;
     public const int HoldBlocks = 15, AheadBlocks = 4;
+    // "Almost nothing": less than a thirtieth of the window's power left (15 dB down). The other output comes in over
+    // about 40 ms and goes over about 30 ms.
+    private const double Whole = 31.6;
+    private const float RescueAttack = 0.25f, RescueRelease = 0.7f;
+    private readonly float[] otherLast = new float[Block], otherReal = new float[Size], otherImaginary = new float[Size];
+    private float rescue;
+    // Whether the other denoiser's output is standing in for a voice the main one removed, for the speech gate.
+    public bool Rescuing => rescue > 0.5f;
     private static readonly float[] Shape = MakeWindow();
     private static readonly int[] Edges = MakeEdges();
     private static readonly (int Band, float Next)[] Spread = MakeSpread();
@@ -238,8 +251,9 @@ internal sealed class VoiceGuard
     // One block of the microphone as the denoiser received it, delayed to line up with the denoiser's output, and that
     // output, which is replaced by the guarded audio one block later. probability: the speech detector's latest.
     // gainDb: the gain the microphone had before it reached the denoiser; the noise measured so far follows it, so
-    // raising a quiet microphone does not make its room look quieter than it is.
-    public void Process(ReadOnlySpan<float> noisy, float[] clean, float probability, double gainDb = 0)
+    // raising a quiet microphone does not make its room look quieter than it is. other: the lighter denoiser's output
+    // for the same block, when there is one; voiced: whether a voice has been sounding by that denoiser's account.
+    public void Process(ReadOnlySpan<float> noisy, float[] clean, float probability, double gainDb = 0, ReadOnlySpan<float> other = default, bool voiced = false)
     {
         if (gainDb != gain)
         {
@@ -255,6 +269,22 @@ internal sealed class VoiceGuard
         Load(noisyLast, noisy, noisyReal, noisyImaginary);
         Load(cleanLast, clean, cleanReal, cleanImaginary);
         fourier.Forward(noisyReal, noisyImaginary); fourier.Forward(cleanReal, cleanImaginary);
+        var removedWhole = false;
+        if (other.Length == Block)
+        {
+            Load(otherLast, other, otherReal, otherImaginary);
+            fourier.Forward(otherReal, otherImaginary);
+            double wholeBefore = 0, wholeAfter = 0;
+            for (var bin = 0; bin < Bins; bin++)
+            {
+                wholeBefore += noisyReal[bin] * (double)noisyReal[bin] + noisyImaginary[bin] * (double)noisyImaginary[bin];
+                wholeAfter += cleanReal[bin] * (double)cleanReal[bin] + cleanImaginary[bin] * (double)cleanImaginary[bin];
+            }
+            removedWhole = voiced && wholeAfter * Whole < wholeBefore;
+        }
+        rescue = removedWhole ? Math.Min(1, rescue + RescueAttack) : rescue * RescueRelease < 0.01f ? 0 : rescue * RescueRelease;
+        // A voice being given back is not the room's noise.
+        if (rescue > 0) presence = Math.Max(presence, 0.01f);
         var restored = 0f;
         for (var band = 0; band < Bands; band++)
         {
@@ -286,6 +316,12 @@ internal sealed class VoiceGuard
             cleanReal[bin] += mix * (noisyReal[bin] - cleanReal[bin]);
             cleanImaginary[bin] += mix * (noisyImaginary[bin] - cleanImaginary[bin]);
         }
+        if (rescue > 0)
+            for (var bin = 0; bin < Bins; bin++)
+            {
+                cleanReal[bin] += rescue * (otherReal[bin] - cleanReal[bin]);
+                cleanImaginary[bin] += rescue * (otherImaginary[bin] - cleanImaginary[bin]);
+            }
         for (var bin = 1; bin < Bins - 1; bin++) { cleanReal[Size - bin] = cleanReal[bin]; cleanImaginary[Size - bin] = -cleanImaginary[bin]; }
         fourier.Inverse(cleanReal, cleanImaginary);
         for (var i = 0; i < Block; i++)
@@ -390,6 +426,42 @@ internal sealed class VoiceGuard
 }
 
 // A signal delayed by a fixed number of samples, a block at a time.
+// Whether a voice has been sounding, by a denoiser's own voice estimate: at least Sure for Lasting blocks in a row,
+// each of them within Reach of full scale (the voice is brought to about -23 dBFS) and Above the quietest half second
+// of the two seconds before. Short of any of these it fired on room tone, on other people in the room and between
+// the words of someone talking over noise. It stays on for Held blocks after, as the audio it speaks for is three
+// blocks behind what it hears.
+internal sealed class HumEvidence
+{
+    public const float Sure = 0.9f;
+    public const int Lasting = 12, Held = 4;
+    public const double ReachDb = -36, AboveDb = 15;
+    private const int Half = 50;
+    private readonly double[] powers = new double[4 * Half];
+    private int at, filled, run, since = int.MaxValue;
+    public bool Next(ReadOnlySpan<float> block, float voice)
+    {
+        double sum = 0;
+        foreach (var sample in block) sum += sample * (double)sample;
+        var power = sum / block.Length;
+        // The quietest of the last four half seconds, before this block.
+        var quietest = double.MaxValue;
+        if (filled >= Half)
+            for (var half = 0; half < filled / Half; half++)
+            {
+                double mean = 0;
+                for (var i = 0; i < Half; i++) mean += powers[(at - 1 - half * Half - i + 2 * powers.Length) % powers.Length];
+                quietest = Math.Min(quietest, mean / Half);
+            }
+        powers[at] = power; at = (at + 1) % powers.Length; filled = Math.Min(filled + 1, powers.Length);
+        var level = 10 * Math.Log10(power + 1e-12);
+        var hot = voice >= Sure && level >= ReachDb && quietest < double.MaxValue && level >= 10 * Math.Log10(quietest + 1e-12) + AboveDb;
+        run = hot ? run + 1 : 0;
+        if (run >= Lasting) since = 0; else if (since < int.MaxValue) since++;
+        return since <= Held;
+    }
+}
+
 internal sealed class DelayLine(int length)
 {
     private readonly float[] held = new float[length];

@@ -83,6 +83,11 @@ internal sealed class VoiceProcessor : IDisposable
     // noise when that is left in: in pauses a living room's noise stayed 25 dB louder without this filter.
     private readonly Biquad rumble = Biquad.HighPass(60);
     private SpeechDetector? heard, cleaned;
+    // Beside DeepFilterNet: RNNoise for its voice estimate and its output, which keeps the hums DeepFilterNet removes.
+    private RnNoise? lighter;
+    private DelayLine? lighterDelay;
+    private readonly HumEvidence hum = new();
+    private readonly float[] lighterNow = new float[BlockSamples], lighterOut = new float[BlockSamples];
     public bool EchoCancelling => echo is not null;
     // Whether the speakers' sound is in the microphone, and whether it is loud enough that the echo canceller's
     // output is the one in use.
@@ -117,6 +122,7 @@ internal sealed class VoiceProcessor : IDisposable
             echo = Try("echo", () => WebRtcApm.EchoCanceller());
             denoiser = processing == VoiceAudio.Processing.Standard ? Try<IDenoiser>("deepfilter", () => new DeepFilter()) : null;
             denoiser ??= Try<IDenoiser>("rnnoise", () => new RnNoise());
+            if (denoiser is DeepFilter) lighter = Try("rnnoise", () => new RnNoise());
         }
         heard = Try("speech", () => new SpeechDetector());
         if (heard is not null && denoiser is not null) cleaned = Try("speech", () => new SpeechDetector());
@@ -174,11 +180,22 @@ internal sealed class VoiceProcessor : IDisposable
         {
             level.Learn(block, heard?.Probability ?? 0);
             level.Apply(block);
+            var voiced = false; var beside = lighter is not null && denoiser is DeepFilter;
+            if (beside)
+            {
+                block.CopyTo(lighterNow, 0);
+                lighter!.Process(lighterNow);
+                voiced = hum.Next(block, lighter.Voice);
+                // Its output, held back to line up with the slower denoiser's.
+                if (lighterDelay?.Length != denoiser.Delay - lighter.Delay) lighterDelay = new(denoiser.Delay - lighter.Delay);
+                lighterDelay.Run(lighterNow, lighterOut);
+            }
             // The denoiser may be replaced by a lighter one with another delay.
             if (noisyDelay?.Length != denoiser.Delay) noisyDelay = new(denoiser.Delay);
             noisyDelay.Run(block, noisy);
             Denoise();
-            guard.Process(noisy, block, heard?.Probability ?? 0, level.GainDb);
+            beside = beside && denoiser is DeepFilter;
+            guard.Process(noisy, block, heard?.Probability ?? 0, level.GainDb, beside ? lighterOut : default, voiced);
             limiter.Apply(block);
             // A limiter that has to hold the voice down means the gain is too high for this voice.
             level.Ease(limiter.GainDb);
@@ -215,7 +232,8 @@ internal sealed class VoiceProcessor : IDisposable
                 mayStart = offDb <= KeptDb && (double.IsNaN(level.SpeechDb) ? (heard?.Probability ?? 1) >= SpeechDecision.Start : leftDb >= StartDb);
             }
             heardPower = leftPower = 0; heardBlocks = 0;
-            var now = decision.Next(decider.Probability, mayStart);
+            // A voice the guard is giving back counts as speech whatever the detector makes of a hum.
+            var now = decision.Next(denoiser is not null && guard.Rescuing ? 1f : decider.Probability, mayStart);
             if (now != speaking) capture.SpeechDetected = speaking = now;
         }
         Processed?.Invoke(output);
@@ -322,7 +340,7 @@ internal sealed class VoiceProcessor : IDisposable
     {
         lock (gate) lock (referenceGate)
         {
-            echo?.Dispose(); denoiser?.Dispose(); heard?.Dispose(); cleaned?.Dispose();
+            echo?.Dispose(); denoiser?.Dispose(); heard?.Dispose(); cleaned?.Dispose(); lighter?.Dispose(); lighter = null;
             echo = null; denoiser = null; heard = cleaned = null;
             capture.SpeechDetected = null;
         }
@@ -480,10 +498,12 @@ internal sealed class VoiceProcessor : IDisposable
             state = rnnoise_create(IntPtr.Zero);
             if (state == IntPtr.Zero) throw new InvalidOperationException("RNNoise could not start");
         }
+        // How surely it heard a voice in the latest block, 0 to 1.
+        public float Voice { get; private set; }
         public bool Process(float[] samples)
         {
             for (var i = 0; i < BlockSamples; i++) scaled[i] = samples[i] * 32768f;
-            rnnoise_process_frame(state, scaled, scaled);
+            Voice = rnnoise_process_frame(state, scaled, scaled);
             for (var i = 0; i < BlockSamples; i++) samples[i] = scaled[i] / 32768f;
             return true;
         }

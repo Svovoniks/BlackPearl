@@ -197,6 +197,30 @@ static class VoiceProcessingChecks
         for (var i = 0; i < 100; i++) guard.Process(Hiss(0.01), (float[])silence.Clone(), 0);
         for (var i = 0; i < 30; i++) { talk = (float[])silence.Clone(); guard.Process(Hiss(0.2), talk, 1); }
         check(Rms(talk) < 0.01, $"the guard does not give back a sound the denoiser removed whole ({Rms(talk):F3})");
+        // Unless the lighter denoiser beside it has been hearing a voice: a "hmm" that the main one took for a hum in
+        // the room. Then the lighter one's output stands in (here a quarter of the microphone, to tell it apart).
+        // Where the main denoiser kept the sound, its own output stays.
+        guard = new VoiceGuard();
+        for (var i = 0; i < 100; i++) guard.Process(Hiss(0.01), (float[])silence.Clone(), 0);
+        for (var i = 0; i < 30; i++) { var heard = Hiss(0.2); talk = (float[])silence.Clone(); guard.Process(heard, talk, 0, 0, heard.Select(v => v / 4).ToArray(), true); }
+        var givenBack = Rms(talk); var rescuing = guard.Rescuing;
+        guard = new VoiceGuard();
+        for (var i = 0; i < 100; i++) guard.Process(Hiss(0.01), (float[])silence.Clone(), 0);
+        for (var i = 0; i < 30; i++) { var heard = Hiss(0.2); talk = (float[])silence.Clone(); guard.Process(heard, talk, 0, 0, heard.Select(v => v / 4).ToArray(), false); }
+        var notVoiced = Rms(talk);
+        guard = new VoiceGuard();
+        for (var i = 0; i < 100; i++) guard.Process(Hiss(0.01), (float[])silence.Clone(), 0);
+        for (var i = 0; i < 30; i++) { var heard = Hiss(0.2); talk = heard.Select(v => v / 2).ToArray(); guard.Process(heard, talk, 0, 0, heard.Select(v => v / 4).ToArray(), true); }
+        check(givenBack is > 0.02 and < 0.04 && rescuing && notVoiced < 0.01 && Rms(talk) > 0.05 && !guard.Rescuing,
+            $"a voice the denoiser removed whole comes back from the lighter denoiser while that hears a voice ({givenBack:F3} of 0.029; {notVoiced:F3} when it hears none; {Rms(talk):F3} of 0.058 kept where the main one kept it)");
+        // What counts as hearing a voice: its voice estimate at 0.9 or more for 80 ms, loud enough to be the talker,
+        // and well above the room as it was just before. A room that is that loud all the time is not a voice.
+        var evidence = new HumEvidence(); var states = new List<bool>();
+        for (var i = 0; i < 300; i++) evidence.Next(Hiss(0.002), 0.95f);
+        var tooFaint = evidence.Next(Hiss(0.002), 0.95f);
+        for (var i = 0; i < 300; i++) states.Add(evidence.Next(Hiss(0.1), i < 12 ? 0.5f : 0.95f));
+        check(!tooFaint && !states.Take(22).Any(x => x) && states.Skip(26).Take(100).All(x => x) && !states.Skip(260).Any(x => x),
+            $"a voice has been sounding once the lighter denoiser has heard one for 120 ms, near the talker's level and well above the room (on after {states.IndexOf(true) * 10} ms; off again once the room itself is that loud: {!states.Skip(260).Any(x => x)})");
         // With that much noise measured in the pauses, the denoiser may remove that much from speech: what it halved
         // stays halved.
         guard = new VoiceGuard();
