@@ -148,6 +148,8 @@ public partial class MainWindow
         voicePreferences = LoadVoicePreferences();
         try { rememberedVoiceLevels = library.Setting("voiceLevels") is { Length: > 0 } saved ? Wire.Read<Dictionary<string, int>>(saved) : []; }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or System.IO.InvalidDataException) { rememberedVoiceLevels = []; }
+        EchoPresence.Remembered = library.Setting("voiceEchoFound") switch { "true" => true, "false" => false, _ => null };
+        VoiceProcessor.InputLevel.Saved = library.Setting("voiceLevel");
         voiceTimer.Tick += (_, _) => VoiceTick();
         voiceSettingsSave.Tick += (_, _) => SaveVoiceSliders();
         voiceTestTimer.Tick += (_, _) => UpdateVoiceTest();
@@ -250,6 +252,9 @@ public partial class MainWindow
         foreach (var presence in voicePresence.Values) presence.SetSpeaking(false);
         RefreshVoice();
         await session.Audio.DisposeAsync();
+        // Whether the speakers reached the microphone, for the next time voice opens, in this run or a later one.
+        if (EchoPresence.Remembered is { } found && library.Setting("voiceEchoFound") != (found ? "true" : "false")) library.Setting("voiceEchoFound", found ? "true" : "false");
+        if (VoiceProcessor.InputLevel.Saved is { } learned && library.Setting("voiceLevel") != learned) library.Setting("voiceLevel", learned);
     }
     // Connects the running voice session to the current room connection.
     private void AttachVoice()

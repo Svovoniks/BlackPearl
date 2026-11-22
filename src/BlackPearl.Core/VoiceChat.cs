@@ -45,9 +45,10 @@ public interface IVoiceSink
 // the voice band, a pre-roll keeps the first syllable, and a hangover keeps pauses between words and sentences.
 public sealed class VoiceCapture
 {
-    // 200 ms of pre-roll keeps word onsets, which a speech model confirms only after hearing some of them; 600 ms of
-    // hangover keeps the pauses inside a sentence.
-    public const int PrerollFrames = 10, HangoverFrames = 30;
+    // 300 ms of pre-roll keeps word onsets, which a speech model confirms only after hearing some of them: on real
+    // conversation one start in ten was heard more than 200 ms late, most of them short words and "mm-hm"s, and
+    // lost its beginning. 600 ms of hangover keeps the pauses inside a sentence.
+    public const int PrerollFrames = 15, HangoverFrames = 30;
     private readonly IOpusEncoder encoder;
     private readonly short[] frame = new short[VoicePacket.FrameSamples];
     private readonly short[][] preroll = Enumerable.Range(0, PrerollFrames).Select(_ => new short[VoicePacket.FrameSamples]).ToArray();
@@ -83,6 +84,37 @@ public sealed class VoiceCapture
         encoder = OpusCodecFactory.CreateEncoder(VoicePacket.SampleRate, 1, OpusApplication.OPUS_APPLICATION_VOIP);
         encoder.Bitrate = 32000; encoder.UseInbandFEC = true; encoder.PacketLossPercent = 10;
         encoder.SignalType = OpusSignal.OPUS_SIGNAL_VOICE; encoder.Complexity = 8; encoder.UseVBR = true;
+    }
+    // The encoder's code is compiled the first time it runs, which takes tens of milliseconds: on the microphone's
+    // thread that was long enough for Windows to drop the audio that arrived meanwhile, at the start of the first
+    // sentence. Encoding a little silence before the microphone starts spends that time early.
+    public void Warm()
+    {
+        lock (gate)
+        {
+            var silence = new short[VoicePacket.FrameSamples];
+            for (var i = 0; i < PrerollFrames + 2; i++) encoder.Encode(silence, VoicePacket.FrameSamples, encoded, encoded.Length);
+            encoder.ResetState();
+        }
+    }
+    // Replaces the most recent samples written with others, as long as none of them has been sent: the frame being
+    // filled and the pre-roll before it. For a voice that was recognised only after its first sounds had been
+    // written here without it. False, and nothing changed, while the gate is open or when there are not that many.
+    public bool Rewrite(ReadOnlySpan<short> recent)
+    {
+        lock (gate)
+        {
+            if (open || recent.Length > filled + prerollCount * frame.Length) return false;
+            var left = recent.Length; var take = Math.Min(filled, left);
+            recent.Slice(left - take, take).CopyTo(frame.AsSpan(filled - take, take)); left -= take;
+            for (var back = 1; left > 0; back++)
+            {
+                var slot = preroll[(prerollNext - back + preroll.Length) % preroll.Length];
+                take = Math.Min(slot.Length, left);
+                recent.Slice(left - take, take).CopyTo(slot.AsSpan(slot.Length - take, take)); left -= take;
+            }
+            return true;
+        }
     }
     public void Write(ReadOnlySpan<short> samples)
     {
@@ -200,6 +232,13 @@ public sealed class VoiceJitterBuffer
     private ushort expected, newest, lastPlayed, spurtFirst;
     private bool playing, started, ended, hasPlayed;
     private int buffered, missing, lateRun;
+    // A talk spurt opens with the frames from just before the speech gate opened, all at once: up to
+    // VoiceCapture.PrerollFrames of them and the first frame after. They hold the start of the first word, and the
+    // frames that follow arrive as fast as these are played, so the backlog stays that long until a pause lets it
+    // be trimmed. Until it has once come down to the usual limit, there is this much more room before any frame
+    // that sounds is skipped.
+    private const int OpeningRoom = 6, OpeningMs = 100;
+    private bool roomy;
     private long firstArrival, lastArrival;
     private double delay, jitter;
     public int TargetFrames { get; set; } = MinTargetFrames;
@@ -235,7 +274,7 @@ public sealed class VoiceJitterBuffer
             if (!started || !playing && buffered == 0)
             {
                 // A new talk spurt: choose how much to prebuffer from the jitter seen so far.
-                started = true; expected = newest = spurtFirst = sequence; firstArrival = now; delay = 0;
+                started = true; expected = newest = spurtFirst = sequence; firstArrival = now; delay = 0; roomy = false;
                 TargetFrames = Math.Clamp((int)Math.Ceiling(jitter * 2.5 / VoicePacket.FrameMs) + 2, MinTargetFrames, MaxTargetFrames);
             }
             else
@@ -247,7 +286,9 @@ public sealed class VoiceJitterBuffer
             }
             var index = sequence % Capacity;
             if (present[index]) return;
+            var into = (short)(sequence - spurtFirst);
             present[index] = true; packets[index] = payload.ToArray(); endings[index] = (flags & VoicePacket.EndOfSpeech) != 0; buffered++;
+            if (into >= 0 && into <= VoiceCapture.PrerollFrames && now - firstArrival <= OpeningMs && buffered > TargetFrames + 8) roomy = true;
             if ((short)(sequence - newest) > 0) newest = sequence;
             if (!playing && (buffered >= TargetFrames || endings[index])) { playing = true; ended = false; missing = 0; }
         }
@@ -268,6 +309,7 @@ public sealed class VoiceJitterBuffer
                 if (buffered == 0 || now - firstArrival < TargetFrames * VoicePacket.FrameMs) return false;
                 playing = true; ended = false; missing = 0;
             }
+            if (buffered <= TargetFrames + 8) roomy = false;
             // Behind real time (a sender's clock running fast, or a burst after a network stall): catch up by
             // trimming the quiet between words first; speech itself is only skipped once far behind.
             while (buffered > TargetFrames + 4 && present[expected % Capacity])
@@ -275,7 +317,8 @@ public sealed class VoiceJitterBuffer
                 Decode(expected, output);
                 var last = endings[expected % Capacity];
                 Take(expected); Played();
-                if (buffered > TargetFrames + 8 || Quiet(output)) { Dropped++; continue; }
+                // (After taking this frame: one less is buffered than when it was looked at.)
+                if (buffered > TargetFrames + 8 + (roomy ? OpeningRoom : 0) || Quiet(output)) { Dropped++; continue; }
                 missing = 0;
                 if (last) { playing = false; ended = true; }
                 return true;

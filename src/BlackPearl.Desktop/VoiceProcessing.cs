@@ -7,14 +7,18 @@ using BlackPearl.Core;
 namespace BlackPearl.Desktop;
 
 // BlackPearl's own microphone processing; Windows' communications pipeline is never used. Every 10 ms of microphone:
-// WebRTC's echo canceller (AEC3) removes what the speakers are playing, using a loopback recording of the output as
-// its reference; a neural denoiser removes background noise (DeepFilterNet 3, or the lighter RNNoise); and WebRTC's
-// digital gain control evens out the level. A stage whose library is missing or fails is skipped, so voice keeps
-// working with whatever remains.
+// rumble below the voice is filtered out; what the speakers are playing is removed, using a loopback recording of
+// the output, but only while that sound is actually found in the microphone and rivals the voice (EchoPresence): by
+// subtracting it where that works (EchoSubtractor), otherwise by WebRTC's echo canceller (AEC3); a quiet microphone
+// is brought up to a normal level; a neural denoiser removes background noise (DeepFilterNet 3, or the lighter
+// RNNoise), limited while someone speaks to what the noise between words accounts for (VoiceGuard); and a limiter
+// catches peaks. Apart from the noise, the voice is meant to leave as it arrived: nothing here compresses it or
+// changes its tone. A stage whose library is missing or fails is skipped, so voice keeps working with whatever remains.
 //
-// Whether it is speech is decided by Silero VAD twice: on the microphone after echo cancellation, and on the same
-// audio after noise removal. Both have to agree for 64 ms in a row. Each alone mistakes some knocks, drops, clicks and
-// clock ticks for a syllable; they rarely make the same mistake, and a sound that short rarely lasts two chunks.
+// Whether it is speech is decided by Silero VAD on what is about to be sent, for 64 ms in a row, and only on a
+// stretch that is still loud enough and mostly left by the noise removal (see Process). A second detector hears the
+// microphone before noise removal: it sets the level and guides the voice guard, and decides alone when there is no
+// noise removal.
 internal sealed class VoiceProcessor : IDisposable
 {
     public const int BlockSamples = VoicePacket.SampleRate / 100;
@@ -30,14 +34,94 @@ internal sealed class VoiceProcessor : IDisposable
     private bool speaking;
     private double denoiseMilliseconds;
     private long denoised;
-    private WebRtcApm? echo, gain;
+    private WebRtcApm? echo;
     private IDenoiser? denoiser;
+    // The microphone beside the echo canceller's output, and beside the denoiser's, each delayed to line up with it.
+    private readonly float[] direct = new float[BlockSamples], noisy = new float[BlockSamples];
+    // Three versions of the microphone, lined up one block late: as it is, with the echo subtracted, and from
+    // WebRTC's canceller.
+    // WebRTC's canceller hands the microphone back 238 samples late and the subtractor at once; the other two
+    // versions are held back as long, so that changing from one to another does not skip or repeat anything.
+    private readonly DelayLine directDelay = new(WebRtcApm.CaptureDelay), subtractedDelay = new(WebRtcApm.CaptureDelay);
+    private readonly float[] subtractedNow = new float[BlockSamples];
+    // Since the deciding detector's last reading: the power of what went into noise removal and of what came out.
+    private double heardPower, leftPower;
+    private int heardBlocks;
+    // -36 is 13 dB under where the voice is brought to. At -40 a tenth more of the faintest "mm-hm"s got through, and
+    // so did other people talking in the same room, on a microphone quiet enough to need a lot of gain.
+    private const double StartDb = -36, KeptDb = 9;
+    // For the probe: the level left and the amount taken off over the deciding detector's latest chunk.
+    internal (double LeftDb, double OffDb) StartMeasures { get; private set; }
+    private readonly float[] cancelled = new float[BlockSamples], subtracted = new float[BlockSamples], played = new float[BlockSamples], mixed = new float[BlockSamples];
+    private readonly SpeakerQueue speakers = new();
+    internal SpeakerQueue Speakers => speakers;
+    internal int SubtractorRestarts => subtractor?.Restarts ?? 0;
+    // For the probe: leaves the echo to WebRTC's canceller alone, as before there was a subtractor, to compare.
+    internal bool NeverSubtract;
+    private EchoSubtractor? subtractor;
+    private bool subtractedBefore;
+    private int proofs, anchored;
+    // How far apart the speakers' and the microphone's clocks run, as the subtractor last found it. The devices
+    // usually stay the same, so the next subtractor starts from it.
+    private static double knownSkew;
+    internal double EchoSkew => subtractor?.Skew ?? 0;
+    private int subtractorLate;
+    private enum Source { Direct, Subtracted, Cancelled }
+    private Source source, former;
+    private float faded = 1;
+    private bool subtracting;
+    private DelayLine? noisyDelay;
+    private readonly EchoPresence presence = new();
+    private readonly VoiceGuard guard = new();
+    private readonly PeakLimiter limiter = new();
+    // An echo this far under the voice, in dB, is not cancelled.
+    public const double FaintEchoDb = -20;
+    // The subtractor is used once it has been seen to take this much off the echo: until its filter has found the
+    // room, what it gives is the microphone with the filter's guesses added.
+    private const double UsefulDb = 3;
+    private bool loudEcho, echoFound;
+    // Below 60 Hz there is no voice, only rumble, hum and the thump of a desk. The denoiser removes far less of any
+    // noise when that is left in: in pauses a living room's noise stayed 25 dB louder without this filter.
+    private readonly Biquad rumble = Biquad.HighPass(60);
     private SpeechDetector? heard, cleaned;
+    // Beside DeepFilterNet: RNNoise for its voice estimate and its output, which keeps the hums DeepFilterNet removes.
+    private RnNoise? lighter;
+    private DelayLine? lighterDelay;
+    private readonly HumEvidence hum = new();
+    private readonly SpeechOnset onset = new();
+    private readonly float[] lighterNow = new float[BlockSamples], lighterOut = new float[BlockSamples];
+    // The lighter denoiser's last blocks. A voice is recognised 120 ms after it began, by which time its first 70 ms
+    // have left here as the silence the main denoiser made of them; they are still waiting in the speech gate's
+    // pre-roll, and are put back from these. Two blocks more, for the sounds a voice begins with.
+    private const int StartBlocks = HumEvidence.Lasting - 5 + 2;
+    private readonly float[][] lighterPast = Enumerable.Range(0, StartBlocks + 2).Select(_ => new float[BlockSamples]).ToArray();
+    private readonly short[] voiceStart = new short[StartBlocks * BlockSamples];
+    private int lighterAt;
     public bool EchoCancelling => echo is not null;
+    // Whether the speakers' sound is in the microphone, and whether it is loud enough that the echo canceller's
+    // output is the one in use.
+    internal bool EchoPresent => echo is not null && presence.Present;
+    internal bool EchoCancelled => echo is not null && loudEcho;
+    // Whether the echo is being subtracted rather than suppressed, and how well the subtraction is working, in dB.
+    internal bool EchoSubtracted => source == Source.Subtracted;
+    internal double SubtractionDb => subtractor?.WorkingDb ?? 0;
+    // The level of the latest block the speakers played, and how many blocks have arrived, for the probe.
+    internal double PlayedDb => Volatile.Read(ref playedDb);
+    internal long PlayedBlocks => Interlocked.Read(ref playedBlocks);
+    private double playedDb = -120;
+    private long playedBlocks;
+    internal double EchoDb => presence.EchoDb;
+    internal double SpeechDb => level.SpeechDb;
+    internal (float Similarity, int DelayMs) EchoEvidence => presence.Latest;
+    internal float Restored => guard.Restored;
+    internal double LimiterDb => limiter.GainDb;
     public string? DenoiserName => denoiser?.Name;
     public bool DetectsSpeech => heard is not null;
     // Silero's latest speech probabilities before and after noise removal, for diagnostics and checks.
     internal (float Heard, float Cleaned) SpeechProbability => (heard?.Probability ?? 0, cleaned?.Probability ?? heard?.Probability ?? 0);
+    // Each processed 10 ms block before the voice gate, for checks and the probe.
+    internal Action<short[]>? Processed;
+    internal double InputGainDb => level.GainDb;
 
     public VoiceProcessor(VoiceCapture capture, VoiceAudio.Processing processing)
     {
@@ -47,7 +131,7 @@ internal sealed class VoiceProcessor : IDisposable
             echo = Try("echo", () => WebRtcApm.EchoCanceller());
             denoiser = processing == VoiceAudio.Processing.Standard ? Try<IDenoiser>("deepfilter", () => new DeepFilter()) : null;
             denoiser ??= Try<IDenoiser>("rnnoise", () => new RnNoise());
-            gain = Try("gain", () => WebRtcApm.GainControl());
+            if (denoiser is DeepFilter) lighter = Try("rnnoise", () => new RnNoise());
         }
         heard = Try("speech", () => new SpeechDetector());
         if (heard is not null && denoiser is not null) cleaned = Try("speech", () => new SpeechDetector());
@@ -58,6 +142,7 @@ internal sealed class VoiceProcessor : IDisposable
     // well; until then a knock can pass for speech. A second of silence brings them there before the microphone starts.
     private void Settle()
     {
+        capture.Warm();
         var silence = new float[BlockSamples];
         for (var i = 0; i < 100; i++)
         {
@@ -77,6 +162,8 @@ internal sealed class VoiceProcessor : IDisposable
         }
     }
 
+    // Which microphone the samples come from, before the first of them.
+    public void Microphone(string id) { lock (gate) level.Microphone(id); }
     // Microphone samples, from the capture thread.
     public void Write(ReadOnlySpan<short> samples)
     {
@@ -94,27 +181,153 @@ internal sealed class VoiceProcessor : IDisposable
     }
     private void Process()
     {
-        echo?.ProcessCapture(block);
-        var chunks = heard?.Chunks ?? 0;
+        if (echo is not null || denoiser is not null)
+            for (var i = 0; i < BlockSamples; i++) block[i] = rumble.Run(block[i]);
+        CancelEcho();
+        // Counted before it hears this block: when it is the one that decides, this is how a new reading is noticed.
+        var heardChunks = heard?.Chunks ?? 0;
         if (heard is { } before && !before.Write(block)) StopDetecting();
         if (denoiser is not null)
         {
             level.Learn(block, heard?.Probability ?? 0);
             level.Apply(block);
+            var voiced = false; var beside = lighter is not null && denoiser is DeepFilter;
+            if (beside)
+            {
+                block.CopyTo(lighterNow, 0);
+                lighter!.Process(lighterNow);
+                voiced = hum.Next(block, lighter.Voice);
+                // Its output, held back to line up with the slower denoiser's.
+                if (lighterDelay?.Length != denoiser.Delay - lighter.Delay) lighterDelay = new(denoiser.Delay - lighter.Delay);
+                lighterDelay.Run(lighterNow, lighterOut);
+            }
+            // The denoiser may be replaced by a lighter one with another delay.
+            if (noisyDelay?.Length != denoiser.Delay) noisyDelay = new(denoiser.Delay);
+            noisyDelay.Run(block, noisy);
+            Denoise();
+            beside = beside && denoiser is DeepFilter;
+            guard.Process(noisy, block, heard?.Probability ?? 0, level.GainDb, beside ? lighterOut : default, voiced);
+            if (beside)
+            {
+                if (guard.Began)
+                {
+                    // What left here on each of the last blocks was the block before it of the lighter denoiser's
+                    // output, had that been standing in already: the same goes for this block.
+                    float[] Past(int back) => lighterPast[(lighterAt - back + 2 * lighterPast.Length) % lighterPast.Length];
+                    for (var b = 0; b < StartBlocks; b++)
+                    {
+                        var from = Past(StartBlocks + 1 - b);
+                        for (var i = 0; i < BlockSamples; i++)
+                        {
+                            // It comes in over the first of these blocks.
+                            var x = from[i] * (b == 0 ? (i + 1f) / BlockSamples : 1);
+                            voiceStart[b * BlockSamples + i] = (short)Math.Clamp(MathF.Round(x * 32768f), short.MinValue, short.MaxValue);
+                        }
+                    }
+                    if (capture.Rewrite(voiceStart)) { Past(1).CopyTo(block, 0); onset.Rewritten(voiceStart); }
+                }
+                lighterOut.CopyTo(lighterPast[lighterAt], 0); lighterAt = (lighterAt + 1) % lighterPast.Length;
+            }
+            limiter.Apply(block);
+            // A limiter that has to hold the voice down means the gain is too high for this voice.
+            level.Ease(limiter.GainDb);
         }
-        Denoise();
-        if (cleaned is { } after && !after.Write(block)) { cleaned = null; after.Dispose(); }
-        gain?.ProcessCapture(block);
-        for (var i = 0; i < BlockSamples; i++) output[i] = (short)Math.Clamp(MathF.Round(block[i] * 32768f), short.MinValue, short.MaxValue);
-        // Speech is decided before the samples reach the gate, so the gate acts on what it is about to encode.
-        // Only changes are passed on.
-        if (heard is { } detector && detector.Chunks != chunks)
+        // Whether this is speech is decided on what is about to be sent: the voice after the gain and with the noise
+        // taken out. The detector on the microphone itself used to have to agree, and it is deaf where the other is
+        // not: on a quiet microphone it gives short sounds too low a reading, and under typing or knocking it gives
+        // everything one. On real conversation that kept back a third of the "mm-hm"s, a fifth of the one-word
+        // answers and, over typing, nearly everything. It still sets the level and guides the voice guard.
+        var decider = denoiser is not null ? cleaned ?? heard : heard;
+        var chunks = ReferenceEquals(decider, heard) ? heardChunks : decider?.Chunks ?? 0;
+        if (denoiser is not null && cleaned is { } after)
         {
-            var now = decision.Next(Math.Min(detector.Probability, cleaned?.Probability ?? 1));
+            for (var i = 0; i < BlockSamples; i++) { heardPower += noisy[i] * (double)noisy[i]; leftPower += block[i] * (double)block[i]; }
+            heardBlocks++;
+            if (!after.Write(block)) { cleaned = null; after.Dispose(); decider = heard; chunks = heardChunks; }
+        }
+        for (var i = 0; i < BlockSamples; i++) output[i] = (short)Math.Clamp(MathF.Round(block[i] * 32768f), short.MinValue, short.MaxValue);
+        // Only changes are passed on.
+        if (decider is not null && decider.Chunks != chunks)
+        {
+            // What noise removal leaves of a knock or a key is faint and little of what was there, and can still
+            // sound like the start of a word to the detector. So speech may only start on a stretch that is left
+            // within StartDb of full scale (the voice is brought to about -23) and of which no more than KeptDb was
+            // taken off. Once started, the detector alone says when it ends.
+            var mayStart = true;
+            if (ReferenceEquals(decider, cleaned) && heardBlocks > 0)
+            {
+                var leftDb = 10 * Math.Log10(leftPower / (heardBlocks * BlockSamples) + 1e-12);
+                var offDb = 10 * Math.Log10((heardPower + 1e-12) / (leftPower + 1e-12));
+                StartMeasures = (leftDb, offDb);
+                // Until the voice's level is known there is nothing to hold "faint" against; the detector on the
+                // microphone has to agree instead, as it always had to.
+                mayStart = offDb <= KeptDb && (double.IsNaN(level.SpeechDb) ? (heard?.Probability ?? 1) >= SpeechDecision.Start : leftDb >= StartDb);
+            }
+            heardPower = leftPower = 0; heardBlocks = 0;
+            // A voice the guard is giving back counts as speech whatever the detector makes of a hum.
+            var now = decision.Next(denoiser is not null && guard.Rescuing ? 1f : decider.Probability, mayStart);
+            // Speech has started: the beginning the denoiser took, still waiting in the gate, is put back first.
+            if (now && !speaking && denoiser is not null && onset.Restore() is { Length: > 0 } beginning) capture.Rewrite(beginning);
             if (now != speaking) capture.SpeechDetected = speaking = now;
         }
+        Processed?.Invoke(output);
         capture.Write(output);
+        if (denoiser is not null) onset.Add(noisy, output);
     }
+    // WebRTC's canceller always hears the microphone, so it is ready when it is needed.
+    private void CancelEcho()
+    {
+        if (echo is not { } canceller) return;
+        presence.Microphone(block);
+        directDelay.Run(block, direct);
+        if (echoFound)
+        {
+            // The speakers' sound is held back until its echo is about 20 ms away (the delay is known to within
+            // 10 ms or so), so that the echo and the 220 ms of room after it fall inside what the subtractor can
+            // follow, and as much of the speakers' sound as possible is in hand when Windows delivers it late. A
+            // delay that has moved on starts the subtractor afresh.
+            var late = Math.Max(0, presence.EchoDelayMs - 45) * VoicePacket.SampleRate / 1000;
+            if (subtractor is null || Math.Abs(late - subtractorLate) > VoicePacket.SampleRate * 30 / 1000) { subtractor = new(knownSkew, presence.PathPower); subtractorLate = late; subtracting = false; proofs = 0; }
+            speakers.Read(played, subtractorLate, 1 + subtractor.Skew);
+            if (speakers.Anchored != anchored) { if (anchored != 0) subtractor.Relearn(forget: true); anchored = speakers.Anchored; }
+            subtractor.Process(block, played, subtractedNow);
+            subtractedDelay.Run(subtractedNow, subtracted);
+            knownSkew = subtractor.Skew;
+            if (subtractor.Proofs != proofs) { proofs = subtractor.Proofs; presence.StillThere(); }
+        }
+        else { subtractor = null; subtracting = false; }
+        canceller.ProcessCapture(block);
+        block.CopyTo(cancelled, 0);
+        // Until an echo is found the speech detector hears the movie's dialogue as speech, so a level learned in
+        // that time may be the movie's and not the voice's.
+        if (presence.Present && !echoFound) level.Doubt();
+        echoFound = presence.Present;
+        // Subtracting costs the voice nothing, so it is used whenever what it leaves is a faint echo: one 20 dB or
+        // more under the voice, which the denoiser and the speech gate remove between words. Where it cannot manage
+        // that, an echo that rivals the voice goes to WebRTC's canceller, which costs the voice a great deal, and a
+        // faint one is left alone, which costs less.
+        var apart = presence.EchoDb - level.SpeechDb;
+        loudEcho = presence.Present && (double.IsNaN(apart) || apart > (loudEcho ? FaintEchoDb - 3 : FaintEchoDb));
+        var left = apart - (subtractor?.WorkingDb ?? 0);
+        subtracting = !NeverSubtract && presence.Present && subtractor is { WorkingDb: >= UsefulDb } && !double.IsNaN(left) && left < (subtracting ? FaintEchoDb + 3 : FaintEchoDb);
+        // WebRTC's canceller takes some of the voice with the echo, so a level learned from it is too low, and the
+        // gain set from it too high for the voice the subtractor leaves whole.
+        if (subtracting && !subtractedBefore) { subtractedBefore = true; level.Again(); }
+        var wanted = subtracting ? Source.Subtracted : loudEcho ? Source.Cancelled : Source.Direct;
+        if (wanted != source && faded >= 1) { former = source; source = wanted; faded = 0; }
+        var to = Pick(source);
+        if (faded >= 1) { to.CopyTo(block, 0); return; }
+        // One version gives way to another over 20 ms.
+        var from = Pick(former); var next = Math.Min(1, faded + 0.5f);
+        for (var i = 0; i < BlockSamples; i++)
+        {
+            var share = faded + (next - faded) * (i + 1) / BlockSamples;
+            mixed[i] = from[i] + share * (to[i] - from[i]);
+        }
+        mixed.CopyTo(block, 0);
+        faded = next;
+    }
+    private float[] Pick(Source which) => which switch { Source.Subtracted => subtracted, Source.Cancelled => cancelled, _ => direct };
     private void Denoise()
     {
         if (denoiser is not { } active) return;
@@ -151,7 +364,9 @@ internal sealed class VoiceProcessor : IDisposable
                 for (var i = 0; i < count; i++) reference[referenceFilled + i] = samples[i] / 32768f;
                 referenceFilled += count; samples = samples[count..];
                 if (referenceFilled < BlockSamples) continue;
-                referenceFilled = 0; canceller.ProcessRender(reference);
+                referenceFilled = 0; presence.Speakers(reference); speakers.Write(reference); canceller.ProcessRender(reference);
+                double power = 0; foreach (var sample in reference) power += sample * sample;
+                Volatile.Write(ref playedDb, 10 * Math.Log10(power / BlockSamples + 1e-12)); Interlocked.Increment(ref playedBlocks);
             }
         }
     }
@@ -160,8 +375,8 @@ internal sealed class VoiceProcessor : IDisposable
     {
         lock (gate) lock (referenceGate)
         {
-            echo?.Dispose(); gain?.Dispose(); denoiser?.Dispose(); heard?.Dispose(); cleaned?.Dispose();
-            echo = gain = null; denoiser = null; heard = cleaned = null;
+            echo?.Dispose(); denoiser?.Dispose(); heard?.Dispose(); cleaned?.Dispose(); lighter?.Dispose(); lighter = null;
+            echo = null; denoiser = null; heard = cleaned = null;
             capture.SpeechDetected = null;
         }
     }
@@ -169,54 +384,128 @@ internal sealed class VoiceProcessor : IDisposable
     // Quiet microphones (a virtual cable, an unboosted or distant microphone) are brought up to a normal speech level
     // before noise removal, which otherwise takes speech much below -35 dBFS for noise and removes it. The level is
     // learned only from blocks the speech detector is confident about, so noise never sets it, and the gain only ever
-    // raises a quiet voice, by at most 30 dB. The last level learned carries over to the next time voice opens.
+    // raises a quiet voice, by at most 30 dB.
+    //
+    // The gain is set once and then left alone, so it never rides on words or sentences: loud and soft syllables
+    // keep their difference. It follows the first second of speech closely, and after that moves only when the
+    // voice's average over the last ten seconds or so asks for 3 dB more or less, slowly. A voice that stays 15 dB
+    // louder than what was learned for two seconds is a closer or hotter microphone, and is learned afresh. Quieter
+    // speech never is: it may be a television or someone across the room, which must not be raised to a voice's
+    // level. The last level learned carries over to the next time voice opens, for the same microphone.
+    //
+    // The level aimed for leaves a voice's own peaks below full scale. 2 dB higher, the limiter had to hold peaks
+    // in 2 to 10% of the frames of ordinary speech; here it is under 1%. A voice that still drives the limiter,
+    // because it grew louder than when its level was learned, has its gain taken down until it no longer does: the
+    // limiter is for the odd peak, not for holding a voice in.
     internal sealed class InputLevel
     {
-        public const double TargetDb = -26, MaxGainDb = 30;
+        public const double TargetDb = -23, MaxGainDb = 30;
         public const float Confident = 0.6f;
-        private static double remembered = double.NaN;
-        private double speechDb = remembered;
-        private float current = float.NaN;
-        public double GainDb => double.IsNaN(speechDb) ? 0 : Math.Clamp(TargetDb - speechDb, 0, MaxGainDb);
+        private const int SettleBlocks = 100, AverageBlocks = 1000;
+        private const double SettleStepDb = 0.5, StepDb = 0.02, StartDb = 3, StopDb = 0.25, AfreshDb = 15;
+        private const int AfreshBlocks = 200;
+        private static double remembered = double.NaN, rememberedMost = MaxGainDb;
+        private static string? microphone;
+        // The most gain this voice takes without driving the limiter. It comes down 2 dB a second while the limiter
+        // holds the voice by more than 1 dB, and returns by about a decibel a minute.
+        private double mostDb = rememberedMost;
+        private const double LimitedDb = -1, EaseDb = 0.02, ReturnDb = 0.0002;
+        // The voice's level as the microphone delivers it, before any gain; NaN until it has been heard.
+        public double SpeechDb => speechDb;
+        private double speechDb = remembered, recentDb = double.NaN;
+        private int apart;
+        private int learned = double.IsNaN(remembered) ? 0 : AverageBlocks;
+        private double gainDb = Wanted(remembered);
+        private bool moving;
+        public double GainDb => gainDb;
+        private static double Wanted(double speechDb) => double.IsNaN(speechDb) ? 0 : Math.Clamp(TargetDb - speechDb, 0, MaxGainDb);
+        // limiterDb: how far the limiter is holding the audio down at the moment, in dB (0 when it is not).
+        public void Ease(double limiterDb)
+        {
+            if (limiterDb < LimitedDb && gainDb > 0)
+            {
+                mostDb = Math.Max(0, Math.Min(mostDb, gainDb) - EaseDb);
+                gainDb = Math.Min(gainDb, mostDb);
+            }
+            else if (limiterDb >= 0) mostDb = Math.Min(MaxGainDb, mostDb + ReturnDb);
+            rememberedMost = mostDb;
+        }
         public void Learn(float[] samples, float probability)
         {
             if (probability < Confident) return;
             double sum = 0;
             foreach (var sample in samples) sum += sample * sample;
             var db = 10 * Math.Log10(sum / samples.Length + 1e-12);
+            if (db < -80) return;
+            recentDb = double.IsNaN(recentDb) ? db : recentDb + (db - recentDb) / 50;
+            apart = !double.IsNaN(speechDb) && learned >= SettleBlocks && recentDb - speechDb > AfreshDb ? apart + 1 : 0;
+            if (apart >= AfreshBlocks) { speechDb = double.NaN; learned = 0; apart = 0; }
             // Pauses inside speech are not its level.
-            if (db < -80 || !double.IsNaN(speechDb) && db < speechDb - 20) return;
-            speechDb = double.IsNaN(speechDb) ? db : speechDb + (db - speechDb) * 0.05;
+            if (!double.IsNaN(speechDb) && db < speechDb - 20) return;
+            learned = Math.Min(learned + 1, AverageBlocks);
+            speechDb = double.IsNaN(speechDb) ? db : speechDb + (db - speechDb) / learned;
             remembered = speechDb;
         }
+        // What has been learned, as the app keeps it between runs (see Voice.cs): the voice's level, the most gain it
+        // takes, and which microphone that was. Without it every run would spend its first sentences finding the
+        // level again, moving the gain while it does.
+        internal static string? Saved
+        {
+            get => double.IsNaN(remembered) ? null : FormattableString.Invariant($"{remembered:F1};{rememberedMost:F1};{microphone}");
+            set
+            {
+                var parts = value?.Split(';', 3);
+                if (parts is not { Length: 3 } || !double.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var level)
+                    || !double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var most) || level is < -80 or > 0) return;
+                remembered = level; rememberedMost = Math.Clamp(most, 0, MaxGainDb); microphone = parts[2].Length > 0 ? parts[2] : null;
+            }
+        }
         // Forgets the level carried over between sessions, so checks start from the same place.
-        internal static void Forget() => remembered = double.NaN;
-        // Never lifts a block past -1 dBFS. Lower gain applies at once, so a loud sound is never boosted even briefly;
-        // higher gain rises across the block, so changes never click.
+        internal static void Forget() { remembered = double.NaN; rememberedMost = MaxGainDb; microphone = null; }
+        // Starts over unless the level is long established; the gain stays where it is until speech is heard again.
+        // What held the gain down so far may have been the echo driving the limiter, not the voice.
+        public void Doubt() { mostDb = rememberedMost = MaxGainDb; if (learned < AverageBlocks) { speechDb = recentDb = double.NaN; learned = 0; } }
+        // Learns the level again from what is heard next, unless it is long established, keeping it meanwhile.
+        public void Again() { mostDb = rememberedMost = MaxGainDb; if (learned < AverageBlocks) learned = 0; }
+        // Another microphone has another level: what was learned from the last one is dropped.
+        public void Microphone(string id)
+        {
+            if (microphone is not null && microphone != id) { speechDb = remembered = recentDb = double.NaN; learned = 0; gainDb = 0; moving = false; mostDb = rememberedMost = MaxGainDb; }
+            microphone = id;
+        }
+        // Rises or falls smoothly across each block. Peaks are the limiter's concern, after noise removal.
         public void Apply(float[] samples)
         {
-            var target = (float)Math.Pow(10, GainDb / 20);
-            var peak = 0f;
-            foreach (var sample in samples) peak = Math.Max(peak, Math.Abs(sample));
-            if (peak * target > 0.89f) target = Math.Max(1, 0.89f / peak);
-            if (float.IsNaN(current) || target < current) current = target;
-            if (current == 1 && target == 1) return;
-            for (var i = 0; i < samples.Length; i++) samples[i] *= current + (target - current) * (i + 1) / samples.Length;
-            current = target;
+            var wanted = Math.Min(double.IsNaN(speechDb) ? gainDb : Wanted(speechDb), mostDb);
+            double step;
+            if (learned < SettleBlocks) step = SettleStepDb;
+            else
+            {
+                var off = Math.Abs(wanted - gainDb);
+                moving = moving ? off > StopDb : off > StartDb;
+                step = moving ? StepDb : 0;
+            }
+            var next = gainDb + Math.Clamp(wanted - gainDb, -step, step);
+            if (gainDb == 0 && next == 0) return;
+            float from = (float)Math.Pow(10, gainDb / 20), to = (float)Math.Pow(10, next / 20);
+            for (var i = 0; i < samples.Length; i++) samples[i] *= from + (to - from) * (i + 1) / samples.Length;
+            gainDb = next;
         }
     }
 
     // Speech starts once the probability has been at least 0.5 for two 32 ms chunks in a row, and lasts until it falls
-    // below 0.35, as Silero recommends; the voice gate's pre-roll and hangover cover both ends.
+    // below 0.35, as Silero recommends; the voice gate's pre-roll and hangover cover both ends. Both of those chunks
+    // have to be ones speech may start on: what is left of a knock often passes for one chunk and not the next.
     internal sealed class SpeechDecision
     {
         public const float Start = 0.5f, Stop = 0.35f;
         public const int Confirm = 2;
         private bool above;
         private int run;
-        public bool Next(float probability)
+        // mayStart: whether speech may begin on this chunk; it does not end speech that has begun.
+        public bool Next(float probability, bool mayStart = true)
         {
-            above = above ? probability >= Stop : probability >= Start;
+            above = run >= Confirm ? probability >= Stop : probability >= Start && mayStart;
             run = above ? run + 1 : 0;
             return run >= Confirm;
         }
@@ -226,6 +515,8 @@ internal sealed class VoiceProcessor : IDisposable
     internal interface IDenoiser : IDisposable
     {
         string Name { get; }
+        // Samples by which the output is behind the input.
+        int Delay { get; }
         bool Process(float[] samples);
     }
 
@@ -235,16 +526,19 @@ internal sealed class VoiceProcessor : IDisposable
         private IntPtr state;
         private readonly float[] scaled = new float[BlockSamples];
         public string Name => "rnnoise";
+        public int Delay => 2 * BlockSamples;
         public RnNoise()
         {
             if (rnnoise_get_frame_size() != BlockSamples) throw new InvalidOperationException("Unexpected RNNoise frame size");
             state = rnnoise_create(IntPtr.Zero);
             if (state == IntPtr.Zero) throw new InvalidOperationException("RNNoise could not start");
         }
+        // How surely it heard a voice in the latest block, 0 to 1.
+        public float Voice { get; private set; }
         public bool Process(float[] samples)
         {
             for (var i = 0; i < BlockSamples; i++) scaled[i] = samples[i] * 32768f;
-            rnnoise_process_frame(state, scaled, scaled);
+            Voice = rnnoise_process_frame(state, scaled, scaled);
             for (var i = 0; i < BlockSamples; i++) samples[i] = scaled[i] / 32768f;
             return true;
         }
@@ -262,11 +556,13 @@ internal sealed class VoiceProcessor : IDisposable
         private IntPtr state;
         private readonly float[] enhanced = new float[BlockSamples];
         public string Name => "deepfilter";
+        public int Delay { get; }
         public DeepFilter()
         {
             state = wr_df_create(100);
             if (state == IntPtr.Zero) throw new InvalidOperationException("DeepFilterNet could not start");
             if ((int)wr_df_frame_length(state) != BlockSamples) { Dispose(); throw new InvalidOperationException("Unexpected DeepFilterNet frame size"); }
+            Delay = (int)wr_df_delay(state);
         }
         public bool Process(float[] samples)
         {
@@ -277,23 +573,23 @@ internal sealed class VoiceProcessor : IDisposable
         public void Dispose() { if (state != IntPtr.Zero) wr_df_free(state); state = IntPtr.Zero; }
         [DllImport("deepfilter")] private static extern IntPtr wr_df_create(float attenuationLimitDb);
         [DllImport("deepfilter")] private static extern nuint wr_df_frame_length(IntPtr state);
+        [DllImport("deepfilter")] private static extern nuint wr_df_delay(IntPtr state);
         [DllImport("deepfilter")] private static extern int wr_df_process(IntPtr state, float[] input, float[] output);
         [DllImport("deepfilter")] private static extern void wr_df_free(IntPtr state);
     }
 
-    // WebRTC's audio processing module (BSD-3-Clause) through the C interface of SoundFlow's build. One instance
-    // cancels echo, another only controls gain, so the denoiser sits between them and the gain never lifts noise
-    // that is about to be removed. Render and capture may run on different threads, as WebRTC intends.
+    // WebRTC's audio processing module (BSD-3-Clause) through the C interface of SoundFlow's build, used for its echo
+    // canceller only. Render and capture may run on different threads, as WebRTC intends.
     internal sealed class WebRtcApm : IDisposable
     {
+        // Samples by which the processed microphone is behind what went in: the delay of its band-splitting filters.
+        public const int CaptureDelay = 238;
         private IntPtr apm, stream, samples, channels;
         public static WebRtcApm EchoCanceller() => new(config =>
         {
             webrtc_apm_config_set_echo_canceller(config, 1, 0);
             webrtc_apm_config_set_high_pass_filter(config, 1);
         });
-        // WebRTC's adaptive digital gain: aims 3 dB below full scale, at most 9 dB of gain, with a limiter.
-        public static WebRtcApm GainControl() => new(config => webrtc_apm_config_set_gain_controller1(config, 1, 1, 3, 9, 1));
         private WebRtcApm(Action<IntPtr> configure)
         {
             apm = webrtc_apm_create();
@@ -347,7 +643,6 @@ internal sealed class VoiceProcessor : IDisposable
         [DllImport(Library)] private static extern void webrtc_apm_config_destroy(IntPtr config);
         [DllImport(Library)] private static extern void webrtc_apm_config_set_echo_canceller(IntPtr config, int enabled, int mobileMode);
         [DllImport(Library)] private static extern void webrtc_apm_config_set_noise_suppression(IntPtr config, int enabled, int level);
-        [DllImport(Library)] private static extern void webrtc_apm_config_set_gain_controller1(IntPtr config, int enabled, int mode, int targetLevelDbfs, int compressionGainDb, int limiter);
         [DllImport(Library)] private static extern void webrtc_apm_config_set_high_pass_filter(IntPtr config, int enabled);
         [DllImport(Library)] private static extern void webrtc_apm_config_set_pipeline(IntPtr config, int maxInternalRate, int multiChannelRender, int multiChannelCapture, int downmix);
         [DllImport(Library)] private static extern int webrtc_apm_apply_config(IntPtr apm, IntPtr config);
