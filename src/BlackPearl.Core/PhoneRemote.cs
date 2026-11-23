@@ -428,7 +428,16 @@ public sealed class PhoneRemoteHost : IDisposable
             if (signal.Kind == "sdp") Reject(peer, signal, signal.Phone == "pair" ? "pairing-expired" : "unknown-phone");
             return;
         }
-        if (!PhoneRemoteProtocol.Verify(key, "phone", signal)) { Ignored(signal, "bad-signature"); return; }
+        if (!PhoneRemoteProtocol.Verify(key, "phone", signal))
+        {
+            Ignored(signal, "bad-signature");
+            // An offer signed with a pairing code that isn't the current one (a newer code replaced it, or it was never
+            // this PC's) is answered as an expired code: unanswered, the phone took the PC for offline and tried the
+            // dead code for as long as it lasted. Unsigned, as for an unknown phone; it grants nothing.
+            if (signal.Phone == "pair" && signal.Kind == "sdp" && sessionKey.StartsWith("pair:", StringComparison.Ordinal))
+                Reject(peer, signal, "pairing-expired");
+            return;
+        }
         PhoneRemoteSession? session, replaced = null;
         lock (gate)
         {

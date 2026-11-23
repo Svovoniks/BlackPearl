@@ -139,6 +139,11 @@ static class PhoneRemoteFixture
         await using (var stranger = await FakePhone.Connect(url, pcId, PhoneRemoteProtocol.NewHex(16), PhoneRemoteProtocol.NewHex(32)))
             check(host.ServerReady && host.PairingOpen && await stranger.Rejection() == "unknown-phone", "malformed and unreadable signals leave the PC answering phones and the pairing code unused");
 
+        // A code that isn't the live one (a newer code replaced it, or a mistyped one): the phone hears so, rather than
+        // nothing, and the live code still works.
+        await using (var replaced = await FakePhone.Connect(url, pcId, "pair", PhoneRemoteProtocol.NewHex(16)))
+            check(await replaced.Rejection() == "pairing-expired" && host.PairingOpen, "a pairing code that isn't the live one is refused with a reason, and the live one stays open");
+
         string phoneId, secret;
         await using (var pairing = await FakePhone.Connect(url, pcId, "pair", code))
         {
