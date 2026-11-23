@@ -211,31 +211,32 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             case ["file", var id] when stream is not null && stream.Item.Id == id:
                 return new(stream.File.Media.Length, stream.File.ReadAsync);
             case ["file", _]:
-                return Missing("file", stream is null ? "no-video" : "other-video");
+                return Missing(session, "file", stream is null ? "no-video" : "other-video");
             case ["stream", var id, var piece] when stream?.Converter is { } converter && converter.Stream.Id == id &&
                 int.TryParse(piece, NumberStyles.None, CultureInfo.InvariantCulture, out var index) && index >= 0 && index < converter.Stream.Segments:
                 return await converter.PhonePieceAsync(index, ct);
             case ["stream", var id, _]:
-                return Missing("stream", stream is null ? "no-video" : stream.Converter is not { } current ? "not-converted" : current.Stream.Id != id ? "other-stream" : "no-such-piece");
+                return Missing(session, "stream", stream is null ? "no-video" : stream.Converter is not { } current ? "not-converted" : current.Stream.Id != id ? "other-stream" : "no-such-piece");
             case ["art", var token, var size] when int.TryParse(size, NumberStyles.None, CultureInfo.InvariantCulture, out var width):
                 // Tokens live as long as this process: a phone showing a page from before the app restarted asks for old ones.
-                if (!artwork.TryGetValue(token, out var path)) return Missing("art", "unknown-picture");
+                if (!artwork.TryGetValue(token, out var path)) return Missing(session, "art", "unknown-picture");
                 width = Math.Clamp(width, 64, 1280);
                 var key = token + "/" + width;
                 if (artworkCache.TryGetValue(key, out var cached)) return PhoneResource.FromBytes(cached);
                 var (bytes, problem) = await Task.Run(() => Picture(path, width), ct);
-                if (bytes is null) return Missing("art", problem);
+                if (bytes is null) return Missing(session, "art", problem);
                 if (artworkCache.Count > 300) artworkCache.Clear();
                 artworkCache[key] = bytes;
                 return PhoneResource.FromBytes(bytes);
             default:
-                return Missing(parts[0] is "file" or "stream" or "art" ? parts[0] : "other", "malformed");
+                return Missing(session, parts[0] is "file" or "stream" or "art" ? parts[0] : "other", "malformed");
         }
     }
 
-    private static PhoneResource? Missing(string kind, string reason)
+    // Named by the session's short id, as phone-read-failed is, to match the two when several phones read at once.
+    internal static PhoneResource? Missing(PhoneRemoteSession session, string kind, string reason)
     {
-        PlaybackDiagnostics.Record("phone-resource-missing", new { resource = kind, reason });
+        PlaybackDiagnostics.Record("phone-resource-missing", new { session = session.Session[..8], resource = kind, reason });
         return null;
     }
 

@@ -62,9 +62,10 @@ public partial class MainWindow
         remote.ResolveMedia = async (session, resource, ct) =>
         {
             var parts = resource.Split('/');
-            if (parts is ["stream", var id, var piece] && phoneListeners.TryGetValue(session.PhoneId, out var listener) && listener.Converter is { } converter &&
-                converter.Stream.Id == id && int.TryParse(piece, NumberStyles.None, CultureInfo.InvariantCulture, out var index) && index < converter.Stream.Segments)
-                return await converter.PhonePieceAsync(index, ct);
+            if (parts is ["stream", var id, var piece] && phoneListeners.TryGetValue(session.PhoneId, out var listener) && listener.Converter is { } converter && converter.Stream.Id == id)
+                // A piece of the sound's own stream that isn't there is the sound's to explain, not the phone's video.
+                return int.TryParse(piece, NumberStyles.None, CultureInfo.InvariantCulture, out var index) && index < converter.Stream.Segments
+                    ? await converter.PhonePieceAsync(index, ct) : PhoneLibrary.Missing(session, "stream", "no-such-sound-piece");
             return library is null ? null : await library(session, resource, ct);
         };
     }
