@@ -167,7 +167,9 @@ static class PhoneLibraryChecks
         {
             Items = () => items, WasWatched = _ => false, SetWatched = (_, _) => { }, Play = (_, _) => Task.FromResult(true), Ready = ready.Task,
         };
-        Library().Attach(remote);
+        var first = Library();
+        first.ReadyWait = TimeSpan.FromSeconds(1);
+        first.Attach(remote);
         remote.CurrentState = () => new RemoteState(false);
         remote.Start();
         for (var waited = 0; !remote.ServerReady && waited < 15000; waited += 50) await Task.Delay(50);
@@ -175,6 +177,15 @@ static class PhoneLibraryChecks
         Check(await phone.Opened() && await phone.MediaOpened(), "the stand-in phone links to a PC that is still loading its library");
         phone.Send(new { type = "hello", protocol = 1, app = "check", device = "Check phone" });
         await phone.Next("welcome", 10000);
+        // Past the wait, a library request is told the library is loading; any other request (every one reaches the
+        // library, and listen is answered by the PC's sound) gets no such answer.
+        phone.Send(new { type = "listen", request = 38, on = true });
+        phone.Send(new { type = "browse", request = 39, category = 1 });
+        var loading = await phone.Next("error", 5000);
+        Check(loading is { } l && l.GetProperty("request").GetInt64() == 39 && l.GetProperty("code").GetString() == "loading",
+            "a library request the PC's library takes too long for is answered that it is loading");
+        Check(await phone.Next("error", 2000) is null, "a request that isn't the library's, such as listen, isn't answered that the library is loading");
+        first.ReadyWait = TimeSpan.FromSeconds(15);
         phone.Send(new { type = "browse", request = 40, category = 1 });
         Check(await phone.Next("page", 1500) is null, "a library request waits while the PC's library loads, rather than listing an empty one");
         items = loaded; ready.SetResult();

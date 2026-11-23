@@ -37,7 +37,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     // The window only: completes once its library has loaded. Until then Items is empty, and a phone that connected
     // early got an empty Home it kept (it has no reason to ask again), so requests wait for it.
     public Task? Ready { get; init; }
-    private static readonly TimeSpan ReadyWait = TimeSpan.FromSeconds(15);
+    // Settable for checks, which can't wait 15 seconds for each case.
+    internal TimeSpan ReadyWait { get; set; } = TimeSpan.FromSeconds(15);
 
     // One video a phone is watching: its file, or the conversion of it the phone asked for.
     private sealed class PhoneStream(MediaItem item, FileMediaSource file) : IDisposable
@@ -118,8 +119,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         void Fail(string code, string text) => remote.SendMessage(session, new { type = "error", code, message = text, request });
         try
         {
-            // Within the phone's 20 seconds for an answer; a library that takes longer is said to be loading.
-            if (Ready is { IsCompleted: false } ready && type is not "stream-stop")
+            // Within the phone's 20 seconds for an answer; a library that takes longer is said to be loading. Only the
+            // library's own requests wait: every request reaches here, and others (listen) are answered elsewhere.
+            if (Ready is { IsCompleted: false } ready && type is "browse" or "queues" or "watch" or "play" or "progress")
             {
                 await Task.WhenAny(ready, Task.Delay(ReadyWait, lifetime));
                 if (current() != remote) return;
