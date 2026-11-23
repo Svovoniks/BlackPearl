@@ -34,6 +34,11 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     public Func<string, bool>? PlaysHere { get; init; }
     // The window only: shows progress the phone saved. The flag is true once the phone stopped or paused.
     public Action<MediaItem, bool>? ProgressSaved { get; init; }
+    // The window only: completes once its library has loaded. Until then Items is empty, and a phone that connected
+    // early got an empty Home it kept (it has no reason to ask again), so requests wait for it.
+    public Task? Ready { get; init; }
+    // Settable for checks, which can't wait 15 seconds for each case.
+    internal TimeSpan ReadyWait { get; set; } = TimeSpan.FromSeconds(15);
 
     // One video a phone is watching: its file, or the conversion of it the phone asked for.
     private sealed class PhoneStream(MediaItem item, FileMediaSource file) : IDisposable
@@ -98,6 +103,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     {
         foreach (var phone in streams.Keys) if (streams.TryRemove(phone, out var stream)) stream.Dispose();
         artwork.Clear(); artworkCache.Clear();
+        lock (listingGate) listing = null;
     }
 
     private static string? Text(JsonElement message, string name) =>
@@ -113,6 +119,18 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         void Fail(string code, string text) => remote.SendMessage(session, new { type = "error", code, message = text, request });
         try
         {
+            // Within the phone's 20 seconds for an answer; a library that takes longer is said to be loading. Only the
+            // library's own requests wait: every request reaches here, and others (listen) are answered elsewhere.
+            if (Ready is { IsCompleted: false } ready && type is "browse" or "queues" or "watch" or "play" or "progress")
+            {
+                await Task.WhenAny(ready, Task.Delay(ReadyWait, lifetime));
+                if (current() != remote) return;
+                if (!ready.IsCompleted)
+                {
+                    if (type is not "progress") Fail("loading", "BlackPearl on the PC is still loading its library. Try again in a moment.");
+                    return;
+                }
+            }
             switch (type)
             {
                 case "browse" when Text(message, "queue") is not null || Text(message, "episodesOf") is not null: await BrowseList(remote, session, request, message); break;
@@ -194,7 +212,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     {
         if (string.IsNullOrEmpty(path)) return null;
         var token = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path)))[..24].ToLowerInvariant();
-        if (artwork.Count > 20000) artwork.Clear();
+        // Every picture of a large library fits: FindArtwork lists them all at once.
+        if (artwork.Count > 60000) artwork.Clear();
         artwork[token] = path;
         return token;
     }
@@ -218,8 +237,13 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             case ["stream", var id, _]:
                 return Missing(session, "stream", stream is null ? "no-video" : stream.Converter is not { } current ? "not-converted" : current.Stream.Id != id ? "other-stream" : "no-such-piece");
             case ["art", var token, var size] when int.TryParse(size, NumberStyles.None, CultureInfo.InvariantCulture, out var width):
-                // Tokens live as long as this process: a phone showing a page from before the app restarted asks for old ones.
-                if (!artwork.TryGetValue(token, out var path)) return Missing(session, "art", "unknown-picture");
+                // A token handed out by another process (the phone host before the app took over, or the app before it
+                // restarted) is a picture of the library this one hasn't listed yet: it is looked for among them all.
+                if (!artwork.TryGetValue(token, out var path))
+                {
+                    if (await FindArtwork(token, ct) is not { } found) return Missing(session, "art", "unknown-picture");
+                    path = found;
+                }
                 width = Math.Clamp(width, 64, 1280);
                 var key = token + "/" + width;
                 if (artworkCache.TryGetValue(key, out var cached)) return PhoneResource.FromBytes(cached);
@@ -231,6 +255,39 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             default:
                 return Missing(session, parts[0] is "file" or "stream" or "art" ? parts[0] : "other", "malformed");
         }
+    }
+
+    // Every picture the library's videos have, as tokens: listed once per library list, however many unknown tokens
+    // arrive at once (a page of posters asks for 40). A token still unknown after that names no picture of this library.
+    private readonly object listingGate = new();
+    private object? listedItems;
+    private Task? listing;
+    private async Task<string?> FindArtwork(string token, CancellationToken ct)
+    {
+        var read = new TaskCompletionSource<(object List, MediaItem[] Items)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        post(() => { var list = Items(); read.TrySetResult((list, list.ToArray())); });
+        try
+        {
+            var (list, items) = await read.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+            Task task;
+            lock (listingGate)
+            {
+                if (listing is null || !ReferenceEquals(listedItems, list))
+                {
+                    listedItems = list;
+                    listing = Task.Run(() =>
+                    {
+                        foreach (var item in items)
+                            foreach (var picture in new[] { item.Poster, item.SeriesPoster, item.SeasonPoster, item.EpisodePoster, item.GeneratedEpisodePoster })
+                                ArtworkToken(picture);
+                    });
+                }
+                task = listing;
+            }
+            await task.WaitAsync(ct);
+        }
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException) { return null; }
+        return artwork.TryGetValue(token, out var path) ? path : null;
     }
 
     // Named by the session's short id, as phone-read-failed is, to match the two when several phones read at once.

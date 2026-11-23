@@ -19,6 +19,8 @@ public partial class MainWindow
         Items = () => items, WasWatched = WasWatched, SetWatched = SetWatched, Play = PlayFromPhone, TakeOver = TakeOverForPhone,
         PlaysHere = id => room is null && playingItem?.Id == id && HasMediaPlayback && WantsMediaPlayback,
         ProgressSaved = PhoneProgressSaved,
+        // The phone remote starts before the library has loaded; until then the library would look empty to phones.
+        Ready = libraryReady.Task,
     };
 
     private void AttachPhonePlayback(PhoneRemoteHost remote) => PhoneLibrary.Attach(remote);
