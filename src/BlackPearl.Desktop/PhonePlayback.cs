@@ -46,12 +46,18 @@ public partial class MainWindow
         return takenAt;
     }
 
-    private void PhoneProgressSaved(MediaItem item, bool final)
+    private void PhoneProgressSaved(MediaItem item, PhoneProgress progress, bool final)
     {
         foreach (var card in libraryCards.Where(x => x.Card.Media.Id == item.Id)) UpdateCardPlayback(card);
-        // Home moves the title to the front of Continue watching once the phone stops or pauses.
-        if (final && currentPage == "Home") RefreshHome();
+        // Home shows the title at the front of Continue watching as soon as the phone has played enough of it to count,
+        // not only once the phone leaves it: a phone left paused never says it has. Once in front, the title's place
+        // and time left change when the phone leaves the video. A video Home doesn't lead with even then (one watched
+        // before) refreshes it once, not on every report.
+        if (currentPage != "Home") return;
+        if (final) { phoneHomeRefreshedFor = null; RefreshHome(); }
+        else if (progress.Played && homeHero?.Card.Media.Id != item.Id && phoneHomeRefreshedFor != item.Id) { phoneHomeRefreshedFor = item.Id; RefreshHome(); }
     }
+    private string? phoneHomeRefreshedFor;
 
     // Continue on the PC: plays the video here from where the phone was.
     private async Task<bool> PlayFromPhone(JsonElement message, Action<string, string> fail)

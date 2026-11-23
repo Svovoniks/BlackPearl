@@ -32,8 +32,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     public Func<MediaItem, Task<long?>>? TakeOver { get; init; }
     // The window only: true while it plays this video itself, which then keeps its own position.
     public Func<string, bool>? PlaysHere { get; init; }
-    // The window only: shows progress the phone saved. The flag is true once the phone stopped or paused.
-    public Action<MediaItem, bool>? ProgressSaved { get; init; }
+    // The window only: shows progress the phone saved. The flag is true for the last report of a viewing.
+    public Action<MediaItem, PhoneProgress, bool>? ProgressSaved { get; init; }
     // The window only: completes once its library has loaded. Until then Items is empty, and a phone that connected
     // early got an empty Home it kept (it has no reason to ask again), so requests wait for it.
     public Task? Ready { get; init; }
@@ -596,7 +596,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         if (progress.Played) saved.Add(KeyValuePair.Create("played:" + item.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)));
         library.SetSettings(saved);
         if (progress.Ended && !WasWatched(item.Id)) SetWatched(item, true);
-        else ProgressSaved?.Invoke(item, Flag(message, "final"));
+        else ProgressSaved?.Invoke(item, progress, Flag(message, "final"));
     }
 
     // What Continue on the PC saves before the PC plays the video: where the phone was, and a title watched before that

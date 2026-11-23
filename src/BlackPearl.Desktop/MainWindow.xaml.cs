@@ -1207,6 +1207,8 @@ public partial class MainWindow : Window
         var position = (view.IsEpisode || view.IsMovie) && long.TryParse(library.Setting("position:" + view.Card.Media.Id), out var saved) ? saved : 0;
         view.SetPlayback(position, LibraryWatchProgress.IsWatched(items, view.Card, WasWatched, _ => position));
     }
+    // The place last saved by SavePlaybackPosition: a video that hasn't moved since is not saved again.
+    private (string Id, long Time)? lastSavedPlayback;
     // handingOver: the streaming role just left this app, and its own video is still in the player.
     private void SavePlaybackPosition(bool handingOver = false)
     {
@@ -1214,6 +1216,11 @@ public partial class MainWindow : Window
         if (nativeStopCount == 0 && (room is null || handingOver || room.Identity?.Host == true) && playingItem is { IsMusic: false } && player is not null && player.Time >= 0)
         {
             var time = player.Time; var length = player.Length;
+            // A paused or finished video is saved once, not every few seconds. Saved again, its old place replaced the
+            // progress a phone saved since on the same video, and its "played" time, renewed each time, kept it first in
+            // Continue watching ahead of what the phone had just watched.
+            if (lastSavedPlayback == (playingItem.Id, time)) return;
+            lastSavedPlayback = (playingItem.Id, time);
             var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + playingItem.Id, WasWatched(playingItem.Id) || length > 0 && time >= length - 2000 ? "0" : Math.Max(0, time).ToString()) };
             // Home orders unfinished titles by when they were last played.
             if (time >= 10000) saved.Add(KeyValuePair.Create("played:" + playingItem.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString()));
