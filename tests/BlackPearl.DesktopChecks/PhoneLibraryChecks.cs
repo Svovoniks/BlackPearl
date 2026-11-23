@@ -140,9 +140,51 @@ static class PhoneLibraryChecks
             var done = await phone.Next("done", 10000);
             Check(done is { } d && d.GetProperty("request").GetInt64() == 2 && plays == 1, "Continue on PC plays the video on the PC and confirms it");
             Check((await phone.Read("file/night-signal", 0, 1000)).Error == "gone", "the phone's stream has ended once the PC confirms Continue on PC");
+            await Restarts(url, store, data, paired);
             Console.WriteLine($"{passed} phone library checks passed.");
         }
         finally { if (!server.HasExited) server.Kill(true); await server.WaitForExitAsync(); }
+    }
+
+    // A PC whose library loads after its phone remote starts, as the window's does, and a library in another process: the
+    // phone host handing over to the app, which knows none of the host's picture tokens.
+    static async Task Restarts(string url, LibraryStore store, string data, PairedPhone paired)
+    {
+        var poster = Path.Combine(data, "Paper Moon poster.png");
+        // A 1x1 PNG.
+        File.WriteAllBytes(poster, Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="));
+        var film = Path.Combine(data, "Paper Moon (1973).mkv");
+        File.WriteAllBytes(film, new byte[1000]);
+        IReadOnlyList<MediaItem> loaded = [new MediaItem("paper-moon", film, "Paper Moon", "Movie", 1973, Poster: poster)];
+        IReadOnlyList<MediaItem> items = [];
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var remote = new PhoneRemoteHost(new PhoneRemoteOptions
+        {
+            Server = url, HostKey = PersistentRooms.NewKey(), PcName = "Restarting PC", AppVersion = "0.0.0-check", Store = new LibraryPhoneStore(store), Features = PhoneLibrary.Features,
+        });
+        var dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+        PhoneLibrary Library() => new(store, () => remote, action => dispatcher.BeginInvoke(action), CancellationToken.None)
+        {
+            Items = () => items, WasWatched = _ => false, SetWatched = (_, _) => { }, Play = (_, _) => Task.FromResult(true), Ready = ready.Task,
+        };
+        Library().Attach(remote);
+        remote.CurrentState = () => new RemoteState(false);
+        remote.Start();
+        for (var waited = 0; !remote.ServerReady && waited < 15000; waited += 50) await Task.Delay(50);
+        await using var phone = await FakePhone.Connect(url, remote.PcId, paired.Id, paired.Secret);
+        Check(await phone.Opened() && await phone.MediaOpened(), "the stand-in phone links to a PC that is still loading its library");
+        phone.Send(new { type = "hello", protocol = 1, app = "check", device = "Check phone" });
+        await phone.Next("welcome", 10000);
+        phone.Send(new { type = "browse", request = 40, category = 1 });
+        Check(await phone.Next("page", 1500) is null, "a library request waits while the PC's library loads, rather than listing an empty one");
+        items = loaded; ready.SetResult();
+        var page = await phone.Next("page", 10000);
+        var token = page?.GetProperty("entries")[0].GetProperty("artwork").GetString();
+        Check(page?.GetProperty("total").GetInt32() == 1 && token is not null, "once the library has loaded, the waiting request is answered from it");
+        // The app takes over from the phone host: a new process, which handed out none of the tokens the phone holds.
+        Library().Attach(remote);
+        var picture = await phone.Read($"art/{token}/200", 0, 65536);
+        Check(picture.Error is null && picture.Length > 0, "a picture named by another process's token is still found");
     }
 
     // A 720p film worth converting, with a silent Japanese track (the file's default) and an English one that sounds.
