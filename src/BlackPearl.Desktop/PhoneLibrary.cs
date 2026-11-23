@@ -201,33 +201,49 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
 
     // Reads for the phone's media channel, on threads other than the dispatcher's: "file/<id>" for the video it is
     // watching, "stream/<stream id>/<piece>" for its conversion, and "art/<token>/<width>" for pictures.
+    // A read this PC can't answer is logged with why: the phone only hears "gone".
     private async Task<PhoneResource?> Resolve(PhoneRemoteSession session, string resource, CancellationToken ct)
     {
         var parts = resource.Split('/');
+        streams.TryGetValue(session.PhoneId, out var stream);
         switch (parts)
         {
-            case ["file", var id] when streams.TryGetValue(session.PhoneId, out var stream) && stream.Item.Id == id:
+            case ["file", var id] when stream is not null && stream.Item.Id == id:
                 return new(stream.File.Media.Length, stream.File.ReadAsync);
-            case ["stream", var id, var piece] when streams.TryGetValue(session.PhoneId, out var stream) && stream.Converter is { } converter && converter.Stream.Id == id &&
+            case ["file", _]:
+                return Missing(session, "file", stream is null ? "no-video" : "other-video");
+            case ["stream", var id, var piece] when stream?.Converter is { } converter && converter.Stream.Id == id &&
                 int.TryParse(piece, NumberStyles.None, CultureInfo.InvariantCulture, out var index) && index >= 0 && index < converter.Stream.Segments:
                 return await converter.PhonePieceAsync(index, ct);
-            case ["art", var token, var size] when artwork.TryGetValue(token, out var path) && int.TryParse(size, NumberStyles.None, CultureInfo.InvariantCulture, out var width):
+            case ["stream", var id, _]:
+                return Missing(session, "stream", stream is null ? "no-video" : stream.Converter is not { } current ? "not-converted" : current.Stream.Id != id ? "other-stream" : "no-such-piece");
+            case ["art", var token, var size] when int.TryParse(size, NumberStyles.None, CultureInfo.InvariantCulture, out var width):
+                // Tokens live as long as this process: a phone showing a page from before the app restarted asks for old ones.
+                if (!artwork.TryGetValue(token, out var path)) return Missing(session, "art", "unknown-picture");
                 width = Math.Clamp(width, 64, 1280);
                 var key = token + "/" + width;
                 if (artworkCache.TryGetValue(key, out var cached)) return PhoneResource.FromBytes(cached);
-                var bytes = await Task.Run(() => Picture(path, width), ct);
-                if (bytes is null) return null;
+                var (bytes, problem) = await Task.Run(() => Picture(path, width), ct);
+                if (bytes is null) return Missing(session, "art", problem);
                 if (artworkCache.Count > 300) artworkCache.Clear();
                 artworkCache[key] = bytes;
                 return PhoneResource.FromBytes(bytes);
-            default: return null;
+            default:
+                return Missing(session, parts[0] is "file" or "stream" or "art" ? parts[0] : "other", "malformed");
         }
     }
 
-    // The picture at most width pixels wide, as JPEG, never enlarged.
-    private static byte[]? Picture(string path, int width)
+    // Named by the session's short id, as phone-read-failed is, to match the two when several phones read at once.
+    internal static PhoneResource? Missing(PhoneRemoteSession session, string kind, string reason)
     {
-        if (!File.Exists(path)) return null;
+        PlaybackDiagnostics.Record("phone-resource-missing", new { session = session.Session[..8], resource = kind, reason });
+        return null;
+    }
+
+    // The picture at most width pixels wide, as JPEG, never enlarged, or why there is none.
+    private static (byte[]? Bytes, string Problem) Picture(string path, int width)
+    {
+        if (!File.Exists(path)) return (null, "missing-file");
         try
         {
             using var file = File.OpenRead(path);
@@ -238,9 +254,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             var encoder = new System.Windows.Media.Imaging.JpegBitmapEncoder { QualityLevel = 85 };
             encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
             using var output = new MemoryStream(); encoder.Save(output);
-            return output.ToArray();
+            return (output.ToArray(), "");
         }
-        catch (Exception) { return null; }
+        catch (Exception ex) { return (null, "unreadable:" + ex.GetType().Name); }
     }
 
     // The phone asks to play a video. takeOver: the video is the one playing here, and the phone continues it, so this

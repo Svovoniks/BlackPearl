@@ -111,6 +111,65 @@ public sealed class PhoneRemoteSession
     internal PhoneMediaServer? Media { get; set; }
     internal bool Greeted { get; set; }
     public bool Open => Channel?.IsOpen == true && Greeted;
+
+    // For the diagnostics log: short forms of the random session and phone ids, never the keys, and when it began.
+    internal string LogId => Session[..8];
+    internal string LogPhone => PhoneRemoteDiagnostics.ShortId(PhoneId);
+    internal long OpenedAt { get; } = Environment.TickCount64;
+    internal long Age => Environment.TickCount64 - OpenedAt;
+    // ICE candidates by type (host, srflx, prflx, relay): this PC's, and the phone's.
+    internal readonly int[] LocalCandidates = new int[4], RemoteCandidates = new int[4];
+    internal int ClosedLogged;
+}
+
+// What the phone remote writes to the diagnostics log (logs/diagnostics.jsonl), so a phone that can't connect can be
+// traced afterwards: the room server link, each phone's session from offer to close, and signals the PC ignored.
+internal static class PhoneRemoteDiagnostics
+{
+    static readonly string[] candidateTypes = ["host", "srflx", "prflx", "relay"];
+
+    // Phone ids are random, but whatever a stranger claims goes in too: at most 8 characters of it.
+    public static string ShortId(string? id) => id is null ? "" : id == "pair" ? "pair" : id[..Math.Min(8, id.Length)];
+
+    public static void Count(int[] counts, string? candidate)
+    {
+        var at = candidate?.IndexOf(" typ ", StringComparison.Ordinal) ?? -1;
+        if (at < 0) return;
+        var rest = candidate.AsSpan(at + 5);
+        var end = rest.IndexOf(' ');
+        var type = (end < 0 ? rest : rest[..end]).ToString();
+        var index = Array.IndexOf(candidateTypes, type);
+        if (index >= 0) Interlocked.Increment(ref counts[index]);
+    }
+
+    public static string Candidates(int[] counts) =>
+        string.Join(' ', candidateTypes.Select((type, i) => $"{type}:{Volatile.Read(ref counts[i])}"));
+
+    // An exception's type, with a socket or WebSocket error code, and the same for what caused it.
+    public static string Describe(Exception ex)
+    {
+        var parts = new List<string>();
+        for (var current = ex; current is not null && parts.Count < 3; current = current.InnerException)
+            parts.Add(current switch
+            {
+                WebSocketException socket => $"{socket.GetType().Name}/{socket.WebSocketErrorCode}",
+                System.Net.Sockets.SocketException socket => $"{socket.GetType().Name}/{socket.SocketErrorCode}",
+                HttpRequestException http when http.HttpRequestError != HttpRequestError.Unknown => $"{http.GetType().Name}/{http.HttpRequestError}",
+                _ => current.GetType().Name,
+            });
+        return string.Join(" <- ", parts);
+    }
+
+    public static void Closed(PhoneRemoteSession session, string reason)
+    {
+        if (Interlocked.Exchange(ref session.ClosedLogged, 1) != 0) return;
+        PlaybackDiagnostics.Record("remote-session-closed", new
+        {
+            session = session.LogId, phone = session.LogPhone, reason, ms = session.Age, greeted = session.Greeted,
+            path = session.Routed ? session.Relayed ? "relay" : "direct" : "none",
+            local = Candidates(session.LocalCandidates), remote = Candidates(session.RemoteCandidates),
+        });
+    }
 }
 
 public sealed class PhoneRemoteHost : IDisposable
@@ -160,7 +219,12 @@ public sealed class PhoneRemoteHost : IDisposable
     public IReadOnlyList<PairedPhone> Phones { get { lock (gate) return phones.ToArray(); } }
     public IReadOnlyList<PhoneRemoteSession> Connected { get { lock (gate) return sessions.Values.Where(s => s.Open && s.PhoneId != "pair").ToArray(); } }
 
-    public void Start() => running ??= Task.Run(() => RunAsync(lifetime.Token));
+    public void Start()
+    {
+        if (running is not null) return;
+        lock (gate) PlaybackDiagnostics.Record("remote-start", new { pc = PcId[..8], phones = phones.Count, app = options.AppVersion });
+        running = Task.Run(() => RunAsync(lifetime.Token));
+    }
 
     // A new one-use pairing link, valid for ten minutes; the previous one stops working.
     public string BeginPairing()
@@ -185,7 +249,7 @@ public sealed class PhoneRemoteHost : IDisposable
             options.Store.Save(phones);
             sessions.Remove(phoneId, out open);
         }
-        if (open is not null) { Close(open); Disconnected?.Invoke(open); }
+        if (open is not null) { Close(open, "removed"); Disconnected?.Invoke(open); }
         Changed?.Invoke();
     }
 
@@ -221,6 +285,30 @@ public sealed class PhoneRemoteHost : IDisposable
         Changed?.Invoke();
     }
 
+    // The room server link's state, logged when it changes: a server that stays unreachable writes once, not on every
+    // retry, and the next "ready" says how many attempts failed before it.
+    private string? serverLogged;
+    private int serverFailures;
+    private void ServerState(string state, string status, bool ready, string? error = null)
+    {
+        SetStatus(status, ready);
+        if (!ready) serverFailures++;
+        var key = state + "\n" + error;
+        if (key == serverLogged) return;
+        serverLogged = key;
+        PlaybackDiagnostics.Record("remote-server", new { state, error, failures = ready ? serverFailures : (int?)null, protocol = PhoneRemoteProtocol.Version });
+        if (ready) serverFailures = 0;
+    }
+
+    // A signal the PC answered with nothing, or with a refusal, once per session and reason.
+    private readonly HashSet<string> noted = new();
+    private void Ignored(RemoteSignal signal, string reason)
+    {
+        lock (gate) { if (noted.Count > 1000) noted.Clear(); if (!noted.Add(signal.Session + "\n" + reason)) return; }
+        PlaybackDiagnostics.Record("remote-signal-refused", new { session = signal.Session[..8], phone = PhoneRemoteDiagnostics.ShortId(signal.Phone),
+            kind = signal.Kind is "sdp" or "ice" ? signal.Kind : "other", reason });
+    }
+
     private async Task RunAsync(CancellationToken ct)
     {
         var delay = TimeSpan.FromSeconds(1);
@@ -250,7 +338,7 @@ public sealed class PhoneRemoteHost : IDisposable
                                 var welcome = Wire.Read<RemoteWelcome>(message.Data ?? "{}");
                                 lock (gate) { iceServers = welcome.IceServers ?? []; forceRelay = welcome.ForceRelay; }
                                 delay = TimeSpan.FromSeconds(1);
-                                SetStatus("Ready", true);
+                                ServerState("ready", "Ready", true);
                                 break;
                             case "signal" when message.Sender is { Length: > 0 } sender && message.Data is { Length: > 0 } data:
                                 // Anyone who knows this PC's id can send signals, so none of them may end this loop.
@@ -259,29 +347,29 @@ public sealed class PhoneRemoteHost : IDisposable
                                 break;
                             case "error":
                                 refused = true;
-                                SetStatus(message.Text ?? "The room server refused the phone remote.", false);
+                                ServerState("refused", message.Text ?? "The room server refused the phone remote.", false, message.Text is { } reason ? reason[..Math.Min(200, reason.Length)] : null);
                                 break;
                             // This PC's id connected again from elsewhere: another BlackPearl with this library, such as a
                             // copy of it on another PC. Taking the id straight back would have the two replace each
                             // other every second, so this one waits.
                             case "closed":
                                 replaced = true;
-                                SetStatus("Another BlackPearl with this library is using the phone remote. This one tries again in a minute.", false);
+                                ServerState("replaced", "Another BlackPearl with this library is using the phone remote. This one tries again in a minute.", false);
                                 break;
                         }
                     }
                 }
                 finally { connection.Cancel(); try { await writer; } catch { } }
-                if (!refused && !replaced) SetStatus("Reconnecting to the room server", false);
+                if (!refused && !replaced) ServerState("lost", "Reconnecting to the room server", false, socket.CloseStatus?.ToString() ?? "closed without a reason");
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex) when (ex is WebSocketException or IOException or OperationCanceledException or JsonException or InvalidDataException or HttpRequestException)
             {
                 // A room server from before the phone remote serves rooms but not /remote.
-                if (await ServesRoomsOnly(ct)) { refused = true; SetStatus("Your room server doesn't support the phone remote yet. Whoever runs it needs to update it.", false); }
-                else SetStatus("Can't reach the room server. Phones can't connect until it's back.", false);
+                if (await ServesRoomsOnly(ct)) { refused = true; ServerState("outdated-server", "Your room server doesn't support the phone remote yet. Whoever runs it needs to update it.", false); }
+                else ServerState("unreachable", "Can't reach the room server. Phones can't connect until it's back.", false, PhoneRemoteDiagnostics.Describe(ex));
             }
-            catch (ArgumentException ex) { SetStatus(ex.Message, false); refused = true; }
+            catch (ArgumentException ex) { ServerState("invalid-address", ex.Message, false); refused = true; }
             try { await Task.Delay(refused ? TimeSpan.FromMinutes(2) : replaced ? options.ReplacedWait : delay, ct); }
             catch (OperationCanceledException) { break; }
             delay = TimeSpan.FromSeconds(Math.Min(60, delay.TotalSeconds * 2));
@@ -335,11 +423,12 @@ public sealed class PhoneRemoteHost : IDisposable
         }
         if (key.Length == 0)
         {
+            Ignored(signal, signal.Phone == "pair" ? "pairing-expired" : "unknown-phone");
             // Only an answer to a well-formed request: it is unsigned and grants nothing.
             if (signal.Kind == "sdp") Reject(peer, signal, signal.Phone == "pair" ? "pairing-expired" : "unknown-phone");
             return;
         }
-        if (!PhoneRemoteProtocol.Verify(key, "phone", signal)) return;
+        if (!PhoneRemoteProtocol.Verify(key, "phone", signal)) { Ignored(signal, "bad-signature"); return; }
         PhoneRemoteSession? session, replaced = null;
         lock (gate)
         {
@@ -351,28 +440,29 @@ public sealed class PhoneRemoteHost : IDisposable
             }
             else if (session is not null) session.SignalingPeer = peer;
         }
-        if (replaced is not null) { Close(replaced); if (replaced.PhoneId != "pair") Disconnected?.Invoke(replaced); }
+        if (replaced is not null) { Close(replaced, "replaced"); if (replaced.PhoneId != "pair") Disconnected?.Invoke(replaced); }
         if (signal.Kind == "sdp")
         {
             var sdp = Wire.Read<RemoteSdp>(signal.Payload);
             if (sdp.Type != "offer" || sdp.Sdp is not { Length: > 0 } || session is not null) return;
-            session = Open(sessionKey, signal.Phone, signal.Session, peer, key);
-            if (session is null) return;
+            session = Open(sessionKey, signal.Phone, signal.Session, peer, key, replaced is not null);
+            if (session is null) { Ignored(signal, "too-many-sessions"); return; }
             // A signed offer can still be one the native library can't read.
             try { session.Peer.SetRemoteDescription(new RtcDescription { Type = RtcDescriptionType.Offer, Sdp = sdp.Sdp }); }
-            catch (Exception) { Drop(sessionKey, session); throw; }
+            catch (Exception) { Drop(sessionKey, session, "unreadable-offer"); throw; }
         }
         else if (signal.Kind == "ice" && session is not null)
         {
             var ice = Wire.Read<RemoteIce>(signal.Payload);
             if (ice.Candidate is not { Length: > 0 }) return;
+            PhoneRemoteDiagnostics.Count(session.RemoteCandidates, ice.Candidate);
             var line = ice.Candidate.StartsWith("a=", StringComparison.Ordinal) ? ice.Candidate : "a=" + ice.Candidate;
             try { session.Peer.AddRemoteCandidate(new RtcCandidate { Content = line, Mid = ice.Mid ?? "0" }); }
             catch (Exception ex) when (ex.GetType().Namespace?.StartsWith("DataChannelDotnet") == true) { }
         }
     }
 
-    private PhoneRemoteSession? Open(string sessionKey, string phoneId, string sessionId, string peer, string key)
+    private PhoneRemoteSession? Open(string sessionKey, string phoneId, string sessionId, string peer, string key, bool replacing)
     {
         string[] servers; bool relay;
         lock (gate)
@@ -390,7 +480,10 @@ public sealed class PhoneRemoteHost : IDisposable
         connection.OnLocalDescriptionSafe += (_, description) =>
             Signal(session, "sdp", Wire.Serialize(new RemoteSdp(description.Type == RtcDescriptionType.Answer ? "answer" : "offer", description.Sdp)));
         connection.OnCandidateSafe += (_, candidate) =>
+        {
+            PhoneRemoteDiagnostics.Count(session.LocalCandidates, candidate.Content);
             Signal(session, "ice", Wire.Serialize(new RemoteIce(candidate.Content.StartsWith("a=", StringComparison.Ordinal) ? candidate.Content[2..] : candidate.Content, candidate.Mid)));
+        };
         connection.OnConnectionStateChange += (_, state) =>
         {
             if (state == rtcState.RTC_CONNECTED && connection.TryGetSelectedCandidatePair(out var pair))
@@ -398,11 +491,22 @@ public sealed class PhoneRemoteHost : IDisposable
                 session.Routed = true;
                 session.Relayed = pair.LocalCandidate?.Contains("typ relay") == true || pair.RemoteCandidate?.Contains("typ relay") == true;
             }
-            if (state is rtcState.RTC_FAILED or rtcState.RTC_CLOSED or rtcState.RTC_DISCONNECTED) Drop(sessionKey, session);
+            var name = state.ToString().Replace("RTC_", "", StringComparison.Ordinal).ToLowerInvariant();
+            PlaybackDiagnostics.Record("remote-session-state", new
+            {
+                session = session.LogId, state = name, ms = session.Age,
+                path = state == rtcState.RTC_CONNECTED ? session.Routed ? session.Relayed ? "relay" : "direct" : "unknown" : null,
+                local = PhoneRemoteDiagnostics.Candidates(session.LocalCandidates), remote = PhoneRemoteDiagnostics.Candidates(session.RemoteCandidates),
+            });
+            if (state is rtcState.RTC_FAILED or rtcState.RTC_CLOSED or rtcState.RTC_DISCONNECTED) Drop(sessionKey, session, name);
             Changed?.Invoke();
         };
         connection.OnDataChannel += (_, channel) => Attach(sessionKey, session, channel);
-        PlaybackDiagnostics.Record("remote-session-opened", new { pairing = phoneId == "pair" });
+        PlaybackDiagnostics.Record("remote-session-opened", new
+        {
+            session = session.LogId, phone = session.LogPhone, pairing = phoneId == "pair", replacing, relayOnly = relay,
+            stun = servers.Count(s => s.StartsWith("stun", StringComparison.OrdinalIgnoreCase)), turn = servers.Count(s => s.StartsWith("turn", StringComparison.OrdinalIgnoreCase)),
+        });
         return session;
     }
 
@@ -418,7 +522,8 @@ public sealed class PhoneRemoteHost : IDisposable
         }
         if (channel.Label != PhoneRemoteProtocol.Label || session.Channel is not null) { try { channel.Dispose(); } catch { } return; }
         session.Channel = channel;
-        channel.OnClose += _ => Drop(sessionKey, session);
+        PlaybackDiagnostics.Record("remote-session-channel", new { session = session.LogId, ms = session.Age });
+        channel.OnClose += _ => Drop(sessionKey, session, "channel-closed");
         channel.OnTextReceivedSafe += (_, text) =>
         {
             try
@@ -441,15 +546,18 @@ public sealed class PhoneRemoteHost : IDisposable
         {
             case "hello":
                 var protocol = message.TryGetProperty("protocol", out var p) && p.TryGetInt32(out var number) ? number : 0;
+                var app = Text(message, "app") is { Length: > 0 and <= 40 } version ? version : null;
                 if (protocol != PhoneRemoteProtocol.Version)
                 {
                     Send(session, Wire.Serialize(new { type = "error", code = "protocol", message = protocol > PhoneRemoteProtocol.Version
                         ? "This phone app is newer than BlackPearl on the PC. Update BlackPearl on the PC." : "Update BlackPearl Mobile to control this PC." }));
-                    Close(session); return;
+                    PlaybackDiagnostics.Record("remote-session-refused", new { session = session.LogId, reason = "protocol", phoneProtocol = protocol, app });
+                    Close(session, "protocol"); return;
                 }
                 session.Device = Text(message, "device") is { Length: > 0 and <= 80 } device ? device : null;
                 Send(session, Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId = PcId, canStart = options.CanStart, features = options.Features }));
                 session.Greeted = true;
+                PlaybackDiagnostics.Record("remote-session-greeted", new { session = session.LogId, phone = session.LogPhone, app, ms = session.Age });
                 if (session.PhoneId != "pair") { Seen(session.PhoneId); SendState(session); }
                 Changed?.Invoke();
                 break;
@@ -460,6 +568,7 @@ public sealed class PhoneRemoteHost : IDisposable
                     if (session.PhoneId != "pair" || pairingCode != session.Key || DateTimeOffset.UtcNow >= pairingExpires)
                     {
                         Send(session, Wire.Serialize(new { type = "error", code = "pairing", message = "That pairing code has expired. Show a new one on the PC." }));
+                        PlaybackDiagnostics.Record("remote-session-refused", new { session = session.LogId, reason = session.PhoneId == "pair" ? "pairing-expired" : "already-paired" });
                         return;
                     }
                     var name = Text(message, "name")?.Trim() is { Length: > 0 } given ? given[..Math.Min(given.Length, 60)] : session.Device ?? "Phone";
@@ -469,9 +578,10 @@ public sealed class PhoneRemoteHost : IDisposable
                     pairingCode = null;
                     session.PhoneId = paired.Id;
                     sessions.Remove(sessionKey);
-                    if (sessions.Remove(paired.Id, out var stale)) Close(stale);
+                    if (sessions.Remove(paired.Id, out var stale)) Close(stale, "replaced");
                     sessions[paired.Id] = session;
                 }
+                PlaybackDiagnostics.Record("remote-session-paired", new { session = session.LogId, phone = session.LogPhone, ms = session.Age });
                 Send(session, Wire.Serialize(new { type = "paired", phoneId = paired.Id, secret = paired.Secret, pc = options.PcName, pcId = PcId }));
                 Paired?.Invoke(paired);
                 SendState(session);
@@ -510,7 +620,7 @@ public sealed class PhoneRemoteHost : IDisposable
         }
     }
 
-    private void Drop(string sessionKey, PhoneRemoteSession session)
+    private void Drop(string sessionKey, PhoneRemoteSession session, string reason)
     {
         bool removed;
         lock (gate)
@@ -520,19 +630,24 @@ public sealed class PhoneRemoteHost : IDisposable
         }
         if (removed)
         {
-            Close(session);
+            Close(session, reason);
             if (session.PhoneId != "pair") Disconnected?.Invoke(session);
             Changed?.Invoke();
         }
     }
 
-    // Native callbacks can run while their connection is closing; close on the thread pool.
-    private static void Close(PhoneRemoteSession session) => _ = Task.Run(() =>
+    // Native callbacks can run while their connection is closing; close on the thread pool. The first reason given is
+    // the one logged: a session closed for another reason then reports its connection closing too.
+    private static void Close(PhoneRemoteSession session, string reason)
     {
-        session.Media?.Dispose();
-        try { session.Channel?.Dispose(); } catch { }
-        try { session.Peer.Dispose(); } catch { }
-    });
+        PhoneRemoteDiagnostics.Closed(session, reason);
+        _ = Task.Run(() =>
+        {
+            session.Media?.Dispose();
+            try { session.Channel?.Dispose(); } catch { }
+            try { session.Peer.Dispose(); } catch { }
+        });
+    }
 
     public void Dispose()
     {
@@ -540,6 +655,7 @@ public sealed class PhoneRemoteHost : IDisposable
         lifetime.Cancel();
         PhoneRemoteSession[] open;
         lock (gate) { open = sessions.Values.ToArray(); sessions.Clear(); }
-        foreach (var session in open) Close(session);
+        if (running is not null) PlaybackDiagnostics.Record("remote-stop", new { sessions = open.Length });
+        foreach (var session in open) Close(session, "stopped");
     }
 }

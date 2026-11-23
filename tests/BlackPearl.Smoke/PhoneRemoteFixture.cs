@@ -22,6 +22,8 @@ static class PhoneRemoteFixture
     public static async Task Run(string sdk, string serverDll, string directory, Action<bool, string> check)
     {
         Directory.CreateDirectory(directory);
+        // The full suite has started the log already; on its own (--phone-remote) this run keeps one beside its files.
+        PlaybackDiagnostics.Initialize(Path.Combine(directory, "logs"));
         check(PhoneRemoteProtocol.Sign("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "phone", "a1b2c3d4e5f60718a1b2c3d4e5f60718",
             "0123456789abcdef0123456789abcdef", "sdp", "{\"type\":\"offer\",\"sdp\":\"v=0\"}") == "AHCUPPyOcWPNmRtEBJ6D5PQUJwF9CV5-GHlhUpfTkX8", "phone remote signatures match the protocol's first test vector");
         check(PhoneRemoteProtocol.Sign("ffeeddccbbaa99887766554433221100", "pc", "pair", "0123456789abcdef0123456789abcdef", "ice",
@@ -219,6 +221,29 @@ static class PhoneRemoteFixture
             check(await removed.Rejection() == "unknown-phone", "a removed phone is told it was removed");
         await using (var newer = await FakePhone.Connect(url, pcId, "pair", "00000000000000000000000000000000"))
             check(await newer.Rejection() == "pairing-expired", "a phone without a live pairing code is turned away");
+
+        // Everything above, as the diagnostics log tells it: enough to trace a phone that couldn't connect, and no keys.
+        await PlaybackDiagnostics.FlushAsync();
+        string text;
+        using (var stream = new FileStream(Path.Combine(PlaybackDiagnostics.DirectoryPath!, "diagnostics.jsonl"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(stream)) text = await reader.ReadToEndAsync();
+        var records = text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line).RootElement)
+            .Where(r => r.GetProperty("kind").GetString() is { } kind && (kind.StartsWith("remote-", StringComparison.Ordinal) || kind.StartsWith("phone-", StringComparison.Ordinal))).ToArray();
+        string Field(JsonElement record, string name) => record.GetProperty("data").TryGetProperty(name, out var value) ? value.ToString() : "";
+        bool Has(string kind, Func<JsonElement, bool> match) => records.Any(r => r.GetProperty("kind").GetString() == kind && match(r));
+        check(Has("remote-start", r => Field(r, "pc") == pcId[..8]) && Has("remote-server", r => Field(r, "state") == "ready") && Has("remote-server", r => Field(r, "state") == "replaced"),
+            "the log records the phone remote starting, reaching its room server, and being replaced by a copy of the library");
+        check(Has("remote-signal-refused", r => Field(r, "reason") == "unknown-phone") && Has("remote-signal-refused", r => Field(r, "reason") == "pairing-expired") &&
+            Has("remote-signal-refused", r => Field(r, "reason") == "bad-signature" && Field(r, "phone") == phoneId[..8]),
+            "the log records signals the PC turned away, with why: an unknown phone, an expired code, a wrong secret");
+        var greeted = records.Where(r => r.GetProperty("kind").GetString() == "remote-session-greeted" && Field(r, "phone") == phoneId[..8]).Select(r => Field(r, "session")).ToArray();
+        check(greeted.Length == 1 && Has("remote-session-opened", r => Field(r, "session") == greeted[0]) &&
+            Has("remote-session-state", r => Field(r, "session") == greeted[0] && Field(r, "state") == "connected" && Field(r, "path") == "direct" && Field(r, "local").Contains("host:", StringComparison.Ordinal)) &&
+            Has("remote-session-closed", r => Field(r, "session") == greeted[0] && Field(r, "reason") == "removed" && Field(r, "greeted") == "True"),
+            "the log follows a phone's session from offer to close: connected directly, greeted, and closed because the phone was removed");
+        check(Has("remote-session-paired", _ => true) && Has("remote-session-refused", r => Field(r, "reason") == "already-paired"), "the log records pairing, and a paired phone's refused second pairing");
+        check(Has("phone-read-failed", r => Field(r, "resource") == "file" && Field(r, "error") == "UnauthorizedAccessException"), "a read the PC can't answer is logged with the kind of resource asked for");
+        check(!new[] { hostKey, secret, code, phoneId, pcId }.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)), "the phone remote's log holds no keys, secrets, codes or whole ids");
     }
 
     // Drives a running BlackPearl as a paired phone would, for trying the desktop app by hand: each step is a command

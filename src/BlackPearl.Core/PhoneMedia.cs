@@ -135,7 +135,7 @@ internal sealed class PhoneMediaServer : IDisposable
                 catch (PhoneResourceBusyException ex) when (!lifetime.IsCancellationRequested) { Fail(request.Id, "busy", ex.Message); }
                 catch (Exception ex) when (!lifetime.IsCancellationRequested && ex.GetType().Namespace?.StartsWith("DataChannelDotnet") != true)
                 {
-                    PlaybackDiagnostics.Record("phone-read-failed", new { error = ex.GetType().Name });
+                    PlaybackDiagnostics.Record("phone-read-failed", new { error = ex.GetType().Name, session = session.LogId, resource = ResourceKind(request.Resource), offset = request.Offset });
                     Fail(request.Id, ex is UnauthorizedAccessException ? "gone" : "failed", ex is UnauthorizedAccessException
                         ? "That video is no longer in the library on the PC." : "The PC couldn't read that video.");
                 }
@@ -153,6 +153,9 @@ internal sealed class PhoneMediaServer : IDisposable
             foreach (var (request, read) in reading) _ = read.ContinueWith(t => { _ = t.Exception; request.Cancellation.Dispose(); }, TaskScheduler.Default);
         }
     }
+
+    // The kind of resource a read asked for ("file", "stream", "art"), for the log; the rest names library items.
+    public static string ResourceKind(string resource) => resource.Split('/')[0] switch { "file" => "file", "stream" => "stream", "art" => "art", _ => "other" };
 
     private void Fail(uint id, string code, string message)
     {
