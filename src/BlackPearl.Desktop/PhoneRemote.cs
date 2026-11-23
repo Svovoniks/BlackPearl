@@ -45,6 +45,8 @@ public partial class MainWindow
         var server = SavedServerAddress;
         if (!PhoneRemoteEnabled || closing)
         {
+            // Phones then hear nothing from this PC at all: their offers go unanswered.
+            if (!closing) PlaybackDiagnostics.Record("remote-off", new { running = phoneRemote is not null });
             StopPhoneRemote();
             return;
         }
@@ -53,7 +55,7 @@ public partial class MainWindow
         var hostKey = library.Setting("phoneRemoteHostKey");
         if (hostKey is not { Length: 64 }) { hostKey = PersistentRooms.NewKey(); library.Setting("phoneRemoteHostKey", hostKey); }
         try { RoomAddress.ValidateServer(server); }
-        catch (ArgumentException) { RenderPhoneRemote(); return; }
+        catch (ArgumentException) { PlaybackDiagnostics.Record("remote-server", new { state = "invalid-address" }); RenderPhoneRemote(); return; }
         phoneRemoteServer = server;
         phoneRemote = new PhoneRemoteHost(new PhoneRemoteOptions
         {
