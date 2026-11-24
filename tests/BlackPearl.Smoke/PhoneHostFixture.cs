@@ -43,6 +43,8 @@ static class PhoneHostFixture
             foreach (var argument in new[] { "--phone-host", "--data-dir", data }) start.ArgumentList.Add(argument);
             // A dev launch's switch must not leak into the check.
             start.Environment.Remove("BLACKPEARL_PHONE_HOST"); start.Environment.Remove("BLACKPEARL_DATA");
+            // The home-network listener on this PC only: listening on the network would raise Windows Firewall's prompt.
+            start.Environment["BLACKPEARL_PHONE_LAN"] = "loopback";
             return Process.Start(start)!;
         }
 
@@ -60,6 +62,11 @@ static class PhoneHostFixture
             if (link is null) return;
             link.Send(new { type = "hello", protocol = 1, app = "smoke", device = "Smoke phone" });
             var welcome = await link.Next("welcome", 10000);
+            // Where phones reach the host on the home network (on this PC only here: BLACKPEARL_PHONE_LAN=loopback).
+            var lanPort = welcome is { } lw && lw.TryGetProperty("lan", out var lanField) ? lanField.GetProperty("port").GetInt32() : 0;
+            check(lanPort is >= PhoneRemoteProtocol.LanPort and < PhoneRemoteProtocol.LanPort + PhoneRemoteProtocol.LanPorts &&
+                welcome!.Value.GetProperty("lan").GetProperty("addresses").EnumerateArray().Select(a => a.GetString()).SequenceEqual(["127.0.0.1"]),
+                "the phone host tells the phone where it listens on the home network");
             check(welcome is { } w && w.GetProperty("features").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["library", "watch", "queues"]) && !w.GetProperty("canStart").GetBoolean(),
                 "the phone host welcomes the phone with the library, watching and queues, and the PC's settings");
             check(await link.Next("state", 5000) is { } state && !state.GetProperty("media").GetBoolean(), "the phone host says nothing is playing");
@@ -101,12 +108,24 @@ static class PhoneHostFixture
             // Held to the end and closed, not released: the awaits below can resume on another thread.
             using var app = new Mutex(true, appMutex);
             check(!host.WaitForExit(1500) && !await link.Closed(10), "the phone host keeps the phone's link while BlackPearl is still connecting");
-            using var appLink = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Test PC", AppVersion = "0.0.0-test", Store = new SettingsStore(store) });
+            // The app also takes the home-network port over: it waits for the host to let go of it rather than moving to another,
+            // so phones find the app where they knew the host.
+            using var appLink = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Test PC", AppVersion = "0.0.0-test", Store = new SettingsStore(store),
+                Lan = new PhoneLanOptions { LoopbackOnly = true, Port = lanPort, SiblingRunning = () => !host.HasExited } });
             appLink.Start();
             check(host.WaitForExit(5000), "the phone host ends once BlackPearl has taken the phones over");
             check(await link.Closed(10000), "the phone's link to the phone host closes when it ends, for BlackPearl to take the phone over");
+            check(await Until(() => appLink.Lan is { State: "listening" }, 5000) && appLink.Lan!.Port == lanPort, "BlackPearl listens on the home-network port the phone host had, once it has ended");
+            await using (var direct = await FakePhone.Connect($"http://127.0.0.1:{lanPort}", pcId, phone.Id, phone.Secret))
+                check(await direct.Opened(), "a phone reaches BlackPearl on the home network at the address it knew");
         }
         finally { if (!host.HasExited) { host.Kill(); host.WaitForExit(5000); } }
+    }
+
+    static async Task<bool> Until(Func<bool> condition, int milliseconds)
+    {
+        for (var waited = 0; waited < milliseconds; waited += 50) { if (condition()) return true; await Task.Delay(50); }
+        return condition();
     }
 
     // The host needs a moment to start and reach the room server; until then the phone's offer goes unanswered.

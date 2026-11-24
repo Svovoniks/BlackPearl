@@ -315,6 +315,27 @@ static class ScreenRender
                         foreach (var finding in BorderAudit.Find(content)) Console.WriteLine($"CLIPPED {theme}-settings-pairing: {finding}");
                         pairing.Close();
                     }
+                    // The home-network lines in each state they can be in (the checks listen on this PC only, so the live
+                    // ones say only that): drawn in place of the live ones.
+                    var variants = new (string Name, BlackPearl.Core.PhoneLanState Lan, PhoneFirewall.Status? Wall)[]
+                    {
+                        ("allowed", new("listening", 47830, false), new(PhoneFirewall.Verdict.Allowed, PhoneFirewall.Private, "Home Wi-Fi", [])),
+                        ("checking", new("listening", 47830, false), null),
+                        ("undecided", new("listening", 47830, false), new(PhoneFirewall.Verdict.Undecided, PhoneFirewall.Private, "Home Wi-Fi", [])),
+                        ("blocked-public", new("listening", 47830, false), new(PhoneFirewall.Verdict.Blocked, PhoneFirewall.Public, "Home Wi-Fi", ["Contoso Security"])),
+                        ("busy", new("busy", null, false), null),
+                    };
+                    foreach (var (variant, lan, wall) in variants)
+                    {
+                        var live = Descendants((DependencyObject)window.Content).OfType<StackPanel>().FirstOrDefault(p => System.Windows.Automation.AutomationProperties.GetName(p) == "Home network");
+                        if (live?.Parent is not Panel parent) { Console.WriteLine("No home-network lines to draw variants of"); break; }
+                        var drawn = window.PhoneHomeNetwork(lan, wall, "192.168.1.20");
+                        var at = parent.Children.IndexOf(live); parent.Children.RemoveAt(at); parent.Children.Insert(at, drawn);
+                        await Settle(300); drawn.BringIntoView(); await Settle(400);
+                        await Capture($"{theme}-settings-profile-home-{variant}");
+                        foreach (var finding in BorderAudit.Find(drawn)) Console.WriteLine($"CLIPPED {theme}-settings-profile-home-{variant}: {finding}");
+                    }
+                    Call("RenderPhoneRemote", true);
                 }
                 var pane = Descendants((DependencyObject)window.Content).OfType<ScrollViewer>().FirstOrDefault(x => x.IsVisible && x.Tag as string == section && x.ScrollableHeight > 0);
                 if (pane is null || !everyEnd && section != "Playback") continue;
