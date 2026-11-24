@@ -42,6 +42,47 @@ public static class PhoneRemoteProtocol
         return new UriBuilder(uri) { Scheme = uri.Scheme == "https" ? "wss" : "ws" }.Uri;
     }
     internal static bool IsHex(string? text, int length) => text is { } value && value.Length == length && value.All(Uri.IsHexDigit);
+
+    // The home-network listener's ports (PHONE-REMOTE.md, "On the home network"): the first, or the next free one of ten.
+    public const int LanPort = 47830, LanPorts = 10;
+
+    // This PC's IPv4 addresses that a phone on the same network could reach: first the one the PC's own default route
+    // leaves from (the home network, usually, even with VPNs such as ZeroTier that also have a gateway), then those of
+    // wired or wireless adapters with a gateway, then other adapters (VPNs, virtual switches). At most eight.
+    public static string[] LanAddresses()
+    {
+        var found = new List<(int Rank, string Address)>();
+        string? primary = null;
+        try
+        {
+            // Choosing a route sends nothing, and works without the internet as long as the network has a router.
+            using var probe = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+            probe.Connect(System.Net.IPAddress.Parse("192.0.2.1"), 9);
+            primary = (probe.LocalEndPoint as System.Net.IPEndPoint)?.Address.ToString();
+        }
+        catch (System.Net.Sockets.SocketException) { }
+        try
+        {
+            foreach (var adapter in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (adapter.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up ||
+                    adapter.NetworkInterfaceType is System.Net.NetworkInformation.NetworkInterfaceType.Loopback or System.Net.NetworkInformation.NetworkInterfaceType.Tunnel) continue;
+                var properties = adapter.GetIPProperties();
+                var gateway = properties.GatewayAddresses.Any(g => g.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !g.Address.Equals(System.Net.IPAddress.Any));
+                var physical = adapter.NetworkInterfaceType is System.Net.NetworkInformation.NetworkInterfaceType.Ethernet or System.Net.NetworkInformation.NetworkInterfaceType.Wireless80211 or System.Net.NetworkInformation.NetworkInterfaceType.GigabitEthernet;
+                foreach (var unicast in properties.UnicastAddresses)
+                {
+                    var address = unicast.Address;
+                    if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || System.Net.IPAddress.IsLoopback(address)) continue;
+                    var bytes = address.GetAddressBytes();
+                    if (bytes[0] == 169 && bytes[1] == 254) continue;
+                    found.Add((address.ToString() == primary ? -1 : (gateway ? 0 : 2) + (physical ? 0 : 1), address.ToString()));
+                }
+            }
+        }
+        catch (System.Net.NetworkInformation.NetworkInformationException) { }
+        return found.OrderBy(f => f.Rank).Select(f => f.Address).Distinct().Take(8).ToArray();
+    }
 }
 
 public record RemoteWelcome(string[] IceServers, bool ForceRelay);
@@ -90,6 +131,9 @@ public sealed class PhoneRemoteOptions
     public TimeSpan ReplacedWait { get; init; } = TimeSpan.FromMinutes(1);
     // What this PC offers beyond the remote, sent in welcome: "library" (browse), "watch" (play on the phone).
     public IReadOnlyList<string> Features { get; init; } = [];
+    // Also listen on the home network for phones the room server can't introduce (PhoneRemoteLan.cs). Null: only the
+    // room server.
+    public PhoneLanOptions? Lan { get; init; }
 }
 
 // One phone's link. PhoneId is "pair" until a pairing session pairs.
@@ -111,6 +155,8 @@ public sealed class PhoneRemoteSession
     internal PhoneMediaServer? Media { get; set; }
     internal bool Greeted { get; set; }
     public bool Open => Channel?.IsOpen == true && Greeted;
+    // Whether its offer came over the home network rather than through the room server.
+    public bool ViaLan { get; internal set; }
 
     // For the diagnostics log: short forms of the random session and phone ids, never the keys, and when it began.
     internal string LogId => Session[..8];
@@ -166,7 +212,7 @@ internal static class PhoneRemoteDiagnostics
         PlaybackDiagnostics.Record("remote-session-closed", new
         {
             session = session.LogId, phone = session.LogPhone, reason, ms = session.Age, greeted = session.Greeted,
-            path = session.Routed ? session.Relayed ? "relay" : "direct" : "none",
+            path = session.Routed ? session.Relayed ? "relay" : "direct" : "none", via = session.ViaLan ? "lan" : "server",
             local = Candidates(session.LocalCandidates), remote = Candidates(session.RemoteCandidates),
         });
     }
@@ -187,13 +233,20 @@ public sealed class PhoneRemoteHost : IDisposable
     private List<PairedPhone> phones;
     private Task? running;
     private int disposed;
+    private readonly PhoneLanListener? lan;
 
     public PhoneRemoteHost(PhoneRemoteOptions options)
     {
         this.options = options;
         phones = options.Store.Load().ToList();
         PcId = PhoneRemoteProtocol.PcId(options.HostKey);
+        if (options.Lan is { } lanOptions) { lan = new PhoneLanListener(this, lanOptions); lan.Changed += () => Changed?.Invoke(); }
     }
+
+    // The home-network listener's state, or null when this PC doesn't listen there.
+    public PhoneLanState? Lan => lan?.State;
+    // Connections on the home-network listener, phones' or not yet known.
+    public int LanConnections => lan?.Count ?? 0;
 
     public string PcId { get; }
     public string Status { get; private set; } = "Starting";
@@ -224,6 +277,7 @@ public sealed class PhoneRemoteHost : IDisposable
         if (running is not null) return;
         lock (gate) PlaybackDiagnostics.Record("remote-start", new { pc = PcId[..8], phones = phones.Count, app = options.AppVersion });
         running = Task.Run(() => RunAsync(lifetime.Token));
+        lan?.Start();
     }
 
     // A new one-use pairing link, valid for ten minutes; the previous one stops working.
@@ -340,7 +394,8 @@ public sealed class PhoneRemoteHost : IDisposable
                                 delay = TimeSpan.FromSeconds(1);
                                 ServerState("ready", "Ready", true);
                                 break;
-                            case "signal" when message.Sender is { Length: > 0 } sender && message.Data is { Length: > 0 } data:
+                            // A sender named as a home-network connection would have the PC's answers go there instead.
+                            case "signal" when message.Sender is { Length: > 0 } sender && !sender.StartsWith("lan:", StringComparison.Ordinal) && message.Data is { Length: > 0 } data:
                                 // Anyone who knows this PC's id can send signals, so none of them may end this loop.
                                 try { HandleSignal(sender, Wire.Read<RemoteSignal>(data)); }
                                 catch (Exception ex) { PlaybackDiagnostics.Record("remote-signal-rejected", new { error = ex.GetType().Name }); }
@@ -367,7 +422,10 @@ public sealed class PhoneRemoteHost : IDisposable
             {
                 // A room server from before the phone remote serves rooms but not /remote.
                 if (await ServesRoomsOnly(ct)) { refused = true; ServerState("outdated-server", "Your room server doesn't support the phone remote yet. Whoever runs it needs to update it.", false); }
-                else ServerState("unreachable", "Can't reach the room server. Phones can't connect until it's back.", false, PhoneRemoteDiagnostics.Describe(ex));
+                // Phones on the home network can still reach a PC listening there, when its firewall lets them.
+                else ServerState("unreachable", options.Lan is { LoopbackOnly: false }
+                    ? "Can't reach the room server. Until it's back, phones can only connect on the home network."
+                    : "Can't reach the room server. Phones can't connect until it's back.", false, PhoneRemoteDiagnostics.Describe(ex));
             }
             catch (ArgumentException ex) { ServerState("invalid-address", ex.Message, false); refused = true; }
             try { await Task.Delay(refused ? TimeSpan.FromMinutes(2) : replaced ? options.ReplacedWait : delay, ct); }
@@ -397,20 +455,29 @@ public sealed class PhoneRemoteHost : IDisposable
     private void Signal(PhoneRemoteSession session, string kind, string payload)
     {
         var auth = PhoneRemoteProtocol.Sign(session.Key, "pc", session.SignalAs, session.Session, kind, payload);
-        outgoing.Writer.TryWrite(new("signal", Target: session.SignalingPeer,
+        Route(new("signal", Target: session.SignalingPeer,
             Data: Wire.Serialize(new RemoteSignal(session.SignalAs, session.Session, kind, payload, auth))));
     }
 
     private void Reject(string peer, RemoteSignal signal, string reason)
     {
         lock (gate) { if (rejected.Count > 1000) rejected.Clear(); if (!rejected.Add(signal.Session)) return; }
-        outgoing.Writer.TryWrite(new("signal", Target: peer, Data: Wire.Serialize(new RemoteSignal(signal.Phone, signal.Session, "rejected", reason, ""))));
+        Route(new("signal", Target: peer, Data: Wire.Serialize(new RemoteSignal(signal.Phone, signal.Session, "rejected", reason, ""))));
     }
 
-    internal void HandleSignal(string peer, RemoteSignal signal)
+    // A signal goes back the way the phone's last one came: through the room server, or on the home network.
+    private void Route(WireMessage message)
+    {
+        if (message.Target?.StartsWith("lan:", StringComparison.Ordinal) == true) lan?.Send(message.Target, message);
+        else outgoing.Writer.TryWrite(message);
+    }
+
+    // Returns whether the signal carried a valid signature of a phone this PC knows (or of its live pairing code): the
+    // home-network listener keeps only connections that have sent one.
+    internal bool HandleSignal(string peer, RemoteSignal signal)
     {
         // Missing fields arrive as null.
-        if (signal.Phone is not { Length: > 0 and <= 64 } || signal.Kind is null || signal.Payload is not { Length: <= 60000 } || !PhoneRemoteProtocol.IsHex(signal.Session, 32)) return;
+        if (signal.Phone is not { Length: > 0 and <= 64 } || signal.Kind is null || signal.Payload is not { Length: <= 60000 } || !PhoneRemoteProtocol.IsHex(signal.Session, 32)) return false;
         string key, sessionKey;
         lock (gate)
         {
@@ -426,7 +493,7 @@ public sealed class PhoneRemoteHost : IDisposable
             Ignored(signal, signal.Phone == "pair" ? "pairing-expired" : "unknown-phone");
             // Only an answer to a well-formed request: it is unsigned and grants nothing.
             if (signal.Kind == "sdp") Reject(peer, signal, signal.Phone == "pair" ? "pairing-expired" : "unknown-phone");
-            return;
+            return false;
         }
         if (!PhoneRemoteProtocol.Verify(key, "phone", signal))
         {
@@ -436,7 +503,7 @@ public sealed class PhoneRemoteHost : IDisposable
             // dead code for as long as it lasted. Unsigned, as for an unknown phone; it grants nothing.
             if (signal.Phone == "pair" && signal.Kind == "sdp" && sessionKey.StartsWith("pair:", StringComparison.Ordinal))
                 Reject(peer, signal, "pairing-expired");
-            return;
+            return false;
         }
         PhoneRemoteSession? session, replaced = null;
         lock (gate)
@@ -444,7 +511,7 @@ public sealed class PhoneRemoteHost : IDisposable
             sessions.TryGetValue(sessionKey, out session);
             if (session is not null && session.Session != signal.Session)
             {
-                if (signal.Kind != "sdp") return;
+                if (signal.Kind != "sdp") return true;
                 replaced = session; session = null; sessions.Remove(sessionKey);
             }
             else if (session is not null) session.SignalingPeer = peer;
@@ -453,9 +520,9 @@ public sealed class PhoneRemoteHost : IDisposable
         if (signal.Kind == "sdp")
         {
             var sdp = Wire.Read<RemoteSdp>(signal.Payload);
-            if (sdp.Type != "offer" || sdp.Sdp is not { Length: > 0 } || session is not null) return;
+            if (sdp.Type != "offer" || sdp.Sdp is not { Length: > 0 } || session is not null) return true;
             session = Open(sessionKey, signal.Phone, signal.Session, peer, key, replaced is not null);
-            if (session is null) { Ignored(signal, "too-many-sessions"); return; }
+            if (session is null) { Ignored(signal, "too-many-sessions"); return true; }
             // A signed offer can still be one the native library can't read.
             try { session.Peer.SetRemoteDescription(new RtcDescription { Type = RtcDescriptionType.Offer, Sdp = sdp.Sdp }); }
             catch (Exception) { Drop(sessionKey, session, "unreadable-offer"); throw; }
@@ -463,28 +530,33 @@ public sealed class PhoneRemoteHost : IDisposable
         else if (signal.Kind == "ice" && session is not null)
         {
             var ice = Wire.Read<RemoteIce>(signal.Payload);
-            if (ice.Candidate is not { Length: > 0 }) return;
+            if (ice.Candidate is not { Length: > 0 }) return true;
             PhoneRemoteDiagnostics.Count(session.RemoteCandidates, ice.Candidate);
             var line = ice.Candidate.StartsWith("a=", StringComparison.Ordinal) ? ice.Candidate : "a=" + ice.Candidate;
             try { session.Peer.AddRemoteCandidate(new RtcCandidate { Content = line, Mid = ice.Mid ?? "0" }); }
             catch (Exception ex) when (ex.GetType().Namespace?.StartsWith("DataChannelDotnet") == true) { }
         }
+        return true;
     }
 
     private PhoneRemoteSession? Open(string sessionKey, string phoneId, string sessionId, string peer, string key, bool replacing)
     {
-        string[] servers; bool relay;
+        string[] servers; bool relay, relayWanted;
+        var viaLan = peer.StartsWith("lan:", StringComparison.Ordinal);
         lock (gate)
         {
             if (sessions.Count >= 16) return null;
-            servers = iceServers; relay = forceRelay;
+            servers = iceServers; relay = relayWanted = forceRelay;
         }
+        // On the home network the two reach each other's own addresses; the room server's STUN and TURN servers may be
+        // the very thing that is down, and a relay-only setting can't be kept without one.
+        if (viaLan) { servers = []; relay = false; }
         var connection = new RtcPeerConnection(new RtcPeerConfiguration
         {
             IceServers = servers, MaxMessageSize = 65536, Mtu = 1200,
             TransportPolicy = relay ? rtcTransportPolicy.RTC_TRANSPORT_POLICY_RELAY : rtcTransportPolicy.RTC_TRANSPORT_POLICY_ALL
         });
-        var session = new PhoneRemoteSession(phoneId, sessionId, peer, key, connection);
+        var session = new PhoneRemoteSession(phoneId, sessionId, peer, key, connection) { ViaLan = viaLan };
         lock (gate) sessions[sessionKey] = session;
         connection.OnLocalDescriptionSafe += (_, description) =>
             Signal(session, "sdp", Wire.Serialize(new RemoteSdp(description.Type == RtcDescriptionType.Answer ? "answer" : "offer", description.Sdp)));
@@ -513,8 +585,10 @@ public sealed class PhoneRemoteHost : IDisposable
         connection.OnDataChannel += (_, channel) => Attach(sessionKey, session, channel);
         PlaybackDiagnostics.Record("remote-session-opened", new
         {
-            session = session.LogId, phone = session.LogPhone, pairing = phoneId == "pair", replacing, relayOnly = relay,
+            session = session.LogId, phone = session.LogPhone, pairing = phoneId == "pair", replacing, relayOnly = relay, via = viaLan ? "lan" : "server",
             stun = servers.Count(s => s.StartsWith("stun", StringComparison.OrdinalIgnoreCase)), turn = servers.Count(s => s.StartsWith("turn", StringComparison.OrdinalIgnoreCase)),
+            // This PC is set to use only the relay, which the home network has none of.
+            relayIgnored = viaLan && relayWanted ? true : (bool?)null,
         });
         return session;
     }
@@ -564,7 +638,10 @@ public sealed class PhoneRemoteHost : IDisposable
                     Close(session, "protocol"); return;
                 }
                 session.Device = Text(message, "device") is { Length: > 0 and <= 80 } device ? device : null;
-                Send(session, Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId = PcId, canStart = options.CanStart, features = options.Features }));
+                // Where phones reach this PC on the home network, while it listens there (PHONE-REMOTE.md, "On the home
+                // network"). Left out otherwise, so a phone keeps the place it knew: the other BlackPearl process may
+                // have it again in a moment.
+                Send(session, PhoneRemoteHost.Welcome(options, PcId, lan?.Advertised()));
                 session.Greeted = true;
                 PlaybackDiagnostics.Record("remote-session-greeted", new { session = session.LogId, phone = session.LogPhone, app, ms = session.Age });
                 if (session.PhoneId != "pair") { Seen(session.PhoneId); SendState(session); }
@@ -613,6 +690,10 @@ public sealed class PhoneRemoteHost : IDisposable
         }
     }
 
+
+    internal static string Welcome(PhoneRemoteOptions options, string pcId, object? lan) => lan is null
+        ? Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId, canStart = options.CanStart, features = options.Features })
+        : Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId, canStart = options.CanStart, features = options.Features, lan });
     private void SendState(PhoneRemoteSession session)
     {
         if (CurrentState?.Invoke() is { } state) Send(session, Wire.Serialize(state));
@@ -666,5 +747,6 @@ public sealed class PhoneRemoteHost : IDisposable
         lock (gate) { open = sessions.Values.ToArray(); sessions.Clear(); }
         if (running is not null) PlaybackDiagnostics.Record("remote-stop", new { sessions = open.Length });
         foreach (var session in open) Close(session, "stopped");
+        lan?.Dispose();
     }
 }

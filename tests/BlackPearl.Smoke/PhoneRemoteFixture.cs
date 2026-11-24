@@ -44,6 +44,7 @@ static class PhoneRemoteFixture
             "a pause in the credits, or leaving a video before its last tenth, keeps its resume point");
         await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", async url => { await Exercise(url, check); await PhoneHostFixture.Run(url, directory, check); });
         await OtherServers(check);
+        await PhoneLanFixture.Run(check);
     }
 
     // Servers that aren't BlackPearl room servers with the phone remote: the PC keeps trying and says why.

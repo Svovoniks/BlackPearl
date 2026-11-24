@@ -29,6 +29,8 @@ static class Program
         // A window closed here never starts the phone host or changes Windows' sign-in entry, even on a scratch copy of a
         // library with the phone remote on, whose phones would otherwise reach the copy.
         Environment.SetEnvironmentVariable("BLACKPEARL_PHONE_HOST", "off");
+        // The phone remote's home-network listener stays on this PC: listening on the network would raise Windows Firewall's prompt.
+        Environment.SetEnvironmentVariable("BLACKPEARL_PHONE_LAN", "loopback");
         if (args.FirstOrDefault() == "--video-frames")
         {
             VideoFrameChecks.Run(Path.GetFullPath(args.ElementAtOrDefault(1) ?? Path.Combine("artifacts", "video-frames-" + Guid.NewGuid().ToString("N")))).GetAwaiter().GetResult(); return;
@@ -169,6 +171,14 @@ static class Program
                 finally { if (shuffleWindow.IsLoaded) shuffleWindow.Close(); app.Shutdown(); }
             };
             shuffleWindow.Show(); app.Run(); return;
+        }
+        if (args.FirstOrDefault() == "--phone-lan")
+        {
+            // The home network's firewall verdicts and Settings lines, without the whole suite.
+            var count = 0;
+            try { PhoneLanChecks.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); count++; }); Console.WriteLine($"{count} phone home-network checks passed."); }
+            catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+            return;
         }
         if (args.FirstOrDefault() == "--phone-takeover")
         {
@@ -455,6 +465,7 @@ static class Program
                 await PictureInPictureChecks.Run(window, Check);
                 await EndedSeekChecks.Run(window, Check);
                 await PhoneTakeOverChecks.Run(window, Check);
+                PhoneLanChecks.Run(Check);
                 await LocalAviAudioChecks.Run(window, Check);
                 await CheckBackNavigation(window, Check);
                 PlayerInteractionChecks.Run(window, Check);
