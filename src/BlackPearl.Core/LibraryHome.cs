@@ -48,7 +48,10 @@ public static class LibraryHome
             }
             var remaining = files.Where(item => !Completed(item)).OrderBy(item => item.Season ?? int.MaxValue)
                 .ThenBy(item => item.Episode ?? int.MaxValue).ThenBy(item => item.Id).ToArray();
-            var next = remaining.FirstOrDefault(item => Position(item.Id) >= 10000) ?? remaining.FirstOrDefault();
+            // A show continues with the episode left part-way that was played last, so one watched out of order (shuffle, a
+            // queue, a jump ahead) isn't hidden behind an earlier one left part-way; ties keep episode order. With none part-way,
+            // the first unwatched episode is next.
+            var next = remaining.Where(item => Position(item.Id) >= 10000).MaxBy(item => Played(item.Id)) ?? remaining.FirstOrDefault();
             if (next is null) continue;
             var card = next.Series is null ? title : new LibraryCard(next.Series + " · " + next.EpisodeDisplayTitle,
                 next.Caption, LibraryCatalog.EpisodeArtwork(next), next, "episode", next.Season);
