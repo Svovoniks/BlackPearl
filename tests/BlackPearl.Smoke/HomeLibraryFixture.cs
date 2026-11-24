@@ -94,15 +94,95 @@ static class HomeLibraryFixture
             try { SharedLibrary.Draw(many, invalid); } catch (InvalidDataException) { rejected = true; }
             check(rejected, "an invalid draw request is rejected: " + invalid);
         }
-        var pageCount = (int)Math.Ceiling((LibraryHome.Kinds.Length * LibraryHome.SuggestionsPerKind + 1) / (double)SharedLibrary.PageSize);
+        var homeCount = LibraryHome.Kinds.Length * LibraryHome.SuggestionsPerKind + 1 + Math.Min(many.Length, LibraryHome.UnwatchedLimit);
+        var pageCount = (int)Math.Ceiling(homeCount / (double)SharedLibrary.PageSize);
         var pages = Enumerable.Range(0, pageCount).Select(page => SharedLibrary.Browse(many, request with { Page = page })).ToArray();
-        check(pages.Sum(page => page.Entries.Length) == LibraryHome.Kinds.Length * LibraryHome.SuggestionsPerKind + 1 && pages.SelectMany(page => page.Entries).Count(entry => entry.HomeSection == "mystery") == 1,
-            "guest Home pagination includes every category row and one mystery pick");
+        check(pages.Sum(page => page.Entries.Length) == homeCount && pages.SelectMany(page => page.Entries).Count(entry => entry.HomeSection == "mystery") == 1 &&
+            pages.SelectMany(page => page.Entries).Count(entry => entry.HomeSection == "unwatched") == Math.Min(many.Length, LibraryHome.UnwatchedLimit),
+            "guest Home pagination includes every category row, one mystery pick and the unwatched row");
         check(pages.SelectMany(page => page.Entries).Where(entry => entry.HomeSection == "suggestions").Select(entry => entry.Id).Distinct().Count() == LibraryHome.Kinds.Length * LibraryHome.SuggestionsPerKind,
             "seeded guest suggestions remain stable across pages");
         var unicode = many.Select(item => item with { Title = new string('界', 180), Overview = new string('界', 1000) }).ToArray();
         var illustrated = SharedLibrary.Browse(unicode, request, _ => new string('+', 5400));
         check(System.Text.Encoding.UTF8.GetByteCount(Wire.Serialize(new WireMessage("catalog-page", Number: long.MaxValue, Data: Wire.Serialize(illustrated)))) < 65536,
             "guest Home stays within the peer transport budget with Unicode and escaped posters");
+        Unwatched(check);
+    }
+
+    // Home's Unwatched row: every unstarted title, newest first by its newest file, and the full list behind it.
+    static void Unwatched(Action<bool, string> check)
+    {
+        MediaItem Episode(string id, string show, int season, int number) =>
+            new(id, "C:/private/" + id + ".mkv", show, "Show", Series: show, Season: season, Episode: number, RuntimeMinutes: 24);
+        MediaItem[] items = [
+            new("old", "C:/private/old.mkv", "Old film", "Movie"), new("recent", "C:/private/recent.mkv", "Recent film", "Movie"),
+            new("undated", "C:/private/undated.mkv", "Undated film", "Movie"), new("seen", "C:/private/seen.mkv", "Seen film", "Movie"),
+            Episode("s1", "Slow show", 1, 1), Episode("s2", "Slow show", 1, 2), Episode("p1", "Paused show", 1, 1),
+            new("song", "C:/private/song.flac", "Song", "Music", Series: "Album", Episode: 1)];
+        var playback = new Dictionary<string, string>
+        {
+            ["added:old"] = "1000", ["added:recent"] = "5000", ["added:seen"] = "9000", ["watched:seen"] = "true",
+            // A show is as new as its newest episode.
+            ["added:s1"] = "500", ["added:s2"] = "7000", ["added:p1"] = "8000", ["position:p1"] = "60000",
+        };
+        var home = LibraryHome.Overview(items, playback);
+        var row = home.Entries.Where(entry => entry.Section == "unwatched").Select(entry => entry.Card.Media.Series ?? entry.Card.Media.Id).ToArray();
+        check(row.SequenceEqual(["Slow show", "recent", "old", "undated"]),
+            "the Unwatched row lists unstarted titles newest first, a show by its newest episode, titles without a date last");
+        check(LibraryHome.Overview(items.Reverse().Append(new("undated2", "C:/private/undated2.mkv", "Another undated", "Movie")), playback).Entries
+            .Where(entry => entry.Section == "unwatched").Select(entry => entry.Card.Media.Id).Where(id => id.StartsWith("undated", StringComparison.Ordinal))
+            .SequenceEqual(LibraryHome.Overview(items.Append(new("undated2", "C:/private/undated2.mkv", "Renamed undated", "Movie")), playback).Entries
+            .Where(entry => entry.Section == "unwatched").Select(entry => entry.Card.Media.Id).Where(id => id.StartsWith("undated", StringComparison.Ordinal))),
+            "undated titles keep their order when the library's order or their titles change");
+        check(home.Unseen.Select(title => title.Card.Media.Series ?? title.Card.Media.Id).SequenceEqual(row) && home.Unseen[0].AddedAt == 7000,
+            "Home's unstarted titles come newest first, with the date they were added");
+        var many = Enumerable.Range(0, LibraryHome.UnwatchedLimit + 12).Select(index => new MediaItem("m" + index, "", "Film " + index, "Movie")).ToArray();
+        var dated = many.ToDictionary(item => "added:" + item.Id, item => item.Id[1..]);
+        check(LibraryHome.Overview(many, dated).Entries.Where(entry => entry.Section == "unwatched").Select(entry => entry.Card.Media.Id)
+            .SequenceEqual(Enumerable.Range(12, LibraryHome.UnwatchedLimit).Reverse().Select(index => "m" + index)), "the Unwatched row shows the newest titles up to its limit");
+        // The phone's See all: every unstarted title, in pages, newest first.
+        var request = new LibraryBrowseRequest(Unwatched: true);
+        var first = SharedLibrary.Browse(many, request, playback: dated, pageSize: 40);
+        var second = SharedLibrary.Browse(many, request with { Page = 1 }, playback: dated, pageSize: 40);
+        check(first is { Location: "Unwatched", Total: 42 } && first.Entries.Length == 40 && second.Entries.Length == 2 &&
+            first.Entries.Concat(second.Entries).Select(entry => entry.Id).SequenceEqual(Enumerable.Range(0, 42).Reverse().Select(index => "m" + index)) &&
+            first.Entries.All(entry => entry.HomeSection == "unwatched"), "the unwatched list pages through every unstarted title, newest first");
+        check(SharedLibrary.Browse(items, request, playback: playback).Entries.Single(entry => entry.Level == "series").Episodes == 2,
+            "a show in the unwatched list carries its episode count");
+
+        // Marking: a show or a season marks its episodes; clearing a film clears its other copies too.
+        var episodes = new[] { Episode("e1", "Marked", 1, 1), Episode("e2", "Marked", 1, 2), Episode("e3", "Marked", 2, 1), Episode("x1", "Other", 1, 1),
+            Episode("bonus", "Marked", 1, 3) with { IsExtra = true } };
+        check(LibraryWatchProgress.Marked(episodes, episodes[0], "series", null, true).Order().SequenceEqual(["e1", "e2", "e3"]),
+            "marking a show marks every episode of it");
+        check(LibraryWatchProgress.Marked(episodes, episodes[0], "season", 1, true).Order().SequenceEqual(["e1", "e2"]) &&
+            LibraryWatchProgress.Marked(episodes, episodes[2], "season", 2, false).SequenceEqual(["e3"]),
+            "marking a season marks only that season's episodes");
+        check(LibraryWatchProgress.Marked(episodes, episodes[1], "episode", null, true).SequenceEqual(["e2"]), "marking an episode marks only it");
+        MediaItem[] copies = [new("cut", "C:/private/a.mkv", "Film", "Movie", 2001, MetadataProvider: "tmdb", MetadataId: 42, Matched: true), new("remux", "C:/private/b.mkv", "Film", "Movie", 2001, MetadataProvider: "tmdb", MetadataId: 42, Matched: true)];
+        check(LibraryWatchProgress.Marked(copies, copies[0], "movie", null, false).Order().SequenceEqual(["cut", "remux"]) &&
+            LibraryWatchProgress.Marked(copies, copies[0], "movie", null, true).SequenceEqual(["cut"]),
+            "clearing a film's mark clears its other copies; marking it marks only the copy");
+
+        // Dates come from the files' creation times, once, and skip what isn't a video file on disk.
+        var directory = Path.Combine(Path.GetTempPath(), "blackpearl-added-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var store = new LibraryStore(directory);
+            var file = Path.Combine(directory, "arrived.mkv");
+            File.WriteAllText(file, "x");
+            var created = new DateTime(2025, 3, 4, 5, 6, 7, DateTimeKind.Utc);
+            File.SetCreationTimeUtc(file, created);
+            MediaItem[] listed = [new("arrived", file, "Arrived", "Movie"), new("gone", Path.Combine(directory, "gone.mkv"), "Gone", "Movie"),
+                new("away", file, "Away", "Movie", Available: false), new("track", file, "Track", "Music", Series: "Album")];
+            check(LibraryAdded.Record(store, listed) == 1 && store.Setting("added:arrived") == new DateTimeOffset(created).ToUnixTimeMilliseconds().ToString() &&
+                store.Setting("added:gone") is null && store.Setting("added:away") is null && store.Setting("added:track") is null,
+                "a video's added date is its file's creation time, recorded only for videos whose file is there");
+            File.SetCreationTimeUtc(file, created.AddDays(3));
+            check(LibraryAdded.Record(store, listed) == 0 && LibraryAdded.At(store.PlaybackSettings(), "arrived") == new DateTimeOffset(created).ToUnixTimeMilliseconds(),
+                "a recorded date is kept, and reaches Home with the watched marks");
+        }
+        finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
     }
 }

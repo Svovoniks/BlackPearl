@@ -783,7 +783,7 @@ public sealed partial class RoomClient : IAsyncDisposable
             PublishHostState();
             var (source, thumbnail, store) = (Volatile.Read(ref hostedLibrary), LibraryThumbnail, settings);
             // Thumbnails and watch progress read files and SQLite; build the page off the control loop.
-            if (!Offload(() => SharedLibrary.Browse(source, browse, thumbnail, browse.Home ? store?.PlaybackSettings() : null), page =>
+            if (!Offload(() => SharedLibrary.Browse(source, browse, thumbnail, browse.Home || browse.Unwatched ? store?.PlaybackSettings() : null), page =>
             {
                 if (!negotiated.ContainsKey(sender)) return;
                 if (!coordinator.LibraryBrowsing || coordinator.LibraryActivity?.Peer != sender)

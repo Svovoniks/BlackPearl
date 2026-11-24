@@ -18,13 +18,16 @@ namespace BlackPearl.Desktop;
 internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> current, Action<Action> post, CancellationToken lifetime)
 {
     public const int PageSize = 40;
-    public static readonly string[] Features = ["library", "watch", "queues"];
+    public static readonly string[] Features = ["library", "watch", "queues", "unwatched", "mark-watched"];
     public static string StreamCacheDirectory => Path.Combine(Path.GetTempPath(), "BlackPearl", "stream-cache");
 
     // The library's videos, read on the dispatcher thread.
     public required Func<IReadOnlyList<MediaItem>> Items { get; init; }
     public required Func<string, bool> WasWatched { get; init; }
     public required Action<MediaItem, bool> SetWatched { get; init; }
+    // Marks a title watched or unwatched as the PC's own check mark does: the item, its level ("movie", "episode",
+    // "series" or "season") and, for a season, its number.
+    public required Action<MediaItem, string, int?, bool> MarkWatched { get; init; }
     // Continue on the PC: plays the video there from where the phone was. False when it was refused (and answered).
     public required Func<JsonElement, Action<string, string>, Task<bool>> Play { get; init; }
     // The window only: stops its own playback of the video the phone takes over, and says where it was. Null when the
@@ -121,7 +124,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         {
             // Within the phone's 20 seconds for an answer; a library that takes longer is said to be loading. Only the
             // library's own requests wait: every request reaches here, and others (listen) are answered elsewhere.
-            if (Ready is { IsCompleted: false } ready && type is "browse" or "queues" or "watch" or "play" or "progress")
+            if (Ready is { IsCompleted: false } ready && type is "browse" or "queues" or "watch" or "play" or "progress" or "mark-watched")
             {
                 await Task.WhenAny(ready, Task.Delay(ReadyWait, lifetime));
                 if (current() != remote) return;
@@ -138,6 +141,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 case "queues": await Queues(remote, session, request); break;
                 case "watch": await Watch(remote, session, request, message, Fail); break;
                 case "progress": SaveProgress(message); break;
+                case "mark-watched": MarkWatchedFor(remote, session, request, message, Fail); break;
                 case "play":
                     if (!await Play(message, Fail)) break;
                     // The phone hands its video to the PC and stops watching. Its stream ends first: a phone still
@@ -165,7 +169,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     private async Task Browse(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message)
     {
         var browse = new LibraryBrowseRequest(Text(message, "query") ?? "", (int)(Number(message, "category") ?? 0), Text(message, "parentId"),
-            Number(message, "season") is { } season ? (int)season : null, (int)(Number(message, "page") ?? 0), Flag(message, "home"), (int)(Number(message, "seed") ?? 0));
+            Number(message, "season") is { } season ? (int)season : null, (int)(Number(message, "page") ?? 0), Flag(message, "home"), (int)(Number(message, "seed") ?? 0),
+            Flag(message, "unwatched"));
         var source = Items().ToArray();
         Dictionary<string, string> playback;
         LibraryBrowsePage page;
@@ -597,6 +602,25 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         library.SetSettings(saved);
         if (progress.Ended && !WasWatched(item.Id)) SetWatched(item, true);
         else ProgressSaved?.Invoke(item, progress, Flag(message, "final"));
+    }
+
+    // The phone marks a title watched or unwatched: a film or an episode, or all of a show's or a season's episodes.
+    private void MarkWatchedFor(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message, Action<string, string> fail)
+    {
+        var level = Text(message, "level");
+        if (level is not ("movie" or "episode" or "series" or "season") || !message.TryGetProperty("watched", out var flag) || flag.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            fail("invalid", "The PC didn't understand that. Update BlackPearl on the PC.");
+            return;
+        }
+        var id = Text(message, "id");
+        if (Items().FirstOrDefault(x => x.Id == id) is not { IsMusic: false } item) { fail("gone", "That title is no longer in the PC's library."); return; }
+        // A file is a film or an episode by what the PC knows of it, whichever card the phone marked it from: clearing a
+        // film also clears its other copies. A season card without a number holds the episodes that have none, as on the PC.
+        if (level is "movie" or "episode") level = item.Series is null ? "movie" : "episode";
+        int? season = level == "season" ? (int?)Number(message, "season") ?? -1 : null;
+        MarkWatched(item, level, season, flag.ValueKind == JsonValueKind.True);
+        remote.SendMessage(session, new { type = "done", request });
     }
 
     // What Continue on the PC saves before the PC plays the video: where the phone was, and a title watched before that

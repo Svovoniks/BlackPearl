@@ -68,6 +68,16 @@ static class HomeChecks
             Check(Row("Movie").Spotlight is not null && Row("Movie").Tiles.Length == LibraryHome.SuggestionsPerKind - 1 && Row("Show").Spotlight is null && Row("Anime").Spotlight is null &&
                 Row("Movie").CountText == "12 not started" && Control<Button>("HomeMysteryPlay").IsEnabled,
                 "local Home fills only categories with unstarted titles and enables the mystery deck");
+            LibraryCardView[] Unwatched() => Control<ItemsControl>("HomeUnwatched").Items.Cast<LibraryCardView>().ToArray();
+            Check(Control<StackPanel>("HomeUnwatchedSection").Visibility == Visibility.Visible && Unwatched().Length == 12 &&
+                Unwatched().All(view => view.HomeSection == "unwatched" && view.Card.Media.Id.StartsWith("home-new", StringComparison.Ordinal)) &&
+                Control<TextBlock>("HomeUnwatchedCount").Text == "Newest first · 12 not started" && Unwatched()[0].HomeDetail == "2026",
+                "Home's Unwatched row lists every title not started, and says how many");
+            store.SetSettings([new("added:home-new7", "3000"), new("added:home-new2", "2000"), new("added:home-new9", "1000")]);
+            Call("RefreshHome");
+            await Until(() => Unwatched().FirstOrDefault()?.Card.Media.Id == "home-new7");
+            Check(Unwatched().Take(3).Select(view => view.Card.Media.Id).SequenceEqual(["home-new7", "home-new2", "home-new9"]),
+                "the Unwatched row leads with the titles added last");
             var next = Continuing().Single(view => view.IsEpisode);
             Check(next.Card.Media.Id == "home-episode2" && next.PlaybackLabel == "Next episode" && next.HomeDetail == "S1 E2 · Up next", "continue watching identifies the next unwatched episode");
             Check(Continuing().Single(view => view.IsMovie).HomeDetail == "1 h 39 m left", "unfinished movies show the time left");
@@ -143,6 +153,11 @@ static class HomeChecks
             }
             await Until(() => movies.Spotlight?.Poster is not null);
             Check(!ReferenceEquals(movies.Spotlight, shownSpotlight) && movies.Spotlight!.Poster is not null, "a new spotlight title loads its artwork without the card being rebuilt");
+            Control<Button>("HomeUnwatchedAll").RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+            Check(Field<string>("currentPage") == "Library" && Field<bool>("librarySearch") && Control<ComboBox>("LibraryStatusFilter").SelectedIndex == 3,
+                "See all opens the library's search with the Unwatched status");
+            Call("ShowPage", "Home");
+            await Until(() => Continuing().Length == 2);
             var snapshot = new RoomSnapshot([new("host", "Fixture Host", true, true), new("guest", "Guest", false, true)], null, null, false,
                 LibraryBrowsing: true, LibraryActivity: new("guest", "Guest", "Home", "", Wire.Now));
             typeof(RoomClient).GetProperty("Identity")!.SetValue(client, new Welcome("fixture", "guest", false, [], false));

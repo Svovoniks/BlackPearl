@@ -67,8 +67,8 @@ static class PhoneHostFixture
             check(lanPort is >= PhoneRemoteProtocol.LanPort and < PhoneRemoteProtocol.LanPort + PhoneRemoteProtocol.LanPorts &&
                 welcome!.Value.GetProperty("lan").GetProperty("addresses").EnumerateArray().Select(a => a.GetString()).SequenceEqual(["127.0.0.1"]),
                 "the phone host tells the phone where it listens on the home network");
-            check(welcome is { } w && w.GetProperty("features").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["library", "watch", "queues"]) && !w.GetProperty("canStart").GetBoolean(),
-                "the phone host welcomes the phone with the library, watching and queues, and the PC's settings");
+            check(welcome is { } w && w.GetProperty("features").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["library", "watch", "queues", "unwatched", "mark-watched"]) && !w.GetProperty("canStart").GetBoolean(),
+                "the phone host welcomes the phone with the library, watching, queues, the unwatched list and watched marks, and the PC's settings");
             check(await link.Next("state", 5000) is { } state && !state.GetProperty("media").GetBoolean(), "the phone host says nothing is playing");
             link.Send(new { type = "command", action = "toggle" });
             check(await link.Next("error", 5000) is { } nothing && nothing.GetProperty("code").GetString() == "nothing-playing" &&
@@ -98,6 +98,21 @@ static class PhoneHostFixture
             var finished = false;
             for (var waited = 0; waited < 5000 && !finished; waited += 100) { finished = store.Setting("watched:" + id) == "true" && store.Setting("position:" + id) == "0"; if (!finished) await Task.Delay(100); }
             check(finished, "a video the phone leaves in its credits is marked watched");
+
+            // The phone's own watched mark, which saves before the phone hears it's done.
+            link.Send(new { type = "mark-watched", request = 4, id, level = "movie", watched = false });
+            check(await link.Next("done", 5000) is { } unmarked && unmarked.GetProperty("request").GetInt64() == 4 && store.Setting("watched:" + id) == "false",
+                "a phone marks a video unwatched while BlackPearl is closed");
+            link.Send(new { type = "browse", request = 5, unwatched = true, page = 0 });
+            check(await link.Next("page", 15000) is { } unwatched && unwatched.GetProperty("location").GetString() == "Unwatched" &&
+                unwatched.GetProperty("entries").EnumerateArray().Select(e => (e.GetProperty("id").GetString(), e.GetProperty("homeSection").GetString())).SequenceEqual([(id, "unwatched")]),
+                "a phone lists the titles not started, with the one it marked unwatched");
+            link.Send(new { type = "mark-watched", request = 6, id, level = "movie", watched = true });
+            check(await link.Next("done", 5000) is { } marked && marked.GetProperty("request").GetInt64() == 6 && store.Setting("watched:" + id) == "true",
+                "a phone marks a video watched while BlackPearl is closed");
+            link.Send(new { type = "mark-watched", request = 7, id, level = "album", watched = true });
+            check(await link.Next("error", 5000) is { } invalid && invalid.GetProperty("code").GetString() == "invalid" && invalid.GetProperty("request").GetInt64() == 7,
+                "a watched mark for something the PC doesn't mark is refused");
 
             link.Send(new { type = "play", request = 3, id, positionMs = 1000 });
             check(await link.Next("error", 5000) is { } refusedPlay && refusedPlay.GetProperty("code").GetString() == "not-allowed",
