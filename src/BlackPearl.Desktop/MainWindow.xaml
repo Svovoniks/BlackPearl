@@ -210,6 +210,20 @@
       </DockPanel>
      </Border>
 
+     <!-- Every title not started yet, the ones added last first. -->
+     <StackPanel x:Name="HomeUnwatchedSection" Margin="0,0,0,8" Visibility="Collapsed">
+      <DockPanel>
+       <Button x:Name="HomeUnwatchedAll" DockPanel.Dock="Right" Click="OpenHomeUnwatched" Style="{StaticResource QuietButton}" Foreground="{DynamicResource Accent}" Padding="8,4" MinHeight="0" Margin="10,0,0,0" VerticalAlignment="Bottom" AutomationProperties.Name="See all unwatched titles in library">
+        <StackPanel Orientation="Horizontal"><TextBlock Text="See all" FontSize="12.5"/><TextBlock Text="&#xE76C;" Style="{StaticResource Icon}" FontSize="9" Margin="6,1,0,0"/></StackPanel></Button>
+       <TextBlock Text="Unwatched" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Bottom"/>
+       <TextBlock x:Name="HomeUnwatchedCount" Foreground="{DynamicResource Muted}" FontSize="12" Margin="10,0,0,4" VerticalAlignment="Bottom"/>
+      </DockPanel>
+      <!-- Room above for artwork that lifts when pointed at, and below for its shadow, which the scroller would cut off. -->
+      <local:HorizontalScroller Padding="0,10,0,26" ArrowCenter="115">
+       <ItemsControl x:Name="HomeUnwatched" ItemTemplate="{StaticResource HomeTilePoster}" AutomationProperties.Name="Unwatched"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel></ItemsControl>
+      </local:HorizontalScroller>
+     </StackPanel>
+
      <!-- Mystery deck: filter, then play the drawn card or draw another. -->
      <local:Stone x:Name="HomeMysteryPanel" Depth="Slab" CornerRadius="20" local:RoundedClip.Radius="20" Background="{DynamicResource Surface}" Margin="0,0,0,34">
       <Grid>

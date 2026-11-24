@@ -36,7 +36,7 @@ public partial class MainWindow
     private int homeSeed = Random.Shared.Next();
     private readonly Dictionary<string, int> homeRowSeeds = [];
     private LibraryCardView? homeHero, homeMystery, homeMysteryFallback;
-    private LibraryCardView[] homeContinueAll = [];
+    private LibraryCardView[] homeContinueAll = [], homeUnwatched = [];
     private HomeTitle[] homeUnseen = [];
     private Dictionary<string, HomeTitle> homeFacts = [];
     private bool homeStripExpanded;
@@ -86,7 +86,7 @@ public partial class MainWindow
         RenderHome(views);
     }
     private IEnumerable<LibraryCardView> HomeViews() =>
-        new[] { homeHero, homeMystery, homeMysteryFallback }.OfType<LibraryCardView>().Concat(homeContinueAll)
+        new[] { homeHero, homeMystery, homeMysteryFallback }.OfType<LibraryCardView>().Concat(homeContinueAll).Concat(homeUnwatched)
             .Concat(HomeRowViews.SelectMany(row => row.Tiles.Prepend(row.Spotlight).OfType<LibraryCardView>()));
     private void RenderHome(IEnumerable<LibraryCardView> source)
     {
@@ -113,6 +113,7 @@ public partial class MainWindow
         homeContinueAll = continuing.Skip(1).ToArray();
         foreach (var view in homeContinueAll) view.ShowIn(36, 52);
         RenderHomeStrip();
+        RenderHomeUnwatched(views);
         var suggestions = views.Where(view => view.HomeSection == "suggestions").ToArray();
         foreach (var view in suggestions) view.SetHomeText(TitleFacts(view), view.Card.Media.Genres?.FirstOrDefault(genre => !string.IsNullOrWhiteSpace(genre)) ?? "");
         if (HomeRows.ItemsSource is null) HomeRows.ItemsSource = HomeRowViews;
@@ -170,6 +171,27 @@ public partial class MainWindow
         HomeStripCount.Text = homeContinueAll.Length == 1 ? "1 title" : $"{homeContinueAll.Length} titles";
         HomeStripMore.Visibility = homeContinueAll.Length > columns ? Visibility.Visible : Visibility.Collapsed;
         HomeStripMore.Content = homeStripExpanded ? "Show less" : $"All {homeContinueAll.Length}";
+    }
+    // Unwatched: the titles not started yet, newest first. A streamer's app from before the row sends none, and it hides.
+    private void RenderHomeUnwatched(LibraryCardView[] views)
+    {
+        var unwatched = views.Where(view => view.HomeSection == "unwatched").ToArray();
+        foreach (var view in unwatched) { view.SetHomeText(TitleFacts(view)); view.ShowIn(140, 210); }
+        if (!homeUnwatched.SequenceEqual(unwatched)) { homeUnwatched = unwatched; HomeUnwatched.ItemsSource = unwatched; }
+        HomeUnwatchedSection.Visibility = unwatched.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        // The whole list is the library's Unwatched filter, which someone else's library doesn't offer.
+        var all = homeUnseen.Length;
+        HomeUnwatchedCount.Text = GuestLibrary || all == 0 ? "Newest first" : $"Newest first · {all} not started";
+        HomeUnwatchedAll.Visibility = GuestLibrary ? Visibility.Collapsed : Visibility.Visible;
+    }
+    // See all: the library's search, listing every title with an unwatched status.
+    private void OpenHomeUnwatched(object sender, RoutedEventArgs e)
+    {
+        if (GuestLibrary) return;
+        OpenSearch(focus: false);
+        if (!librarySearch || currentPage != "Library") return;
+        ApplySearchFilters(new(), 3); SearchBox.Clear();
+        FilterLibrary();
     }
     private void HomeStripResized(object sender, SizeChangedEventArgs e)
     {

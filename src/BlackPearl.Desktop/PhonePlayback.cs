@@ -16,7 +16,7 @@ public partial class MainWindow
     private string? watchingOnPhone;
     private PhoneLibrary PhoneLibrary => phoneLibrary ??= new(library, () => phoneRemote, action => Dispatcher.BeginInvoke(action), lifetime.Token)
     {
-        Items = () => items, WasWatched = WasWatched, SetWatched = SetWatched, Play = PlayFromPhone, TakeOver = TakeOverForPhone,
+        Items = () => items, WasWatched = WasWatched, SetWatched = SetWatched, MarkWatched = MarkWatchedFromPhone, Play = PlayFromPhone, TakeOver = TakeOverForPhone,
         PlaysHere = id => room is null && playingItem?.Id == id && HasMediaPlayback && WantsMediaPlayback,
         ProgressSaved = PhoneProgressSaved,
         // The phone remote starts before the library has loaded; until then the library would look empty to phones.
@@ -67,6 +67,14 @@ public partial class MainWindow
     }
     // The Home build the phones' progress last asked for, and the videos it was asked for.
     private (long Generation, HashSet<string> Ids)? phoneHomeRefreshed;
+
+    // A phone marked a title watched or unwatched: as the PC's own check mark, with the cards, Home and an open details
+    // page showing it.
+    private void MarkWatchedFromPhone(MediaItem item, string level, int? season, bool watched)
+    {
+        MarkWatched(item, level, season, watched);
+        if (selected is { } shown && Details.Visibility == Visibility.Visible) UpdateDetailPlayback(shown);
+    }
 
     // Continue on the PC: plays the video here from where the phone was.
     private async Task<bool> PlayFromPhone(JsonElement message, Action<string, string> fail)
