@@ -16,7 +16,15 @@ namespace BlackPearl.Desktop;
 // Program.Main starts this before any WPF type loads; nothing here may touch WPF.
 public static class CrashReports
 {
-    private const string OffFile = "crash-reports-off", FileNamesFile = "crash-reports-file-names";
+    private const string OffFile = "crash-reports-off", FileNamesFile = "crash-reports-file-names", CacheFolder = "crash-reports-cache";
+    // Reports wait here, already scrubbed, while Sentry cannot be reached, and go out once it can. One folder per process kind,
+    // since the phone host and the auto-download check run beside the app.
+    private static string CacheDirectory => Path.Combine(Program.DataDirectory, CacheFolder, process);
+    private static void DeleteCache()
+    {
+        try { Directory.Delete(Path.Combine(Program.DataDirectory, CacheFolder), true); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
     private static readonly object gate = new();
     private static IDisposable? sdk;
     private static string process = "app";
@@ -55,6 +63,8 @@ public static class CrashReports
     {
         process = processKind;
         if (Available && Allowed) Initialize(Source.Dsn!, AppEnvironment.Get("SENTRY_ENVIRONMENT") ?? (Source.FromEnvironment ? "development" : "production"));
+        // Reports turned off: anything left waiting from before goes, if deleting it failed then.
+        else if (!Allowed && Directory.Exists(Path.Combine(Program.DataDirectory, CacheFolder))) DeleteCache();
         return new Finish();
     }
     private sealed class Finish : IDisposable
@@ -77,7 +87,8 @@ public static class CrashReports
             else { Directory.CreateDirectory(Program.DataDirectory); File.WriteAllText(path, "Crash reports are turned off in Settings › Updates & about."); }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-        if (!allowed) { enabled = false; HookMetadata(false); lock (gate) { startup = playback = null; startupStage = null; } }
+        // Turned off, reports still waiting for Sentry are deleted rather than sent later.
+        if (!allowed) { enabled = false; HookMetadata(false); lock (gate) { startup = playback = null; startupStage = null; } DeleteCache(); }
         else if (Available) Initialize(Source.Dsn!, AppEnvironment.Get("SENTRY_ENVIRONMENT") ?? (Source.FromEnvironment ? "development" : "production"));
     }
 
@@ -94,6 +105,9 @@ public static class CrashReports
                 options.Release = version is null ? null : $"blackpearl-desktop@{version.ToString(3)}";
                 options.Environment = environment;
                 options.IsGlobalModeEnabled = true;
+                options.CacheDirectoryPath = CacheDirectory;
+                // Waiting reports are sent in the background, never holding up startup.
+                options.InitCacheFlushTimeout = TimeSpan.Zero;
                 CrashReportPrivacy.Apply(options);
                 // Every trace while developing; a tenth of them from people's apps.
                 options.TracesSampleRate = environment == "production" ? 0.1 : 1.0;
@@ -179,13 +193,10 @@ public static class CrashReports
         var status = error is System.Net.Http.HttpRequestException { StatusCode: { } code } ? ((int)code).ToString() : null;
         var provider = failure.Provider ?? "unknown";
         string[] fingerprint = ["metadata-failure", failure.Stage, provider, error.GetType().FullName ?? "", status ?? ""];
-        lock (metadataFailures)
-        {
-            var key = string.Join("|", fingerprint);
-            if (metadataFailures.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(1)) return;
-            metadataFailures[key] = DateTime.UtcNow;
-        }
-        SentrySdk.CaptureException(error, scope =>
+        var key = string.Join("|", fingerprint);
+        lock (metadataFailures) if (metadataFailures.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(1)) return;
+        // Counted as reported once Sentry's client took it: from there it is sent, or kept on disk until it can be.
+        var id = SentrySdk.CaptureException(error, scope =>
         {
             scope.Level = SentryLevel.Warning;
             scope.SetTag("metadata.stage", failure.Stage);
@@ -194,6 +205,7 @@ public static class CrashReports
             scope.SetFingerprint(fingerprint);
             if (FileNamesAllowed && failure.File is { } file) scope.SetExtra("file", file);
         });
+        if (id != SentryId.Empty) lock (metadataFailures) metadataFailures[key] = DateTime.UtcNow;
     }
 
     private static void MetadataRunEnded(MetadataRun run)
@@ -220,15 +232,19 @@ public static class CrashReports
         // The same list is sent once, also across launches; only a hash of it is kept beside the library.
         var sentPath = Path.Combine(Program.DataDirectory, UnmatchedSentFile);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(list)));
-        try { if (File.Exists(sentPath) && File.ReadAllText(sentPath).Trim() == hash) return; File.WriteAllText(sentPath, hash); }
+        try { if (File.Exists(sentPath) && File.ReadAllText(sentPath).Trim() == hash) return; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         var text = $"{run.LibraryUnmatched.Count} of {run.LibraryTitles} titles unmatched\nreason\tfiles\tfirst file\n{list}\n";
-        SentrySdk.CaptureMessage("Unmatched files in the library", scope =>
+        var id = SentrySdk.CaptureMessage("Unmatched files in the library", scope =>
         {
             scope.SetFingerprint(["metadata-unmatched-files"]);
             scope.SetTag("metadata.library_unmatched", run.LibraryUnmatched.Count.ToString());
             scope.SetExtra("unmatched", string.Join("\n", run.LibraryUnmatched.Take(100).Select(x => $"{x.Reason}  {x.File}")));
             scope.AddAttachment(System.Text.Encoding.UTF8.GetBytes(text), "unmatched-files.txt", AttachmentType.Default, "text/plain");
         }, SentryLevel.Info);
+        // Marked as sent only once Sentry's client took the list (see MetadataFailed).
+        if (id == SentryId.Empty) return;
+        try { File.WriteAllText(sentPath, hash); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 }
