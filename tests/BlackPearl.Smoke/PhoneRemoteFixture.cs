@@ -42,9 +42,11 @@ static class PhoneRemoteFixture
         check(PhoneProgress.From(2516000, 2696000, false, false) == new PhoneProgress(2516000, true, false) &&
             PhoneProgress.From(2400000, 2696000, false, false, final: true) == new PhoneProgress(2400000, true, false) && !PhoneProgress.From(100, 0, false, false, final: true).Ended,
             "a pause in the credits, or leaving a video before its last tenth, keeps its resume point");
-        await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", async url => { await Exercise(url, check); await PhoneHostFixture.Run(url, directory, check); });
+        await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", async url => { await Exercise(url, check); await PhoneHostFixture.Run(url, directory, check); await PhoneLanFixture.Replays(url, check); });
         await OtherServers(check);
         await PhoneLanFixture.Run(check);
+        await PhoneLanFixture.Concurrent(check);
+        await PhoneLanFixture.SenderGuard(check);
     }
 
     // Servers that aren't BlackPearl room servers with the phone remote: the PC keeps trying and says why.

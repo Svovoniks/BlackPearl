@@ -76,6 +76,30 @@ static class PhoneLanFixture
             check(await forged.ClosedWithin(5000), "a connection that sent no valid signature is closed after a while");
         }
 
+        // Someone who saw a phone's signals on the home network (its socket is plain ws://) sends them again. None of them
+        // is taken: each connection has its own session id, a signal of a session that isn't live proves nothing, and the
+        // phone's link stays up.
+        await using (var real = await FakePhone.Connect(lan, pcId, phone.Id, phone.Secret))
+        {
+            check(await real.Opened() && real.Offer is not null, "a phone links up on the home network for the replay checks");
+            await using var replayer = await RawSocket.Open(preferred);
+            await replayer.Send(new("remote-phone", Target: pcId, Number: 1));
+            var handed = await replayer.Next("remote-welcome") is { } w ? JsonDocument.Parse(w.Data!).RootElement.GetProperty("session").GetString() : null;
+            check(handed is { Length: 32 } && handed != real.Session && PhoneRemoteProtocol.IsLanSession(hostKey, handed) && !PhoneRemoteProtocol.IsLanSession(PersistentRooms.NewKey(), handed),
+                "each home-network connection hands its phone a session id of its own, which only this PC's key makes");
+            await replayer.Send(new("signal", Data: real.Offer));
+            var ice = Wire.Serialize(new RemoteIce("candidate:9 1 UDP 1 192.168.1.9 9 typ host", "0"));
+            await replayer.Send(new("signal", Data: Wire.Serialize(new RemoteSignal(phone.Id, real.Session, "ice", ice, PhoneRemoteProtocol.Sign(phone.Secret, "phone", phone.Id, real.Session, "ice", ice)))));
+            var old = PhoneRemoteProtocol.NewHex(16);
+            await replayer.Send(new("signal", Data: Wire.Serialize(new RemoteSignal(phone.Id, old, "ice", ice, PhoneRemoteProtocol.Sign(phone.Secret, "phone", phone.Id, old, "ice", ice)))));
+            check(await replayer.Next("signal", 1500) is null && !await real.Closed(500), "a phone's offer and candidates sent again on another connection are ignored, and its link stays up");
+            check(await replayer.ClosedWithin(5000), "a connection that only repeats someone's signals proves nothing and is closed after a while");
+            // The same phone connecting again: its newer connection is the one kept.
+            await using var again = await FakePhone.Connect(lan, pcId, phone.Id, phone.Secret);
+            check(await again.Opened() && await Until(() => host.LanConnections == 1, 3000), "a phone connecting again keeps one connection on the listener, the newest");
+        }
+        await Until(() => host.LanConnections == 0, 5000);
+
         // Another PC's id: refused at once with a reason, so the phone tries its next address.
         await using (var other = await RawSocket.Open(preferred))
         {
@@ -187,6 +211,157 @@ static class PhoneLanFixture
             "the log records each kind of connection the listener turned away");
         check(!new[] { hostKey, phone.Secret, phone.Id, pcId }.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)), "the listener's log holds no keys, secrets or whole ids");
     }
+
+    // Offers sent again through the room server, which anyone who knows the PC's id can reach. An offer seen before is
+    // refused, and so is one made on the home network (its session id says so, also after the PC restarted), so the
+    // phone's live link stays up.
+    public static async Task Replays(string url, Action<bool, string> check)
+    {
+        var hostKey = PersistentRooms.NewKey();
+        var pcId = PhoneRemoteProtocol.PcId(hostKey);
+        var phone = new PairedPhone(PhoneRemoteProtocol.NewHex(16), "Replay phone", PhoneRemoteProtocol.NewHex(32), Wire.Now, Wire.Now);
+        var port = FreePort();
+        PhoneRemoteHost Host() => new(new PhoneRemoteOptions
+        {
+            Server = url, HostKey = hostKey, PcName = "Replay PC", AppVersion = "0.0.0-test", Store = new MemoryStore(phone),
+            Lan = new PhoneLanOptions { LoopbackOnly = true, Port = port },
+        });
+        string lanOffer;
+        using (var host = Host())
+        {
+            host.Start();
+            check(await Until(() => host.ServerReady && host.Lan is { State: "listening" }, 10000), "a PC reaches its room server and listens on the home network for the replay checks");
+            string firstOffer;
+            await using (var first = await FakePhone.Connect(url, pcId, phone.Id, phone.Secret))
+            {
+                check(await first.Opened(), "a phone links up through the room server");
+                firstOffer = first.Offer!;
+            }
+            await using (var onLan = await FakePhone.Connect($"http://127.0.0.1:{port}", pcId, phone.Id, phone.Secret))
+            {
+                check(await onLan.Opened(), "the phone links up on the home network");
+                lanOffer = onLan.Offer!;
+            }
+            await using var live = await FakePhone.Connect(url, pcId, phone.Id, phone.Secret);
+            check(await live.Opened(), "the phone links up through the room server again");
+            await using var replayer = await PhoneServerSocket.Open(url, pcId);
+            await replayer.Send(new("signal", Data: firstOffer));
+            await replayer.Send(new("signal", Data: lanOffer));
+            check(!await live.Closed(2000), "an earlier offer, or one from the home network, sent again through the room server doesn't replace the phone's link");
+        }
+        // After a restart the PC remembers no offers, and still knows a home-network one by its session id.
+        using (var restarted = Host())
+        {
+            restarted.Start();
+            check(await Until(() => restarted.ServerReady, 10000), "the restarted PC reaches its room server");
+            await using var live = await FakePhone.Connect(url, pcId, phone.Id, phone.Secret);
+            check(await live.Opened(), "the phone links up to the restarted PC");
+            await using var replayer = await PhoneServerSocket.Open(url, pcId);
+            await replayer.Send(new("signal", Data: lanOffer));
+            check(!await live.Closed(2000), "after a restart, an offer seen on the home network still can't replace the phone's link through the room server");
+        }
+    }
+
+    // Offers arriving at the same moment on several home-network connections are taken one at a time, and every session
+    // they open is closed again: none is left running unaccounted for.
+    public static async Task Concurrent(Action<bool, string> check)
+    {
+        var hostKey = PersistentRooms.NewKey();
+        var pcId = PhoneRemoteProtocol.PcId(hostKey);
+        var phone = new PairedPhone(PhoneRemoteProtocol.NewHex(16), "Burst phone", PhoneRemoteProtocol.NewHex(32), Wire.Now, Wire.Now);
+        var port = FreePort();
+        var host = new PhoneRemoteHost(new PhoneRemoteOptions
+        {
+            Server = $"http://127.0.0.1:{FreePort()}", HostKey = hostKey, PcName = "Burst PC", AppVersion = "0.0.0-test", Store = new MemoryStore(phone),
+            Lan = new PhoneLanOptions { LoopbackOnly = true, Port = port },
+        });
+        host.Start();
+        await Until(() => host.Lan is { State: "listening" }, 5000);
+        // One address can hold only a few connections that haven't proved anything.
+        {
+            var held = new List<RawSocket>();
+            for (var i = 0; i < 4; i++) { var s = await RawSocket.Open(port); await s.Send(new("remote-phone", Target: pcId, Number: 1)); await s.Next("remote-online"); held.Add(s); }
+            // Refused as it connects: its WebSocket never opens.
+            bool refused;
+            try { await using var fifth = await RawSocket.Open(port); refused = await fifth.ClosedWithin(2000); }
+            catch (WebSocketException) { refused = true; }
+            check(refused && !await held[0].ClosedWithin(200) && host.LanConnections == 4,
+                "a fifth unproven connection from one address is refused while the listener still has room for others");
+            foreach (var s in held) await s.DisposeAsync();
+        }
+        await Until(() => host.LanConnections == 0, 5000);
+        const int Pairs = 25;
+        for (var round = 0; round < Pairs; round++)
+        {
+            var sockets = new List<(RawSocket Socket, string Session)>();
+            for (var i = 0; i < 2; i++)
+            {
+                var socket = await RawSocket.Open(port);
+                await socket.Send(new("remote-phone", Target: pcId, Number: 1));
+                var welcome = await socket.Next("remote-welcome");
+                sockets.Add((socket, JsonDocument.Parse(welcome!.Data!).RootElement.GetProperty("session").GetString()!));
+            }
+            // Signed by the phone, each under its connection's own session id, sent together.
+            var payload = Wire.Serialize(new RemoteSdp("offer", "v=0"));
+            await Task.WhenAll(sockets.Select(s => s.Socket.Send(new("signal",
+                Data: Wire.Serialize(new RemoteSignal(phone.Id, s.Session, "sdp", payload, PhoneRemoteProtocol.Sign(phone.Secret, "phone", phone.Id, s.Session, "sdp", payload)))))));
+            await Task.Delay(30);
+            foreach (var (socket, _) in sockets) await socket.DisposeAsync();
+        }
+        await Task.Delay(500);
+        host.Dispose();
+        await Task.Delay(1500);
+        await PlaybackDiagnostics.FlushAsync();
+        var records = Records().Where(r => r.Kind is "remote-session-opened" or "remote-session-closed" && Field(r.Data, "phone") == phone.Id[..8]).ToArray();
+        var opened = records.Where(r => r.Kind == "remote-session-opened").Select(r => Field(r.Data, "session")).ToHashSet();
+        var closed = records.Where(r => r.Kind == "remote-session-closed").Select(r => Field(r.Data, "session")).ToHashSet();
+        check(opened.Count >= Pairs && opened.SetEquals(closed), $"offers arriving together each open a session that is closed again ({opened.Count} opened, {closed.Count} closed)");
+    }
+
+    // The room server names who sent a signal. One naming a home-network connection is ignored: the PC's answers would
+    // otherwise go to that connection rather than back through the server.
+    public static async Task SenderGuard(Action<bool, string> check)
+    {
+        var hostKey = PersistentRooms.NewKey();
+        var phone = new PairedPhone(PhoneRemoteProtocol.NewHex(16), "Guard phone", PhoneRemoteProtocol.NewHex(32), Wire.Now, Wire.Now);
+        var port = FreePort();
+        using var http = new System.Net.HttpListener(); http.Prefixes.Add($"http://localhost:{port}/"); http.Start();
+        string Offer(string session)
+        {
+            var payload = Wire.Serialize(new RemoteSdp("offer", "v=0"));
+            return Wire.Serialize(new RemoteSignal(phone.Id, session, "sdp", payload, PhoneRemoteProtocol.Sign(phone.Secret, "phone", phone.Id, session, "sdp", payload)));
+        }
+        string named = PhoneRemoteProtocol.NewHex(16), plain = PhoneRemoteProtocol.NewHex(16);
+        var served = Task.Run(async () =>
+        {
+            var context = await http.GetContextAsync();
+            var socket = (await context.AcceptWebSocketAsync(null)).WebSocket;
+            await SocketMessages.ReadAsync(socket, CancellationToken.None);
+            await SocketMessages.SendAsync(socket, new("remote-welcome", Data: Wire.Serialize(new RemoteWelcome([], false))), CancellationToken.None);
+            await SocketMessages.SendAsync(socket, new("signal", Sender: "lan:0011223344556677", Data: Offer(named)), CancellationToken.None);
+            await SocketMessages.SendAsync(socket, new("signal", Sender: "4f0c0e2e9d0b4b0c8a3f0c1d2e3f4a5b", Data: Offer(plain)), CancellationToken.None);
+            await Task.Delay(2000);
+        });
+        using (var host = new PhoneRemoteHost(new PhoneRemoteOptions { Server = $"http://localhost:{port}", HostKey = hostKey, PcName = "Guard PC", AppVersion = "0.0.0-test", Store = new MemoryStore(phone) }))
+        {
+            host.Start();
+            await served.WaitAsync(TimeSpan.FromSeconds(20));
+        }
+        await PlaybackDiagnostics.FlushAsync();
+        var opened = Records().Where(r => r.Kind == "remote-session-opened").Select(r => Field(r.Data, "session")).ToHashSet();
+        check(opened.Contains(plain[..8]) && !opened.Contains(named[..8]), "a signal the room server says came from a home-network connection is ignored; others are taken");
+        http.Stop();
+    }
+
+    static IEnumerable<(string Kind, JsonElement Data)> Records()
+    {
+        string text;
+        using (var stream = new FileStream(Path.Combine(PlaybackDiagnostics.DirectoryPath!, "diagnostics.jsonl"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var reader = new StreamReader(stream)) text = reader.ReadToEnd();
+        return text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line).RootElement)
+            .Select(r => (r.GetProperty("kind").GetString()!, r.GetProperty("data"))).ToArray();
+    }
+    static string Field(JsonElement record, string name) => record.TryGetProperty(name, out var value) ? value.ToString() : "";
 
     // A bare WebSocket to the listener, for what a phone wouldn't send.
     sealed class RawSocket : IAsyncDisposable

@@ -107,7 +107,8 @@ public partial class MainWindow
         {
             phoneFirewallReading = false; phoneFirewallAt = Environment.TickCount64;
             if (phoneRemote != remote) return;
-            if (read.IsCompletedSuccessfully) phoneFirewall = read.Result;
+            // A read that failed counts as one that couldn't tell, so the next tick doesn't start another at once.
+            phoneFirewall = read.IsCompletedSuccessfully ? read.Result : new(PhoneFirewall.Verdict.Unknown, 0, null, []);
             RenderPhoneRemote();
         }), TaskScheduler.Default);
     }
@@ -390,7 +391,7 @@ public partial class MainWindow
         AutomationProperties.SetLiveSetting(statusLine, AutomationLiveSetting.Polite);
         status.Children.Add(statusLine);
         main.Children.Add(status);
-        if (enabled && remote?.Lan is { } lan) main.Children.Add(PhoneHomeNetwork(lan, phoneFirewall, lan is { State: "listening", LoopbackOnly: false } ? PhoneRemoteProtocol.LanAddresses().FirstOrDefault() : null));
+        if (enabled && remote?.Lan is { } lan) main.Children.Add(PhoneHomeNetwork(lan, phoneFirewall, lan is { State: "listening", LoopbackOnly: false } ? PhoneRemoteProtocol.CachedLanAddresses().FirstOrDefault() : null));
 
         var list = Card("Paired phones");
         if (phones.Count == 0) list.Children.Add(Line("No phones yet. Choose Pair a phone and scan the code with BlackPearl Mobile."));

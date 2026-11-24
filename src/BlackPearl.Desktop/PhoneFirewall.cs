@@ -112,7 +112,8 @@ internal static class PhoneFirewall
             }
             finally { Marshal.FinalReleaseComObject(policy); }
         }
-        catch (Exception ex) when (ex is COMException or InvalidCastException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException or UnauthorizedAccessException or InvalidOperationException)
+        // Whatever goes wrong reading it, the firewall's answer is unknown: this only informs Settings and the log.
+        catch (Exception ex)
         {
             PlaybackDiagnostics.Record("remote-lan-firewall-failed", new { error = ex.GetType().Name });
             verdict = Verdict.Unknown;
@@ -134,9 +135,8 @@ internal static class PhoneFirewall
         catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException) { return (0, null); }
         foreach (var profile in Query(@"root\StandardCimv2", "SELECT InterfaceIndex, Name, NetworkCategory FROM MSFT_NetConnectionProfile"))
         {
-            if (Convert.ToInt32(profile["InterfaceIndex"]) != index) continue;
-            var category = Convert.ToInt32(profile["NetworkCategory"]);
-            return (category switch { 1 => Private, 2 => Domain, _ => Public }, profile["Name"] as string);
+            if (profile["InterfaceIndex"] is not IConvertible at || at.ToInt32(null) != index || profile["NetworkCategory"] is not IConvertible category) continue;
+            return (category.ToInt32(null) switch { 1 => Private, 2 => Domain, _ => Public }, profile["Name"] as string);
         }
         return (0, null);
     }
@@ -144,7 +144,7 @@ internal static class PhoneFirewall
     // Firewalls other than Windows' own that Windows Security lists as on, such as an antivirus suite's.
     private static string[] OtherFirewalls() =>
         Query(@"root\SecurityCenter2", "SELECT displayName, productState FROM FirewallProduct")
-            .Where(p => p["displayName"] is string { Length: > 0 } && (Convert.ToInt64(p["productState"] ?? 0L) >> 12 & 0xF) == 1)
+            .Where(p => p["displayName"] is string { Length: > 0 } && p["productState"] is IConvertible state && (state.ToInt64(null) >> 12 & 0xF) == 1)
             .Select(p => (string)p["displayName"]!).Distinct().ToArray();
 
     private static List<Dictionary<string, object?>> Query(string space, string query)
@@ -154,14 +154,23 @@ internal static class PhoneFirewall
         {
             var type = Type.GetTypeFromProgID("WbemScripting.SWbemLocator");
             if (type is null) return rows;
-            dynamic locator = Activator.CreateInstance(type)!;
-            dynamic service = locator.ConnectServer(".", space);
-            foreach (dynamic row in service.ExecQuery(query))
+            // Every COM object is let go as soon as it has been read, rather than whenever the collector gets to it.
+            var held = new List<object>();
+            try
             {
-                var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                foreach (dynamic property in row.Properties_) values[(string)property.Name] = property.Value;
-                rows.Add(values);
+                dynamic locator = Activator.CreateInstance(type)!; held.Add(locator);
+                dynamic service = locator.ConnectServer(".", space); held.Add(service);
+                dynamic results = service.ExecQuery(query); held.Add(results);
+                foreach (dynamic row in results)
+                {
+                    held.Add(row);
+                    var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    dynamic properties = row.Properties_; held.Add(properties);
+                    foreach (dynamic property in properties) { held.Add(property); values[(string)property.Name] = property.Value; }
+                    rows.Add(values);
+                }
             }
+            finally { foreach (var item in held) if (Marshal.IsComObject(item)) Marshal.FinalReleaseComObject(item); }
         }
         catch (Exception ex) when (ex is COMException or InvalidCastException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException or UnauthorizedAccessException or InvalidOperationException) { }
         return rows;
@@ -175,7 +184,7 @@ internal static class PhoneFirewallLog
 
     public static PhoneFirewall.Status Check(int port)
     {
-        var status = PhoneFirewall.Read(Environment.ProcessPath ?? "", port, PhoneRemoteProtocol.LanAddresses().FirstOrDefault());
+        var status = PhoneFirewall.Read(Environment.ProcessPath ?? "", port, PhoneRemoteProtocol.CachedLanAddresses().FirstOrDefault());
         var profile = status.ProfileType switch { PhoneFirewall.Domain => "domain", PhoneFirewall.Private => "private", PhoneFirewall.Public => "public", _ => "unknown" };
         var key = $"{status.Verdict}|{profile}|{string.Join(',', status.OtherFirewalls)}|{port}";
         if (Interlocked.Exchange(ref logged, key) != key)

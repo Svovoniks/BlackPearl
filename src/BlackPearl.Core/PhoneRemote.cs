@@ -46,6 +46,39 @@ public static class PhoneRemoteProtocol
     // The home-network listener's ports (PHONE-REMOTE.md, "On the home network"): the first, or the next free one of ten.
     public const int LanPort = 47830, LanPorts = 10;
 
+    // The session id a home-network connection hands its phone: 8 random bytes, then 8 bytes of an HMAC of them keyed
+    // with the host key, as 32 hex characters. An offer seen on the home network can't be used on another connection
+    // (each has its own), and the PC knows such a session id when it comes through the room server, also after a
+    // restart, without remembering any.
+    public static string NewLanSession(string hostKey)
+    {
+        var nonce = RandomNumberGenerator.GetBytes(8);
+        return Convert.ToHexString([.. nonce, .. LanTag(hostKey, nonce)]).ToLowerInvariant();
+    }
+    public static bool IsLanSession(string hostKey, string? session)
+    {
+        if (!IsHex(session, 32)) return false;
+        var bytes = Convert.FromHexString(session!);
+        return CryptographicOperations.FixedTimeEquals(bytes.AsSpan(8), LanTag(hostKey, bytes[..8]));
+    }
+    static byte[] LanTag(string hostKey, byte[] nonce)
+    {
+        byte[] text = [.. "bp-remote-lan\n"u8, .. nonce];
+        return HMACSHA256.HashData(Encoding.UTF8.GetBytes(hostKey), text)[..8];
+    }
+
+    // LanAddresses, read again at most every 15 seconds: Settings and the welcome ask often, and reading every adapter
+    // takes a while on a PC with many.
+    private static (long At, string[] Addresses) lanAddresses = (long.MinValue / 2, []);
+    public static string[] CachedLanAddresses()
+    {
+        var cached = lanAddresses;
+        if (Environment.TickCount64 - cached.At < 15000) return cached.Addresses;
+        var fresh = LanAddresses();
+        lanAddresses = (Environment.TickCount64, fresh);
+        return fresh;
+    }
+
     // This PC's IPv4 addresses that a phone on the same network could reach: first the one the PC's own default route
     // leaves from (the home network, usually, even with VPNs such as ZeroTier that also have a gateway), then those of
     // wired or wireless adapters with a gateway, then other adapters (VPNs, virtual switches). At most eight.
@@ -242,6 +275,9 @@ public sealed class PhoneRemoteHost : IDisposable
         PcId = PhoneRemoteProtocol.PcId(options.HostKey);
         if (options.Lan is { } lanOptions) { lan = new PhoneLanListener(this, lanOptions); lan.Changed += () => Changed?.Invoke(); }
     }
+
+    // A session id for a home-network connection to hand its phone (PhoneRemoteProtocol.NewLanSession).
+    internal string NewLanSession() => PhoneRemoteProtocol.NewLanSession(options.HostKey);
 
     // The home-network listener's state, or null when this PC doesn't listen there.
     public PhoneLanState? Lan => lan?.State;
@@ -472,12 +508,41 @@ public sealed class PhoneRemoteHost : IDisposable
         else outgoing.Writer.TryWrite(message);
     }
 
-    // Returns whether the signal carried a valid signature of a phone this PC knows (or of its live pairing code): the
-    // home-network listener keeps only connections that have sent one.
-    internal bool HandleSignal(string peer, RemoteSignal signal)
+    // Signals from the room server and from every home-network connection are handled one at a time: looking a
+    // session up, replacing it and opening the next must not interleave, or two offers at once would each open a
+    // session and one of them would never be closed. Native callbacks don't take this lock.
+    private readonly object signalGate = new();
+
+    // Each phone's (or pairing code's) last offers, by session id: an offer sent again, by the room server or by
+    // someone who saw it, is refused instead of replacing the phone's live session. Kept since this process started.
+    // That is enough: offers seen on the home network carry a session id that only this PC hands out there, which it
+    // refuses through the room server (PhoneRemoteProtocol.IsLanSession), also after a restart; an offer seen only by the
+    // room server could be replayed by that server after a restart, as before the home network.
+    private readonly Dictionary<string, Queue<string>> offered = new();
+    private bool FirstOffer(string phone, string session)
+    {
+        if (offered.Count > 1000) offered.Clear();
+        var seen = offered.TryGetValue(phone, out var list) ? list : offered[phone] = new();
+        if (seen.Contains(session, StringComparer.OrdinalIgnoreCase)) return false;
+        seen.Enqueue(session);
+        while (seen.Count > 64) seen.Dequeue();
+        return true;
+    }
+
+    // Returns whether the signal proves its sender is a phone this PC knows, now: a valid signature on an offer that
+    // opened a session, or on a signal of the session that is live. On the home network [handedOut] is the session id
+    // that connection was given (PHONE-REMOTE.md, "On the home network"); nothing else is taken there.
+    internal bool HandleSignal(string peer, RemoteSignal signal, string? handedOut = null)
+    {
+        lock (signalGate) return HandleSignalInTurn(peer, signal, handedOut);
+    }
+
+    private bool HandleSignalInTurn(string peer, RemoteSignal signal, string? handedOut)
     {
         // Missing fields arrive as null.
         if (signal.Phone is not { Length: > 0 and <= 64 } || signal.Kind is null || signal.Payload is not { Length: <= 60000 } || !PhoneRemoteProtocol.IsHex(signal.Session, 32)) return false;
+        if (handedOut is not null && !string.Equals(signal.Session, handedOut, StringComparison.OrdinalIgnoreCase)) { Ignored(signal, "wrong-session"); return false; }
+        if (handedOut is null && PhoneRemoteProtocol.IsLanSession(options.HostKey, signal.Session)) { Ignored(signal, "lan-session"); return false; }
         string key, sessionKey;
         lock (gate)
         {
@@ -509,20 +574,22 @@ public sealed class PhoneRemoteHost : IDisposable
         lock (gate)
         {
             sessions.TryGetValue(sessionKey, out session);
-            if (session is not null && session.Session != signal.Session)
-            {
-                if (signal.Kind != "sdp") return true;
-                replaced = session; session = null; sessions.Remove(sessionKey);
-            }
-            else if (session is not null) session.SignalingPeer = peer;
+            var live = session is not null && session.Session == signal.Session;
+            // Anything but an offer belongs to the live session, or to nothing: an old session's signals prove nothing.
+            if (!live && signal.Kind != "sdp") return false;
+            // A new offer, once: one sent again would close the phone's live link.
+            if (!live && !FirstOffer(signal.Phone, signal.Session)) { Ignored(signal, "repeated-offer"); return false; }
+            if (session is not null && !live) { replaced = session; session = null; sessions.Remove(sessionKey); }
+            else if (live) session!.SignalingPeer = peer;
         }
         if (replaced is not null) { Close(replaced, "replaced"); if (replaced.PhoneId != "pair") Disconnected?.Invoke(replaced); }
         if (signal.Kind == "sdp")
         {
+            if (session is not null) return true;
             var sdp = Wire.Read<RemoteSdp>(signal.Payload);
-            if (sdp.Type != "offer" || sdp.Sdp is not { Length: > 0 } || session is not null) return true;
+            if (sdp.Type != "offer" || sdp.Sdp is not { Length: > 0 }) return false;
             session = Open(sessionKey, signal.Phone, signal.Session, peer, key, replaced is not null);
-            if (session is null) { Ignored(signal, "too-many-sessions"); return true; }
+            if (session is null) { Ignored(signal, "too-many-sessions"); return false; }
             // A signed offer can still be one the native library can't read.
             try { session.Peer.SetRemoteDescription(new RtcDescription { Type = RtcDescriptionType.Offer, Sdp = sdp.Sdp }); }
             catch (Exception) { Drop(sessionKey, session, "unreadable-offer"); throw; }
@@ -557,7 +624,11 @@ public sealed class PhoneRemoteHost : IDisposable
             TransportPolicy = relay ? rtcTransportPolicy.RTC_TRANSPORT_POLICY_RELAY : rtcTransportPolicy.RTC_TRANSPORT_POLICY_ALL
         });
         var session = new PhoneRemoteSession(phoneId, sessionId, peer, key, connection) { ViaLan = viaLan };
-        lock (gate) sessions[sessionKey] = session;
+        PhoneRemoteSession? overwritten;
+        lock (gate) { sessions.Remove(sessionKey, out overwritten); sessions[sessionKey] = session; }
+        // Signals are handled one at a time, so nothing should be here; if something is, it is closed rather than lost
+        // with its native connection still running.
+        if (overwritten is not null) { Close(overwritten, "replaced"); if (overwritten.PhoneId != "pair") Disconnected?.Invoke(overwritten); }
         connection.OnLocalDescriptionSafe += (_, description) =>
             Signal(session, "sdp", Wire.Serialize(new RemoteSdp(description.Type == RtcDescriptionType.Answer ? "answer" : "offer", description.Sdp)));
         connection.OnCandidateSafe += (_, candidate) =>

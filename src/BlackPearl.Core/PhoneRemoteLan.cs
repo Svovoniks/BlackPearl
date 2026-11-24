@@ -45,8 +45,6 @@ internal sealed class PhoneLanListener : IDisposable
     private readonly CancellationTokenSource lifetime = new();
     private TcpListener? listener;
     private PhoneLanState state;
-    private string[] advertised = [];
-    private long advertisedAt = long.MinValue / 2;
 
     public PhoneLanListener(PhoneRemoteHost host, PhoneLanOptions options)
     {
@@ -58,17 +56,31 @@ internal sealed class PhoneLanListener : IDisposable
     public event Action? Changed;
     public int Count { get { lock (gate) return connections.Count; } }
 
+    private static long opened;
     private sealed class Connection(string id, TcpClient client)
     {
         public string Id => id;
         public TcpClient Client => client;
         public readonly long OpenedAt = Environment.TickCount64;
+        // The order connections came in: OpenedAt only moves every 15 ms or so on Windows.
+        public readonly long Order = Interlocked.Increment(ref opened);
         public readonly CancellationTokenSource Lifetime = new();
         // Bounded: a phone that stops reading doesn't make the PC keep its replies forever.
         public readonly Channel<WireMessage> Outgoing = Channel.CreateBounded<WireMessage>(new BoundedChannelOptions(256) { FullMode = BoundedChannelFullMode.DropWrite });
         public volatile bool Proven;
+        // Set once the connection has ended, so its unproven timer doesn't then report it.
+        public volatile bool Done;
         public string Reason = "closed";
+        // Where it comes from, for the cap on unproven connections from one address.
+        public IPAddress? From;
+        // The session id handed to this connection's phone, and the phone that has proved itself on it.
+        public string Session = "";
+        public string? Phone;
     }
+
+    // Unproven connections one address may hold at once. A phone tries each of the PC's addresses once, so a few are
+    // plenty; one device opening connections in a loop then only takes its own places.
+    public const int UnprovenPerAddress = 4;
 
     public void Start() => _ = Task.Run(() => RunAsync(lifetime.Token));
 
@@ -78,18 +90,14 @@ internal sealed class PhoneLanListener : IDisposable
         Changed?.Invoke();
     }
 
-    // The addresses phones can try, and the port: the PC's IPv4 addresses on its networks, those with a gateway on
-    // wired or wireless adapters first. Read again at most every 30 seconds, as a laptop moves between networks.
+    // The addresses phones can try, and the port: the PC's IPv4 addresses on its networks, the default route's first
+    // (PhoneRemoteProtocol.LanAddresses), read again now and then as a laptop moves between networks.
     public object? Advertised()
     {
         int port;
         lock (gate) { if (state.State != "listening" || state.Port is not { } listening) return null; port = listening; }
-        if (Environment.TickCount64 - Interlocked.Read(ref advertisedAt) > 30000)
-        {
-            advertised = options.LoopbackOnly ? ["127.0.0.1"] : PhoneRemoteProtocol.LanAddresses();
-            Interlocked.Exchange(ref advertisedAt, Environment.TickCount64);
-        }
-        return advertised.Length == 0 ? null : new { port, addresses = advertised };
+        var addresses = options.LoopbackOnly ? ["127.0.0.1"] : PhoneRemoteProtocol.CachedLanAddresses();
+        return addresses.Length == 0 ? null : new { port, addresses };
     }
 
     public bool Send(string target, WireMessage message)
@@ -169,10 +177,12 @@ internal sealed class PhoneLanListener : IDisposable
             }
             lock (gate) { if (ct.IsCancellationRequested) { bound.Stop(); return; } listener = bound; }
             var port = ((IPEndPoint)bound.LocalEndpoint).Port;
-            options.PortChosen?.Invoke(port);
+            // Remembering the port is a convenience: a failure to save it mustn't stop phones from connecting.
+            try { options.PortChosen?.Invoke(port); }
+            catch (Exception ex) { PlaybackDiagnostics.Record("remote-lan", new { state = "port-not-saved", error = ex.GetType().Name }); }
             SetState("listening", port);
             PlaybackDiagnostics.Record("remote-lan", new { state = "started", port, moved = port != preferred, bind = options.LoopbackOnly ? "loopback" : "any",
-                addresses = options.LoopbackOnly ? 1 : PhoneRemoteProtocol.LanAddresses().Length });
+                addresses = options.LoopbackOnly ? 1 : PhoneRemoteProtocol.CachedLanAddresses().Length });
             await AcceptAsync(bound, ct);
             return;
         }
@@ -187,28 +197,32 @@ internal sealed class PhoneLanListener : IDisposable
             catch (OperationCanceledException) { return; }
             catch (ObjectDisposedException) { return; }
             catch (SocketException) { if (ct.IsCancellationRequested) return; await Task.Delay(100, CancellationToken.None); continue; }
-            Connection? evicted = null, connection;
+            var remote = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
+            var from = remote is { IsIPv4MappedToIPv6: true } ? remote.MapToIPv4() : remote;
+            Connection? evicted = null, connection = null;
+            var reason = "too-many-connections";
             lock (gate)
             {
-                if (connections.Count >= options.MaxConnections)
+                var unproven = connections.Values.Where(c => !c.Proven).ToArray();
+                if (unproven.Count(c => Equals(c.From, from)) >= UnprovenPerAddress) reason = "too-many-from-address";
+                else if (connections.Count >= options.MaxConnections)
                 {
-                    // Full: the longest-waiting connection that hasn't proved it is a phone makes room. Phones that have
-                    // proved it keep theirs.
-                    evicted = connections.Values.Where(c => !c.Proven).OrderBy(c => c.OpenedAt).FirstOrDefault();
-                    if (evicted is null) { connection = null; }
-                    else { connections.Remove(evicted.Id); connection = Add(client); }
+                    // Full: a connection that hasn't proved it is a phone makes room, the longest-waiting one of the
+                    // address holding the most. Phones that have proved it keep theirs.
+                    evicted = unproven.GroupBy(c => c.From).OrderByDescending(g => g.Count()).FirstOrDefault()?.OrderBy(c => c.Order).First();
+                    if (evicted is not null) { connections.Remove(evicted.Id); connection = Add(client, from); }
                 }
-                else connection = Add(client);
+                else connection = Add(client, from);
             }
             if (evicted is not null) { evicted.Reason = "evicted"; try { evicted.Lifetime.Cancel(); } catch (ObjectDisposedException) { } Refused("too-many-connections", evicted.Id[4..12]); }
-            if (connection is null) { Refused("too-many-connections"); client.Dispose(); continue; }
+            if (connection is null) { Refused(reason); client.Dispose(); continue; }
             _ = Task.Run(() => ServeAsync(connection, ct), CancellationToken.None);
         }
     }
 
-    private Connection Add(TcpClient client)
+    private Connection Add(TcpClient client, IPAddress? from)
     {
-        var connection = new Connection("lan:" + PhoneRemoteProtocol.NewHex(8), client);
+        var connection = new Connection("lan:" + PhoneRemoteProtocol.NewHex(8), client) { From = from, Session = host.NewLanSession() };
         connections[connection.Id] = connection;
         return connection;
     }
@@ -251,11 +265,14 @@ internal sealed class PhoneLanListener : IDisposable
             }
             PlaybackDiagnostics.Record("remote-lan", new { state = "opened", connection = shortId, connections = Count });
             var writer = WriteAsync(socket, connection.Outgoing, lifetime.Token);
-            connection.Outgoing.Writer.TryWrite(new("remote-welcome", Target: connection.Id, Data: Wire.Serialize(new RemoteWelcome([], false))));
+            // No relay servers: none are needed here. And the session id this connection's phone must offer under: an
+            // offer under any other, such as one seen on another connection and sent again, is refused.
+            connection.Outgoing.Writer.TryWrite(new("remote-welcome", Target: connection.Id,
+                Data: Wire.Serialize(new { iceServers = Array.Empty<string>(), forceRelay = false, session = connection.Session })));
             connection.Outgoing.Writer.TryWrite(new("remote-online"));
             _ = Task.Delay(options.Unproven, lifetime.Token).ContinueWith(_ =>
             {
-                if (connection.Proven) return;
+                if (connection.Proven || connection.Done) return;
                 connection.Reason = "unproven"; Refused("unproven", shortId);
                 try { lifetime.Cancel(); } catch (ObjectDisposedException) { }
             }, TaskContinuationOptions.OnlyOnRanToCompletion);
@@ -271,7 +288,11 @@ internal sealed class PhoneLanListener : IDisposable
                     if (message.Type == "ping") { connection.Outgoing.Writer.TryWrite(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
                     if (message.Type != "signal" || message.Data is not { Length: > 0 } data) continue;
                     // Anyone on the network can send signals, so none of them may end this loop.
-                    try { if (host.HandleSignal(connection.Id, Wire.Read<RemoteSignal>(data))) connection.Proven = true; }
+                    try
+                    {
+                        var signal = Wire.Read<RemoteSignal>(data);
+                        if (host.HandleSignal(connection.Id, signal, connection.Session) && !connection.Proven) Proved(connection, signal.Phone);
+                    }
                     catch (Exception ex) { PlaybackDiagnostics.Record("remote-signal-rejected", new { error = ex.GetType().Name, via = "lan" }); }
                 }
             }
@@ -296,6 +317,8 @@ internal sealed class PhoneLanListener : IDisposable
         catch (Exception ex) when (ex is WebSocketException or IOException or OperationCanceledException or SocketException or ObjectDisposedException) { }
         finally
         {
+            connection.Done = true;
+            try { lifetime.Cancel(); } catch (ObjectDisposedException) { }
             lock (gate) { if (connections.TryGetValue(connection.Id, out var current) && current == connection) connections.Remove(connection.Id); }
             if (socket is not null)
                 PlaybackDiagnostics.Record("remote-lan", new { state = "closed", connection = shortId, reason = connection.Reason, proven = connection.Proven, ms = Environment.TickCount64 - connection.OpenedAt });
@@ -303,6 +326,19 @@ internal sealed class PhoneLanListener : IDisposable
             connection.Client.Dispose();
             connection.Lifetime.Dispose();
         }
+    }
+
+    // A phone proved itself on [connection]: it keeps its place. Its earlier connections go, newest wins, as a phone
+    // has one link at a time.
+    private void Proved(Connection connection, string phone)
+    {
+        Connection[] older;
+        lock (gate)
+        {
+            connection.Proven = true; connection.Phone = phone;
+            older = phone == "pair" ? [] : connections.Values.Where(c => c != connection && c.Phone == phone).ToArray();
+        }
+        foreach (var earlier in older) { earlier.Reason = "superseded"; try { earlier.Lifetime.Cancel(); } catch (ObjectDisposedException) { } }
     }
 
     // The HTTP request that opens the WebSocket: GET /remote with a WebSocket upgrade, at most 8 KiB. Returns its key, or
