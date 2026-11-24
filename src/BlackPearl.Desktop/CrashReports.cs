@@ -43,7 +43,7 @@ public static class CrashReports
         var path = Path.Combine(Program.DataDirectory, FileNamesFile);
         try
         {
-            if (!allowed) File.Delete(path);
+            if (!allowed) { File.Delete(path); File.Delete(Path.Combine(Program.DataDirectory, UnmatchedSentFile)); }
             else { Directory.CreateDirectory(Program.DataDirectory); File.WriteAllText(path, "Crash reports include the names of files that weren't identified (Settings › Updates & about)."); }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
@@ -77,7 +77,7 @@ public static class CrashReports
             else { Directory.CreateDirectory(Program.DataDirectory); File.WriteAllText(path, "Crash reports are turned off in Settings › Updates & about."); }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-        if (!allowed) { enabled = false; lock (gate) { startup = playback = null; startupStage = null; } }
+        if (!allowed) { enabled = false; HookMetadata(false); lock (gate) { startup = playback = null; startupStage = null; } }
         else if (Available) Initialize(Source.Dsn!, AppEnvironment.Get("SENTRY_ENVIRONMENT") ?? (Source.FromEnvironment ? "development" : "production"));
     }
 
@@ -86,7 +86,7 @@ public static class CrashReports
         lock (gate)
         {
             enabled = true;
-            if (sdk is not null) return;
+            if (sdk is not null) { HookMetadata(true); return; }
             var version = typeof(CrashReports).Assembly.GetName().Version;
             sdk = SentrySdk.Init(options =>
             {
@@ -103,9 +103,7 @@ public static class CrashReports
                 options.SetBeforeSendTransaction(transaction => enabled ? CrashReportPrivacy.Scrub(transaction) : null);
             });
             SentrySdk.ConfigureScope(scope => scope.SetTag("process", process));
-            MetadataReports.Starting = () => enabled ? SentrySdk.StartTransaction(MetadataRunName, "metadata") : null;
-            MetadataReports.Failures = MetadataFailed;
-            MetadataReports.Runs = MetadataRunEnded;
+            HookMetadata(true);
         }
     }
 
@@ -161,7 +159,17 @@ public static class CrashReports
     // Metadata: provider failures as warnings, and one trace per run with what it looked up and how many titles stayed unmatched.
     private const string MetadataRunName = "metadata.refresh";
     private static readonly Dictionary<string, DateTime> metadataFailures = [];
-    private static string? unmatchedSent;
+    private const string UnmatchedSentFile = "crash-reports-unmatched-sent";
+    private static DateTime idleRunSent;
+
+    // Metadata reports reach Sentry only while crash reports are on; off, the run summary is not even built.
+    private static void HookMetadata(bool on)
+    {
+        MetadataReports.Starting = on ? () => enabled ? SentrySdk.StartTransaction(MetadataRunName, "metadata") : null : null;
+        MetadataReports.Abandoned = on ? (trace, failed) => (trace as ITransactionTracer)?.Finish(failed ? SpanStatus.InternalError : SpanStatus.Cancelled) : null;
+        MetadataReports.Failures = on ? MetadataFailed : null;
+        MetadataReports.Runs = on ? MetadataRunEnded : null;
+    }
 
     // One report per kind of failure an hour: a provider that is down fails every title, and one report says so.
     private static void MetadataFailed(MetadataFailure failure)
@@ -191,28 +199,29 @@ public static class CrashReports
     private static void MetadataRunEnded(MetadataRun run)
     {
         if (!enabled) return;
+        // A run that looked nothing up and nothing failed (most startup and folder-watcher runs) is sent once every six hours,
+        // which keeps the library's counts current without a trace for each.
+        var idle = run.LookedUp == 0 && run.ProviderFailures == 0 && run.ArtworkFailures == 0;
+        if (idle && DateTime.UtcNow - idleRunSent < TimeSpan.FromHours(6)) return;
+        if (idle) idleRunSent = DateTime.UtcNow;
         if (run.Trace is ITransactionTracer trace)
         {
             trace.SetTag("metadata.mode", run.Mode);
             trace.SetTag("metadata.providers", run.Providers);
             trace.SetTag("metadata.tmdb", run.TmdbAvailable ? "yes" : "no");
-            trace.SetMeasurement("looked_up", run.LookedUp);
-            trace.SetMeasurement("matched", run.Matched);
-            trace.SetMeasurement("unmatched", run.Unmatched);
-            trace.SetMeasurement("incomplete", run.Incomplete);
-            trace.SetMeasurement("provider_failures", run.ProviderFailures);
-            trace.SetMeasurement("artwork_failures", run.ArtworkFailures);
-            trace.SetMeasurement("deferred", run.Deferred);
-            trace.SetMeasurement("library_titles", run.LibraryTitles);
-            trace.SetMeasurement("library_unmatched", run.LibraryUnmatched.Count);
-            foreach (var (reason, count) in run.UnmatchedReasons) trace.SetMeasurement("unmatched_" + Regex.Replace(reason.ToLowerInvariant(), "[^a-z0-9]+", "_"), count);
+            foreach (var (name, value) in run.Measurements) trace.SetMeasurement(name, value);
+            // Sentry keeps ten measurements at most, so the counts per reason go as span data.
+            foreach (var (reason, count) in run.UnmatchedReasons) trace.SetData("unmatched." + Regex.Replace(reason.ToLowerInvariant(), "[^a-z0-9]+", "_"), count);
             trace.Finish(run.Completed ? SpanStatus.Ok : SpanStatus.Aborted);
         }
         // With file names allowed: the library's unmatched titles, after a run that looked something up, when the list changed.
         if (!FileNamesAllowed || run.LookedUp == 0 || run.LibraryUnmatched.Count == 0) return;
         var list = string.Join("\n", run.LibraryUnmatched.Select(x => $"{x.Reason}\t{x.Files}\t{x.File}"));
-        if (list == unmatchedSent) return;
-        unmatchedSent = list;
+        // The same list is sent once, also across launches; only a hash of it is kept beside the library.
+        var sentPath = Path.Combine(Program.DataDirectory, UnmatchedSentFile);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(list)));
+        try { if (File.Exists(sentPath) && File.ReadAllText(sentPath).Trim() == hash) return; File.WriteAllText(sentPath, hash); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         var text = $"{run.LibraryUnmatched.Count} of {run.LibraryTitles} titles unmatched\nreason\tfiles\tfirst file\n{list}\n";
         SentrySdk.CaptureMessage("Unmatched files in the library", scope =>
         {

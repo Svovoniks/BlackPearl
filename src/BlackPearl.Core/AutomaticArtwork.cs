@@ -27,7 +27,7 @@ public static class AutomaticArtwork
         if (relocalize) mode = MetadataRefresh.RefreshText;
         var followRefresh = relocalize ? MetadataRefresh.RefreshText : refresh;
         PlaybackDiagnostics.Record("metadata-fetch-start", new { Mode = mode.ToString(), Providers = options.ProviderOrder, TmdbAvailable = tmdb is not null });
-        MetadataReports.UseFolders(library); var trace = MetadataReports.Start(); var started = System.Diagnostics.Stopwatch.StartNew(); int lookedUp = 0, matched = 0, unmatched = 0, incomplete = 0; var unmatchedReasons = new Dictionary<string, int>();
+        MetadataReports.UseFolders(library); using var reporting = MetadataReports.Begin(ct); var started = System.Diagnostics.Stopwatch.StartNew(); int lookedUp = 0, matched = 0, unmatched = 0, incomplete = 0; var unmatchedReasons = new Dictionary<string, int>();
         // Music keeps the names and artwork of its own files; film and show providers know nothing of albums.
         var catalog = library.All().Where(x => !x.IsMusic).ToList(); var localChanged = false;
         foreach (var entry in catalog.Where(x => mode != MetadataRefresh.RetryArtwork && x.Available && !x.IsVirtual && !x.IsExtra && !x.IsBonus))
@@ -255,12 +255,12 @@ public static class AutomaticArtwork
         await File.WriteAllTextAsync(Path.Combine(directory, "metadata-fetch-report.json"), Wire.Serialize(new { FetchedAt = Wire.Now,
             TmdbAvailable = tmdb is not null, Providers = options.ProviderOrder, Summary = summary, DeferredTitles = deferred, Issues = unresolved, CurrentIssues = issues }), ct);
         PlaybackDiagnostics.Record("metadata-fetch-complete", new { Summary = summary });
-        if (MetadataReports.Runs is not null)
+        MetadataReports.Run(reporting, () =>
         {
             var (libraryTitles, libraryUnmatched) = MetadataReports.Library(library.All(), unresolved);
-            MetadataReports.Run(new(mode.ToString(), tmdb is not null, string.Join(",", options.ProviderOrder), started.Elapsed, !superseded, lookedUp, matched, unmatched,
-                incomplete, failed, artworkFailed, deferred, libraryTitles, unmatchedReasons, libraryUnmatched, trace));
-        }
+            return new MetadataRun(mode.ToString(), tmdb is not null, string.Join(",", options.ProviderOrder), started.Elapsed, !superseded, lookedUp, matched, unmatched,
+                incomplete, failed, artworkFailed, deferred, libraryTitles, unmatchedReasons, libraryUnmatched);
+        });
         return summary + (tmdb is null && options.ProviderOrder.Contains("tmdb") ? " TMDB is unavailable without a token; movie coverage is limited to Wikipedia." : "");
     }
     internal static bool Relocalizes(LibraryStore library, MetadataOptions options, bool tmdbAvailable) =>
