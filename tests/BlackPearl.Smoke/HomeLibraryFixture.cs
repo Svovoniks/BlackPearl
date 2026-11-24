@@ -182,6 +182,9 @@ static class HomeLibraryFixture
             File.SetCreationTimeUtc(file, created.AddDays(3));
             check(LibraryAdded.Record(store, listed) == 0 && LibraryAdded.At(store.PlaybackSettings(), "arrived") == new DateTimeOffset(created).ToUnixTimeMilliseconds(),
                 "a recorded date is kept, and reaches Home with the watched marks");
+            store.Save(listed[2]); store.Setting("added:away", "5");
+            check(store.RemoveUnavailable(["away"]) == 1 && store.Setting("added:away") is null && store.Setting("added:arrived") is not null,
+                "removing a video whose file is gone also removes its added date");
         }
         finally { try { Directory.Delete(directory, true); } catch (IOException) { } }
     }

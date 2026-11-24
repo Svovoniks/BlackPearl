@@ -114,7 +114,7 @@ public partial class MainWindow
         foreach (var view in homeContinueAll) view.ShowIn(36, 52);
         RenderHomeStrip();
         RenderHomeUnwatched(views);
-        var suggestions =views.Where(view => view.HomeSection == "suggestions").ToArray();
+        var suggestions = views.Where(view => view.HomeSection == "suggestions").ToArray();
         foreach (var view in suggestions) view.SetHomeText(TitleFacts(view), view.Card.Media.Genres?.FirstOrDefault(genre => !string.IsNullOrWhiteSpace(genre)) ?? "");
         if (HomeRows.ItemsSource is null) HomeRows.ItemsSource = HomeRowViews;
         foreach (var row in HomeRowViews)
