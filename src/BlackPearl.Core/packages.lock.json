@@ -25,6 +25,12 @@
           "SQLitePCLRaw.core": "2.1.12"
         }
       },
+      "Sentry": {
+        "type": "Direct",
+        "requested": "[7.0.1, )",
+        "resolved": "7.0.1",
+        "contentHash": "4hyExeUWArJdiO6VlmwCUHgWPosvasauNpgB6pVP7swuwyahWHRqgWHKwj3t5h18wFezIMte6BmI4dqEzl1TYw=="
+      },
       "SkiaSharp": {
         "type": "Direct",
         "requested": "[2.88.9, )",

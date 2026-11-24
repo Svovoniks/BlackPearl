@@ -1180,10 +1180,10 @@ public partial class MainWindow : Window
     {
         if (!await EnsurePlayer()) return;
         if (!File.Exists(item.Path)) throw new FileNotFoundException("Movie file is unavailable. Reconnect its drive and rescan.");
-        CrashReports.PlaybackOpening(Path.GetExtension(item.Path), "local");
         await Disconnect(preserveFullscreen: (fullscreen || pictureInPicture) && room is null); target = null; loadedMedia = null; playingItem = item;
         var generation = loadGeneration;
         localResume = !WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0;
+        var opening = CrashReports.PlaybackOpening(Path.GetExtension(item.Path), "local");
         using var media = new Media(vlc!, item.Path, FromType.FromPath);
         // AVIs often declare AC3 as a byte stream. VLC's AVI demuxer then splits its frames, and the bundled libVLC has
         // no AC3 packetizer to rejoin them, so the audio plays as silence. Files avformat cannot open still fall back.
@@ -1191,8 +1191,8 @@ public partial class MainWindow : Window
         ready = false; RoomHeading.Text = PlaybackTitle(item); RoomSubtitle.Text = item.Caption;
         ConnectionStatus.Text = "Local playback";
         ShowKnownMusic();
-        await PrepareVideoSurface();
-        if (closing || generation != loadGeneration || room is not null) return;
+        try { await PrepareVideoSurface(); } catch { CrashReports.PlaybackAbandoned(opening); throw; }
+        if (closing || generation != loadGeneration || room is not null) { CrashReports.PlaybackAbandoned(opening); return; }
         player!.Play(media);
     }
     private void RestartLocal(object sender, RoutedEventArgs e)
@@ -1566,7 +1566,7 @@ public partial class MainWindow : Window
     }
     private async Task LoadRoomMedia(SharedMedia media)
     {
-        PlaybackDiagnostics.Record("media-load-start", new { media.Extension, bytes = media.Length }); CrashReports.PlaybackOpening(media.Extension, "room");
+        PlaybackDiagnostics.Record("media-load-start", new { media.Extension, bytes = media.Length }); var opening = CrashReports.PlaybackOpening(media.Extension, "room"); var requested = false;
         var client = room; if (client is null) return;
         var generation = ++loadGeneration; loadedMedia = media.Id;
         // Whoever plays the video plays its file; everyone else plays the converted stream when one is offered.
@@ -1627,12 +1627,12 @@ public partial class MainWindow : Window
             ShowKnownMusic();
             await PrepareVideoSurface(openPlayer: RoomPage.Visibility == Visibility.Visible);
             if (client != room || generation != loadGeneration) return;
-            var started = player!.Play(vlcMedia);
+            var started = player!.Play(vlcMedia); requested = true;
             PlaybackDiagnostics.Record("media-play-request", new { started });
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
         catch (Exception ex) { PlaybackDiagnostics.Record("media-load-failed", new { error = ex.GetType().Name, media.Extension }); CrashReports.PlaybackFailed(); if (generation == loadGeneration) loadedMedia = null; throw; }
-        finally { if (locked) loading.Release(); if (mediaLoadCancellation == cancellation) mediaLoadCancellation = null; }
+        finally { if (locked) loading.Release(); if (mediaLoadCancellation == cancellation) mediaLoadCancellation = null; if (!requested) CrashReports.PlaybackAbandoned(opening); }
     }
     private async Task PrepareVideoSurface(bool openPlayer = true)
     {
