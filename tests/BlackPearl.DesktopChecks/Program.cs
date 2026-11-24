@@ -25,6 +25,12 @@ static class Program
         var desktop = Path.Combine(Path.GetTempPath(), "blackpearl-check-desktop-" + Guid.NewGuid().ToString("N")[..8]); Directory.CreateDirectory(desktop);
         Environment.SetEnvironmentVariable("BLACKPEARL_DESKTOP", desktop);
         if (args.FirstOrDefault() == "--follow-system-probe") { FollowSystemProbe.Run(args[1]); return; }
+        if (args.FirstOrDefault() == "--crash-report-cache")
+        {
+            var cacheChecks = 0;
+            CrashReportCacheChecks.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); cacheChecks++; });
+            Console.WriteLine($"{cacheChecks} crash report cache checks passed."); return;
+        }
         Environment.SetEnvironmentVariable("BLACKPEARL_FOLLOW_SYSTEM", "off");
         // A window closed here never starts the phone host or changes Windows' sign-in entry, even on a scratch copy of a
         // library with the phone remote on, whose phones would otherwise reach the copy.
