@@ -128,7 +128,8 @@ if (args.FirstOrDefault() == "--file-details")
 
 if (args.FirstOrDefault() == "--crash-reports")
 {
-    await CrashReportFixture.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }); return;
+    Action<bool, string> crashCheck = (condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); };
+    await CrashReportFixture.Run(crashCheck); MetadataReportFixture.Run(crashCheck); return;
 }
 
 if (args.FirstOrDefault() == "--track-languages")
@@ -495,6 +496,7 @@ if (part != 2)
     OpenedFileFixture.Run(Check);
     await DiagnosticLogFixture.Run(Path.Combine(root, "diagnostic-log"), Check);
     await CrashReportFixture.Run(Check);
+    MetadataReportFixture.Run(Check);
     await RecoveryFixture.Run(Check);
     await MediaCacheFixture.Run(Check);
     await ReadAheadFixture.Run(Check);

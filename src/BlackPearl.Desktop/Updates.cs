@@ -22,7 +22,9 @@ public partial class MainWindow
         UpdateStatus.Text = $"Installed version {InstalledVersion}";
         AutoCheckUpdates.IsChecked = library.Setting("autoUpdates") != "false";
         SendCrashReports.IsChecked = CrashReports.Available && CrashReports.Allowed;
+        SendFileNames.IsChecked = CrashReports.FileNamesAllowed;
         if (!CrashReports.Available) { SendCrashReports.IsEnabled = false; CrashReportsHint.Text = "This build doesn't send crash reports."; }
+        SendFileNames.IsEnabled = SendCrashReports.IsChecked == true;
         updateDirectory = UpdateLocation.InstallTarget(AppContext.BaseDirectory, RegisteredInstall(),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "BlackPearl"));
         if (updateDirectory is null)
@@ -42,7 +44,12 @@ public partial class MainWindow
     private void AutoUpdatesChanged(object sender, RoutedEventArgs e)
     { if (library is not null) library.Setting("autoUpdates", AutoCheckUpdates.IsChecked == true ? "true" : "false"); }
     private void CrashReportsChanged(object sender, RoutedEventArgs e)
-    { if (CrashReports.Available) CrashReports.SetAllowed(SendCrashReports.IsChecked == true); }
+    {
+        if (CrashReports.Available) CrashReports.SetAllowed(SendCrashReports.IsChecked == true);
+        // File names go only with crash reports; the choice itself is kept for when they are turned back on.
+        if (SendFileNames is not null) SendFileNames.IsEnabled = SendCrashReports.IsChecked == true;
+    }
+    private void FileNamesChanged(object sender, RoutedEventArgs e) => CrashReports.SetFileNamesAllowed(SendFileNames.IsChecked == true);
     private async void CheckUpdatesClick(object sender, RoutedEventArgs e) => await CheckAppUpdates(true);
     private async Task CheckAppUpdates(bool manual)
     {
