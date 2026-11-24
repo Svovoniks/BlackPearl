@@ -63,6 +63,52 @@ static class PhoneTakeOverChecks
             await (Task)Call("Disconnect", false, false)!;
             check(title.Text == "Choose a video to play" && hint.Visibility == Visibility.Collapsed,
                 "once another video has played, the empty player no longer says a phone has one");
+
+            // A video left paused here while a phone watches it, or watches something else. The PC saved the paused
+            // video's place every 5 seconds, over the phone's progress on it, and renewed its "played" time each time,
+            // which kept it first in Continue watching on both.
+            var store = Field<LibraryStore>("library");
+            var pausedPath = Path.Combine(directory, "Paused.avi");
+            VideoFixture.Write(pausedPath, 20);
+            var paused = new MediaItem("phone-paused-here", pausedPath, "Paused", "Movie");
+            store.SetSettings([KeyValuePair.Create("position:" + paused.Id, "0"), KeyValuePair.Create("played:" + paused.Id, "0"), KeyValuePair.Create("watched:" + paused.Id, "false")]);
+            await (Task)Call("PlayLocalItem", paused)!;
+            for (var i = 0; i < 50 && !(player.IsPlaying && player.Time > 1000); i++) await Task.Delay(100);
+            // Past 10 seconds, where a save also renews the video's "played" time.
+            player.Time = 11000;
+            for (var i = 0; i < 50 && !(player.IsPlaying && player.Time > 11000); i++) await Task.Delay(100);
+            player.SetPause(true);
+            for (var i = 0; i < 30 && player.IsPlaying; i++) await Task.Delay(100);
+            await Task.Delay(300);
+            Call("SavePlaybackPosition", false);
+            var pausedAt = long.Parse(store.Setting("position:" + paused.Id) ?? "-1");
+            check(!player.IsPlaying && pausedAt > 10000 && store.Setting("played:" + paused.Id) != "0",
+                $"the paused video's place and played time are saved once it pauses ({pausedAt} ms)");
+            // Marking it watched saves it as finished, and unmarking it gives its place back, though it hasn't moved.
+            Call("SetWatched", paused, true);
+            Call("SavePlaybackPosition", false);
+            var markedAt = store.Setting("position:" + paused.Id);
+            Call("SetWatched", paused, false);
+            Call("SavePlaybackPosition", false);
+            check(markedAt == "0" && store.Setting("position:" + paused.Id) == pausedAt.ToString(),
+                $"marking the paused video watched and unwatched again saves it each time ({markedAt}, then {store.Setting("position:" + paused.Id)})");
+            // What PhoneLibrary.SaveProgress writes for the phone, further on in the same video.
+            const string phoneAt = "15000", phonePlayed = "1700000000000";
+            store.SetSettings([KeyValuePair.Create("position:" + paused.Id, phoneAt), KeyValuePair.Create("played:" + paused.Id, phonePlayed)]);
+            Call("SavePlaybackPosition", false);
+            Call("SavePlaybackPosition", false);
+            check(store.Setting("position:" + paused.Id) == phoneAt && store.Setting("played:" + paused.Id) == phonePlayed,
+                $"a paused video doesn't save its place again over a phone's progress on it (position {store.Setting("position:" + paused.Id)}, played {store.Setting("played:" + paused.Id)})");
+            await (Task)Call("Disconnect", false, false)!;
+            check(store.Setting("position:" + paused.Id) == phoneAt && store.Setting("played:" + paused.Id) == phonePlayed,
+                "closing the paused player keeps the phone's progress on its video");
+            await (Task)Call("PlayLocalItem", paused)!;
+            for (var i = 0; i < 50 && !(player.IsPlaying && player.Time > 14000); i++) await Task.Delay(100);
+            check(player.Time >= 14000, $"the video opened here again resumes where the phone left it ({player.Time} ms)");
+            Call("SavePlaybackPosition", false);
+            check(long.Parse(store.Setting("position:" + paused.Id) ?? "0") >= 14000 && store.Setting("played:" + paused.Id) != phonePlayed,
+                "a video playing here saves its place again as it moves");
+            store.SetSettings([KeyValuePair.Create("position:" + paused.Id, "0"), KeyValuePair.Create("played:" + paused.Id, "0"), KeyValuePair.Create("watched:" + paused.Id, "false")]);
         }
         finally
         {
