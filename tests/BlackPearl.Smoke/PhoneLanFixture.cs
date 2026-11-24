@@ -61,7 +61,7 @@ static class PhoneLanFixture
 
         // A phone the PC doesn't know gets the same unsigned hint as through the room server, and nothing else.
         await using (var stranger = await FakePhone.Connect(lan, pcId, PhoneRemoteProtocol.NewHex(16), PhoneRemoteProtocol.NewHex(32)))
-            check(await stranger.Rejection() == "unknown-phone" && !await stranger.Opened(1500), "a phone the PC doesn't know is told so on the home network, and gets no link");
+            check(await stranger.Rejection(1500) is null && !await stranger.Opened(1500), "a phone the PC doesn't know gets no answer on the home network, not even the unsigned hint, and no link");
         // A forged signature for a known phone: no answer, no link, and its connection is closed once it has proved nothing.
         await using (var forged = await RawSocket.Open(preferred))
         {

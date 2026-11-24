@@ -503,6 +503,9 @@ public sealed class PhoneRemoteHost : IDisposable
 
     private void Reject(string peer, RemoteSignal signal, string reason)
     {
+        // Not on the home network: an unsigned hint there could come from anything answering at the PC's address, so
+        // phones don't act on one there. A removed phone hears it through the room server.
+        if (peer.StartsWith("lan:", StringComparison.Ordinal)) return;
         lock (gate) { if (rejected.Count > 1000) rejected.Clear(); if (!rejected.Add(signal.Session)) return; }
         Route(new("signal", Target: peer, Data: Wire.Serialize(new RemoteSignal(signal.Phone, signal.Session, "rejected", reason, ""))));
     }
