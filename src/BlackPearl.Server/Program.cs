@@ -35,6 +35,9 @@ builder.Services.AddRateLimiter(options =>
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 var app = builder.Build();
+// A task that failed with nobody awaiting it is a bug; say so in the service's log as well as in any error report.
+var unobservedLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("UnobservedTask");
+TaskScheduler.UnobservedTaskException += (_, e) => unobservedLog.LogError(e.Exception, "Unobserved task exception");
 // Behind the bundled reverse proxy, rate limits apply to the client address it reports; only loopback proxies are trusted.
 app.UseForwardedHeaders(new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto });
 app.UseRateLimiter();
@@ -202,7 +205,7 @@ async Task ServeHosted(HttpContext context, WebSocket socket, CancellationTokenS
                 case "remove" when member.Host:
                     var removed = session.People.Values.FirstOrDefault(x => !x.Host && (x.Id == message.Target || x.GuestHash == message.Target));
                     if (removed is not null)
-                    { room.Members.Remove(removed.GuestHash!); SaveRoom(room); removed.Approved = false; removed.Lifetime.Cancel(); session.Broadcast(new("peer-left", Sender: removed.Id)); room.HostedSnapshot(); }
+                    { room.Members.Remove(removed.GuestHash!); SaveRoom(room); removed.Approved = false; removed.End(); session.Broadcast(new("peer-left", Sender: removed.Id)); room.HostedSnapshot(); }
                     else if (message.Target != room.OwnerHash && room.Members.Remove(message.Target ?? ""))
                     { SaveRoom(room); room.HostedSnapshot(); }
                     break;
@@ -501,7 +504,9 @@ sealed class CloudflareTurn(string keyId, string token, string api, TimeSpan lif
 // One socket that has entered a room, with its outgoing queue.
 class Connection(WebSocket socket, CancellationTokenSource lifetime)
 {
-    public CancellationTokenSource Lifetime => lifetime;
+    // Ends the connection. Its handler disposes the token once it returns, and tasks such as the send loop and other
+    // members' messages can still reach this connection after that, when there is nothing left to end.
+    public void End() { try { lifetime.Cancel(); } catch (ObjectDisposedException) { } }
     private double broadcastTokens = 20; private long broadcastRefilled = Wire.Now;
     // Called under the room lock for member messages that reach other members.
     public bool AllowBroadcast()
@@ -511,7 +516,7 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
         broadcastTokens--; return true;
     }
     private readonly Channel<(WireMessage Message, TaskCompletionSource? Sent, bool Last)> outgoing = Channel.CreateBounded<(WireMessage, TaskCompletionSource?, bool)>(128);
-    public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null, false))) lifetime.Cancel(); }
+    public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null, false))) End(); }
     public async Task SendAndWaitAsync(WireMessage message)
     {
         var sent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -523,8 +528,8 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
     // discard what the app has not read yet. The connection is cut only if the app does not close its side in time.
     public void Close(string reason)
     {
-        if (!outgoing.Writer.TryWrite((new("closed", Text: reason), null, true))) { lifetime.Cancel(); return; }
-        _ = Task.Delay(TimeSpan.FromSeconds(5)).ContinueWith(_ => { try { lifetime.Cancel(); } catch (ObjectDisposedException) { } }, TaskScheduler.Default);
+        if (!outgoing.Writer.TryWrite((new("closed", Text: reason), null, true))) { End(); return; }
+        _ = Task.Delay(TimeSpan.FromSeconds(5)).ContinueWith(_ => End(), TaskScheduler.Default);
     }
     public async Task SendLoop()
     {
@@ -538,7 +543,7 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
                 return;
             }
         }
-        catch (Exception) { lifetime.Cancel(); }
+        catch (Exception) { End(); }
     }
 }
 // Someone in a room without a host. Hash identifies the person across connections without storing their key.
