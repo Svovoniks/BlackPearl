@@ -66,6 +66,8 @@ sealed class FakePhone : IAsyncDisposable
         public byte[]? Bytes; public int Received; public long Length;
     }
     string phone = "", key = "", session = PhoneRemoteProtocol.NewHex(16);
+    // On a PC's home-network socket (it handed out a session id): signals there are signed as `phone-lan` and `pc-lan`.
+    bool lan;
     readonly TaskCompletionSource open = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly TaskCompletionSource closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly TaskCompletionSource<string> rejected = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -81,7 +83,7 @@ sealed class FakePhone : IAsyncDisposable
         var servers = Wire.Read<RemoteWelcome>(welcome.Data!).IceServers;
         // A PC's home-network socket hands out the session id to offer under (PHONE-REMOTE.md, "On the home network").
         using (var data = JsonDocument.Parse(welcome.Data!))
-            if (data.RootElement.TryGetProperty("session", out var handed) && handed.GetString() is { Length: 32 } given) result.session = given;
+            if (data.RootElement.TryGetProperty("session", out var handed) && handed.GetString() is { Length: 32 } given) { result.session = given; result.lan = true; }
         result.peer = new RtcPeerConnection(new RtcPeerConfiguration { IceServers = servers, MaxMessageSize = 65536, Mtu = 1200 });
         result.peer.OnLocalDescriptionSafe += (_, d) => result.Signal("sdp", Wire.Serialize(new RemoteSdp(d.Type == RtcDescriptionType.Offer ? "offer" : "answer", d.Sdp)));
         result.peer.OnCandidateSafe += (_, c) => result.Signal("ice", Wire.Serialize(new RemoteIce(c.Content.StartsWith("a=") ? c.Content[2..] : c.Content, c.Mid)));
@@ -109,7 +111,7 @@ sealed class FakePhone : IAsyncDisposable
 
     void Signal(string kind, string payload)
     {
-        var data = Wire.Serialize(new RemoteSignal(phone, session, kind, payload, PhoneRemoteProtocol.Sign(key, "phone", phone, session, kind, payload)));
+        var data = Wire.Serialize(new RemoteSignal(phone, session, kind, payload, PhoneRemoteProtocol.Sign(key, lan ? PhoneRemoteProtocol.FromPhoneLan : PhoneRemoteProtocol.FromPhone, phone, session, kind, payload)));
         if (kind == "sdp") Offer = data;
         _ = server.Send(new("signal", Data: data));
     }
@@ -124,7 +126,7 @@ sealed class FakePhone : IAsyncDisposable
             var signal = Wire.Read<RemoteSignal>(message.Data);
             if (signal.Session != session) continue;
             if (signal.Kind == "rejected") { rejected.TrySetResult(signal.Payload); continue; }
-            if (!PhoneRemoteProtocol.Verify(key, "pc", signal)) continue;
+            if (!PhoneRemoteProtocol.Verify(key, lan ? PhoneRemoteProtocol.FromPcLan : PhoneRemoteProtocol.FromPc, signal)) continue;
             if (signal.Kind == "sdp")
             {
                 var sdp = Wire.Read<RemoteSdp>(signal.Payload);

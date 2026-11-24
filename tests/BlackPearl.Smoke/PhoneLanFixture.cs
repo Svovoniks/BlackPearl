@@ -248,6 +248,41 @@ static class PhoneLanFixture
             await replayer.Send(new("signal", Data: firstOffer));
             await replayer.Send(new("signal", Data: lanOffer));
             check(!await live.Closed(2000), "an earlier offer, or one from the home network, sent again through the room server doesn't replace the phone's link");
+
+            // A device answering at the PC's home address, which the phone tries on any Wi-Fi, hands out a session id of
+            // its choosing and collects the phone's offer. That offer is signed for the home network only: sent through
+            // the room server it is refused, and the phone's link stays up.
+            var impostorPort = FreePort();
+            using var impostor = new System.Net.HttpListener(); impostor.Prefixes.Add($"http://localhost:{impostorPort}/"); impostor.Start();
+            var chosen = PhoneRemoteProtocol.NewHex(16);
+            var served = Task.Run(async () =>
+            {
+                var context = await impostor.GetContextAsync();
+                var socket = (await context.AcceptWebSocketAsync(null)).WebSocket;
+                await SocketMessages.ReadAsync(socket, CancellationToken.None);
+                await SocketMessages.SendAsync(socket, new("remote-welcome", Data: Wire.Serialize(new { iceServers = Array.Empty<string>(), forceRelay = false, session = chosen })), CancellationToken.None);
+                await SocketMessages.SendAsync(socket, new("remote-online"), CancellationToken.None);
+                try { while (await SocketMessages.ReadAsync(socket, CancellationToken.None) is not null) { } } catch (Exception) { }
+            });
+            string? harvested;
+            await using (var fooled = await FakePhone.Connect($"http://localhost:{impostorPort}", pcId, phone.Id, phone.Secret))
+            {
+                await Until(() => fooled.Offer is not null, 5000);
+                harvested = fooled.Offer;
+            }
+            check(harvested is not null && Wire.Read<RemoteSignal>(harvested).Session == chosen, "a device at the PC's home address gets the phone's offer under the session id it chose");
+            await replayer.Send(new("signal", Data: harvested!));
+            check(!await live.Closed(2000), "that offer, sent through the room server, is refused: it is signed for the home network");
+            impostor.Stop();
+
+            // The other way round: an offer signed for the room server is refused on the home network, even under the
+            // session id that connection handed out.
+            await using var raw = await RawSocket.Open(port);
+            await raw.Send(new("remote-phone", Target: pcId, Number: 1));
+            var handed = JsonDocument.Parse((await raw.Next("remote-welcome"))!.Data!).RootElement.GetProperty("session").GetString()!;
+            var payload = Wire.Serialize(new RemoteSdp("offer", "v=0"));
+            await raw.Send(new("signal", Data: Wire.Serialize(new RemoteSignal(phone.Id, handed, "sdp", payload, PhoneRemoteProtocol.Sign(phone.Secret, PhoneRemoteProtocol.FromPhone, phone.Id, handed, "sdp", payload)))));
+            check(!await live.Closed(2000) && await raw.Next("signal", 1000) is null, "an offer signed for the room server is refused on the home network, under its handed-out session id too");
         }
         // After a restart the PC remembers no offers, and still knows a home-network one by its session id.
         using (var restarted = Host())
@@ -304,7 +339,7 @@ static class PhoneLanFixture
             // Signed by the phone, each under its connection's own session id, sent together.
             var payload = Wire.Serialize(new RemoteSdp("offer", "v=0"));
             await Task.WhenAll(sockets.Select(s => s.Socket.Send(new("signal",
-                Data: Wire.Serialize(new RemoteSignal(phone.Id, s.Session, "sdp", payload, PhoneRemoteProtocol.Sign(phone.Secret, "phone", phone.Id, s.Session, "sdp", payload)))))));
+                Data: Wire.Serialize(new RemoteSignal(phone.Id, s.Session, "sdp", payload, PhoneRemoteProtocol.Sign(phone.Secret, PhoneRemoteProtocol.FromPhoneLan, phone.Id, s.Session, "sdp", payload)))))));
             await Task.Delay(30);
             foreach (var (socket, _) in sockets) await socket.DisposeAsync();
         }

@@ -133,7 +133,7 @@ internal static class PhoneFirewall
             index = ipv4.Index;
         }
         catch (Exception ex) when (ex is NetworkInformationException or PlatformNotSupportedException) { return (0, null); }
-        foreach (var profile in Query(@"root\StandardCimv2", "SELECT InterfaceIndex, Name, NetworkCategory FROM MSFT_NetConnectionProfile"))
+        foreach (var profile in Query(@"root\StandardCimv2", "SELECT InterfaceIndex, Name, NetworkCategory FROM MSFT_NetConnectionProfile", "InterfaceIndex", "Name", "NetworkCategory"))
         {
             if (profile["InterfaceIndex"] is not IConvertible at || at.ToInt32(null) != index || profile["NetworkCategory"] is not IConvertible category) continue;
             return (category.ToInt32(null) switch { 1 => Private, 2 => Domain, _ => Public }, profile["Name"] as string);
@@ -143,11 +143,11 @@ internal static class PhoneFirewall
 
     // Firewalls other than Windows' own that Windows Security lists as on, such as an antivirus suite's.
     private static string[] OtherFirewalls() =>
-        Query(@"root\SecurityCenter2", "SELECT displayName, productState FROM FirewallProduct")
+        Query(@"root\SecurityCenter2", "SELECT displayName, productState FROM FirewallProduct", "displayName", "productState")
             .Where(p => p["displayName"] is string { Length: > 0 } && p["productState"] is IConvertible state && (state.ToInt64(null) >> 12 & 0xF) == 1)
             .Select(p => (string)p["displayName"]!).Distinct().ToArray();
 
-    private static List<Dictionary<string, object?>> Query(string space, string query)
+    private static List<Dictionary<string, object?>> Query(string space, string query, params string[] names)
     {
         var rows = new List<Dictionary<string, object?>>();
         try
@@ -161,12 +161,14 @@ internal static class PhoneFirewall
                 dynamic locator = Activator.CreateInstance(type)!; held.Add(locator);
                 dynamic service = locator.ConnectServer(".", space); held.Add(service);
                 dynamic results = service.ExecQuery(query); held.Add(results);
-                foreach (dynamic row in results)
+                // By index and by name rather than with foreach, whose enumerators are COM objects too.
+                int count = results.Count;
+                for (var i = 0; i < count; i++)
                 {
-                    held.Add(row);
-                    var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    dynamic row = results.ItemIndex(i); held.Add(row);
                     dynamic properties = row.Properties_; held.Add(properties);
-                    foreach (dynamic property in properties) { held.Add(property); values[(string)property.Name] = property.Value; }
+                    var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var name in names) { dynamic property = properties.Item(name); held.Add(property); values[name] = property.Value; }
                     rows.Add(values);
                 }
             }

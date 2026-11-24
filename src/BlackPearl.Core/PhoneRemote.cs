@@ -20,6 +20,10 @@ public static class PhoneRemoteProtocol
     public const string MediaLabel = "media-v1";
     public static readonly TimeSpan PairingLifetime = TimeSpan.FromMinutes(10);
     public static string PcId(string hostKey) => PersistentRooms.Hash(hostKey)[..32];
+    // The direction a signal is signed for (PHONE-REMOTE.md, "Signed signals"). Signals on the PC's home-network socket
+    // have their own, so a signal made for one path is never valid on the other: an offer a device at the PC's home
+    // address collected can't be used through the room server, nor one seen through the room server on the home network.
+    public const string FromPhone = "phone", FromPc = "pc", FromPhoneLan = "phone-lan", FromPcLan = "pc-lan";
     public static string NewHex(int bytes) => Convert.ToHexString(RandomNumberGenerator.GetBytes(bytes)).ToLowerInvariant();
     static byte[] Text(string direction, string phone, string session, string kind, string payload) =>
         Encoding.UTF8.GetBytes($"bp-remote-v1\n{direction}\n{phone}\n{session}\n{kind}\n{payload}");
@@ -490,7 +494,9 @@ public sealed class PhoneRemoteHost : IDisposable
 
     private void Signal(PhoneRemoteSession session, string kind, string payload)
     {
-        var auth = PhoneRemoteProtocol.Sign(session.Key, "pc", session.SignalAs, session.Session, kind, payload);
+        // A session opened on the home network signs there, and only there: its session id is refused through the room
+        // server (see HandleSignal).
+        var auth = PhoneRemoteProtocol.Sign(session.Key, session.ViaLan ? PhoneRemoteProtocol.FromPcLan : PhoneRemoteProtocol.FromPc, session.SignalAs, session.Session, kind, payload);
         Route(new("signal", Target: session.SignalingPeer,
             Data: Wire.Serialize(new RemoteSignal(session.SignalAs, session.Session, kind, payload, auth))));
     }
@@ -539,6 +545,8 @@ public sealed class PhoneRemoteHost : IDisposable
 
     private bool HandleSignalInTurn(string peer, RemoteSignal signal, string? handedOut)
     {
+        // Stopped: nothing would close a session opened now.
+        if (Volatile.Read(ref disposed) != 0) return false;
         // Missing fields arrive as null.
         if (signal.Phone is not { Length: > 0 and <= 64 } || signal.Kind is null || signal.Payload is not { Length: <= 60000 } || !PhoneRemoteProtocol.IsHex(signal.Session, 32)) return false;
         if (handedOut is not null && !string.Equals(signal.Session, handedOut, StringComparison.OrdinalIgnoreCase)) { Ignored(signal, "wrong-session"); return false; }
@@ -560,7 +568,7 @@ public sealed class PhoneRemoteHost : IDisposable
             if (signal.Kind == "sdp") Reject(peer, signal, signal.Phone == "pair" ? "pairing-expired" : "unknown-phone");
             return false;
         }
-        if (!PhoneRemoteProtocol.Verify(key, "phone", signal))
+        if (!PhoneRemoteProtocol.Verify(key, handedOut is null ? PhoneRemoteProtocol.FromPhone : PhoneRemoteProtocol.FromPhoneLan, signal))
         {
             Ignored(signal, "bad-signature");
             // An offer signed with a pairing code that isn't the current one (a newer code replaced it, or it was never
@@ -815,9 +823,11 @@ public sealed class PhoneRemoteHost : IDisposable
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         lifetime.Cancel();
         PhoneRemoteSession[] open;
-        lock (gate) { open = sessions.Values.ToArray(); sessions.Clear(); }
+        // The listener first, so no signal arrives on it after the sessions are closed; one already being handled
+        // finishes before the sessions are collected, as signals are handled one at a time.
+        lan?.Dispose();
+        lock (signalGate) lock (gate) { open = sessions.Values.ToArray(); sessions.Clear(); }
         if (running is not null) PlaybackDiagnostics.Record("remote-stop", new { sessions = open.Length });
         foreach (var session in open) Close(session, "stopped");
-        lan?.Dispose();
     }
 }

@@ -122,13 +122,14 @@ internal sealed class PhoneLanListener : IDisposable
     private TcpListener? TryListen(int port, out SocketError error)
     {
         error = SocketError.Success;
-        var bindings = options.LoopbackOnly ? new[] { IPAddress.Loopback } : Socket.OSSupportsIPv6 ? new[] { IPAddress.IPv6Any, IPAddress.Any } : new[] { IPAddress.Any };
+        // IPv4 only, as only IPv4 addresses are given to phones: on IPv6 one device has many addresses, and could use
+        // them to get round the cap on unproven connections from one address.
+        var bindings = options.LoopbackOnly ? new[] { IPAddress.Loopback } : new[] { IPAddress.Any };
         foreach (var address in bindings)
         {
             var candidate = new TcpListener(address, port);
             try
             {
-                if (address.Equals(IPAddress.IPv6Any)) candidate.Server.DualMode = true;
                 candidate.Start(16);
                 return candidate;
             }
