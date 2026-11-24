@@ -25,6 +25,23 @@ internal static class PhoneRemoteSettings
     public static string Server(LibraryStore library) => ServerSettings.Saved(library);
     public static string AppVersion => typeof(PhoneRemoteSettings).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
     public static string PcName => Environment.MachineName;
+
+    // The home-network listener (PHONE-REMOTE.md, "On the home network"). BLACKPEARL_PHONE_LAN=off leaves it out, and
+    // =loopback listens on this PC only, as development builds and the checks do: a build in a new folder listening on
+    // the network would raise Windows Firewall's prompt each time. The port used last comes first, so phones find it
+    // where they knew it; [sibling] says whether the other BlackPearl process of this library, which hands the port over
+    // as it ends, is still running.
+    public static string? LanMode => AppEnvironment.Get("PHONE_LAN")?.Trim().ToLowerInvariant();
+    public static PhoneLanOptions? Lan(LibraryStore library, Func<bool> sibling)
+    {
+        if (LanMode == "off") return null;
+        var saved = int.TryParse(library.Setting("phoneRemoteLanPort"), out var port) && port is >= PhoneRemoteProtocol.LanPort and < PhoneRemoteProtocol.LanPort + PhoneRemoteProtocol.LanPorts ? port : PhoneRemoteProtocol.LanPort;
+        return new PhoneLanOptions
+        {
+            LoopbackOnly = LanMode == "loopback", Port = saved, SiblingRunning = sibling,
+            PortChosen = chosen => { if (chosen != saved) library.Setting("phoneRemoteLanPort", chosen.ToString(System.Globalization.CultureInfo.InvariantCulture)); },
+        };
+    }
 }
 
 internal sealed class LibraryPhoneStore(LibraryStore library) : IPairedPhoneStore
@@ -58,6 +75,17 @@ internal static class PhoneHost
         {
             if (!Mutex.TryOpenExisting(@"Local\" + OpenFileHandoff.InstanceName, out var open)) return false;
             open.Dispose();
+            return true;
+        }
+    }
+
+    // Whether a phone host of this library is running (or waiting to): it holds its mutex for its whole life.
+    internal static bool Running
+    {
+        get
+        {
+            if (!Mutex.TryOpenExisting(@"Local\" + Name, out var host)) return false;
+            host.Dispose();
             return true;
         }
     }
@@ -151,7 +179,17 @@ internal sealed class PhoneHostProcess(LibraryStore library)
             Server = PhoneRemoteSettings.Server(library), HostKey = PhoneRemoteSettings.HostKey(library)!, PcName = PhoneRemoteSettings.PcName,
             Store = new LibraryPhoneStore(library), CanStart = PhoneRemoteSettings.PhonesCanStart(library), Features = PhoneLibrary.Features,
             AppVersion = PhoneRemoteSettings.AppVersion,
+            // The app hands the port over as it closes, before it starts this host.
+            Lan = PhoneRemoteSettings.Lan(library, () => PhoneHost.AppOpen),
         });
+        // What Windows Firewall decided, for the diagnostics log, once listening.
+        var firewallLogged = false;
+        link.Changed += () =>
+        {
+            if (firewallLogged || link.Lan is not { State: "listening", Port: { } port, LoopbackOnly: false }) return;
+            firewallLogged = true;
+            _ = Task.Run(() => PhoneFirewallLog.Check(port));
+        };
         phoneLibrary = new PhoneLibrary(library, () => remote, action => dispatcher.BeginInvoke(action), lifetime.Token)
         {
             Items = () => items,

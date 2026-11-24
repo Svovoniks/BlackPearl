@@ -28,6 +28,9 @@ param(
     # Let the dev build start its phone host when it closes (off by default). It never changes the sign-in entry for a
     # library other than the installed app's own folder.
     [switch]$PhoneHost,
+    # Let the dev build listen for phones on the home network (PHONE-REMOTE.md, "On the home network"). Off by default it
+    # listens on this PC only: a build in a new folder listening on the network raises a Windows Firewall prompt.
+    [switch]$PhoneLan,
     [switch]$Stop,
     [ValidateRange(5, 120)][int]$WaitSeconds = 30
 )
@@ -135,6 +138,7 @@ if (!$keyed) {
 $variables = @{ BLACKPEARL_DATA = $Data; BLACKPEARL_DISABLE_UPDATES = '1' }
 if (!$FollowSystem) { $variables.BLACKPEARL_FOLLOW_SYSTEM = 'off' }
 if (!$PhoneHost) { $variables.BLACKPEARL_PHONE_HOST = 'off' }
+if (!$PhoneLan) { $variables.BLACKPEARL_PHONE_LAN = 'loopback' }
 $saved = @{}
 foreach ($name in $variables.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $variables[$name]) }
 $started = Get-Date

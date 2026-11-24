@@ -61,6 +61,8 @@ public partial class MainWindow
         {
             Server = server, HostKey = hostKey, PcName = PcName, Store = new LibraryPhoneStore(library), CanStart = PhonesCanStart, Features = PhoneFeatures,
             AppVersion = typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
+            // The phone host hands the port over as it ends, once this window has taken the phones over.
+            Lan = PhoneRemoteSettings.Lan(library, () => PhoneHost.Running),
         });
         var remote = phoneRemote;
         remote.Changed += () => Dispatcher.BeginInvoke(() => { if (phoneRemote == remote) RenderPhoneRemote(); });
@@ -72,7 +74,7 @@ public partial class MainWindow
         AttachPhonePlayback(remote);
         AttachPhoneSound(remote);
         remote.Start();
-        phoneRemoteTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => { SyncPhoneSound(); PublishPhoneRemoteState(); }, Dispatcher);
+        phoneRemoteTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => { SyncPhoneSound(); PublishPhoneRemoteState(); RefreshPhoneFirewall(); }, Dispatcher);
         phoneRemoteTimer.Start();
         RenderPhoneRemote();
     }
@@ -84,8 +86,93 @@ public partial class MainWindow
         pairingWindow?.Close();
         if (phoneRemote is { } remote) { phoneRemote = null; remote.Dispose(); }
         ClosePhoneStreams();
-        phoneRemoteServer = null; phoneRemoteSentKey = null;
+        phoneRemoteServer = null; phoneRemoteSentKey = null; phoneFirewall = null;
         RenderPhoneRemote();
+    }
+
+    // What Windows Firewall decided about the home-network listener (PhoneFirewall.cs): read once it listens, for the log,
+    // then every ten seconds while Settings shows the phone remote, so allowing BlackPearl in Windows Security shows there
+    // soon after. Read off the UI thread; it takes a moment.
+    private PhoneFirewall.Status? phoneFirewall;
+    private long phoneFirewallAt = long.MinValue / 2;
+    private bool phoneFirewallReading;
+    private void RefreshPhoneFirewall(bool soon = false)
+    {
+        if (phoneRemote?.Lan is not { State: "listening", Port: { } port, LoopbackOnly: false } || phoneFirewallReading) return;
+        var showing = SettingsPage.Visibility == Visibility.Visible && preferenceSection == "Profile";
+        if (phoneFirewall is not null && !(showing && Environment.TickCount64 - phoneFirewallAt > (soon ? 2000 : 10000))) return;
+        phoneFirewallReading = true;
+        var remote = phoneRemote;
+        Task.Run(() => PhoneFirewallLog.Check(port)).ContinueWith(read => Dispatcher.BeginInvoke(() =>
+        {
+            phoneFirewallReading = false; phoneFirewallAt = Environment.TickCount64;
+            if (phoneRemote != remote) return;
+            // A read that failed counts as one that couldn't tell, so the next tick doesn't start another at once.
+            phoneFirewall = read.IsCompletedSuccessfully ? read.Result : new(PhoneFirewall.Verdict.Unknown, 0, null, []);
+            RenderPhoneRemote();
+        }), TaskScheduler.Default);
+    }
+
+    // Settings' lines about the home network: where phones reach this PC when the room server can't introduce them, and
+    // whether Windows Firewall lets them in. Nothing here says it works: only what the firewall decided, which is one
+    // of the things that can stop it.
+    internal FrameworkElement PhoneHomeNetwork(PhoneLanState lan, PhoneFirewall.Status? wall, string? address)
+    {
+        var panel = new StackPanel { Margin = new Thickness(0, 14, 0, 0) };
+        AutomationProperties.SetName(panel, "Home network");
+        var heading = new TextBlock { Text = "On your home network", FontSize = 13, FontWeight = FontWeights.SemiBold };
+        panel.Children.Add(heading);
+        var (said, showSettings) = PhoneHomeNetworkText(lan, wall, address);
+        var text = new TextBlock { Text = said, FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
+        text.SetResourceReference(TextBlock.ForegroundProperty, "Muted");
+        AutomationProperties.SetLiveSetting(text, AutomationLiveSetting.Polite);
+        panel.Children.Add(text);
+        if (showSettings)
+        {
+            // Windows' "Allow an app through firewall" page. Changing it there asks for an administrator.
+            var open = new Button { Content = "Firewall settings", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 10, 0, 0) };
+            open.Click += (_, _) =>
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("control.exe", "/name Microsoft.WindowsFirewall /page pageConfigureApps") { UseShellExecute = true })?.Dispose(); }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { SetStatus("Windows' firewall settings didn't open."); }
+            };
+            panel.Children.Add(open);
+        }
+        return panel;
+    }
+
+    // What the lines say, and whether they offer Firewall settings: for the listener's state, what Windows Firewall
+    // decided (null while it is read), and the address phones are given first.
+    internal static (string Text, bool ShowSettings) PhoneHomeNetworkText(PhoneLanState lan, PhoneFirewall.Status? wall, string? address)
+    {
+        if (lan.State == "busy")
+            return ($"Phones can't reach this PC directly on the home network: ports {PhoneRemoteProtocol.LanPort} to {PhoneRemoteProtocol.LanPort + PhoneRemoteProtocol.LanPorts - 1} are all in use by other programs. They still connect through the room server.", false);
+        if (lan.State == "waiting") return ("BlackPearl's phone access, which served phones while BlackPearl was closed, is handing the home network over to this window.", false);
+        if (lan.State != "listening") return ("Starting.", false);
+        if (lan.LoopbackOnly) return ($"This build listens for phones on this PC only, at port {lan.Port}, for testing.", false);
+        var lead = "When the room server can't introduce them, phones on your home network connect to this PC directly" + (address is null ? "." : $", at {address}.");
+        var network = wall?.Network is { Length: > 0 } name ? name : "this network";
+        var kind = wall?.ProfileType switch { PhoneFirewall.Public => "public", PhoneFirewall.Domain => "domain", _ => "private" };
+        var showSettings = false;
+        string verdict;
+        switch (wall?.Verdict)
+        {
+            case null: verdict = "Checking Windows Firewall."; break;
+            case PhoneFirewall.Verdict.Allowed: verdict = $"Windows Firewall lets BlackPearl in on {network}."; break;
+            case PhoneFirewall.Verdict.Off: verdict = $"Windows Firewall is off on {network}."; break;
+            case PhoneFirewall.Verdict.Undecided:
+                verdict = "Windows Firewall keeps BlackPearl out until you allow it: choose Allow when Windows asks, or tick BlackPearl in Firewall settings.";
+                showSettings = true; break;
+            case PhoneFirewall.Verdict.Blocked:
+                verdict = $"Windows Firewall blocks BlackPearl on {network}, so phones there only connect through the room server. To allow it, open Firewall settings, choose Change settings, and tick BlackPearl for {kind} networks.";
+                if (wall.PublicNetwork) verdict += $" Windows counts {network} as a public network; if it's your home network, set it to Private in Windows Settings › Network & internet first.";
+                showSettings = true; break;
+            default: verdict = "BlackPearl can't tell whether Windows Firewall lets phones in."; break;
+        }
+        var text = lead + " " + verdict;
+        if (wall?.OtherFirewalls is { Length: > 0 } others)
+            text += $" {string.Join(" and ", others)} {(others.Length == 1 ? "has" : "have")} a firewall of {(others.Length == 1 ? "its" : "their")} own, which may need to allow BlackPearl too.";
+        return (text, showSettings);
     }
 
     // Whether the video playing is one of the library's, rather than a file opened on its own. Remembered per video and
@@ -243,7 +330,9 @@ public partial class MainWindow
         var remote = phoneRemote;
         var phones = remote?.Phones ?? new LibraryPhoneStore(library).Load();
         var connected = remote?.Connected.Select(s => (s.PhoneId, s.Relayed)).ToArray() ?? [];
-        var key = Wire.Serialize(new { enabled = PhoneRemoteEnabled, canStart = PhonesCanStart, status = remote?.Status, ready = remote?.ServerReady, phones, connected, server = SavedServerAddress });
+        if (force) RefreshPhoneFirewall(soon: true);
+        var key = Wire.Serialize(new { enabled = PhoneRemoteEnabled, canStart = PhonesCanStart, status = remote?.Status, ready = remote?.ServerReady, phones, connected, server = SavedServerAddress,
+            lan = remote?.Lan, firewall = phoneFirewall is { } wall ? $"{wall.Verdict}|{wall.ProfileType}|{wall.Network}|{string.Join(",", wall.OtherFirewalls)}" : null });
         if (!force && key == phoneRemoteKey) return;
         phoneRemoteKey = key;
         PhoneRemoteContent.Content = PhoneRemotePanel(remote, phones, connected);
@@ -302,6 +391,7 @@ public partial class MainWindow
         AutomationProperties.SetLiveSetting(statusLine, AutomationLiveSetting.Polite);
         status.Children.Add(statusLine);
         main.Children.Add(status);
+        if (enabled && remote?.Lan is { } lan) main.Children.Add(PhoneHomeNetwork(lan, phoneFirewall, lan is { State: "listening", LoopbackOnly: false } ? PhoneRemoteProtocol.CachedLanAddresses().FirstOrDefault() : null));
 
         var list = Card("Paired phones");
         if (phones.Count == 0) list.Children.Add(Line("No phones yet. Choose Pair a phone and scan the code with BlackPearl Mobile."));

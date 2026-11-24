@@ -28,6 +28,11 @@ static class PhoneRemoteFixture
             "0123456789abcdef0123456789abcdef", "sdp", "{\"type\":\"offer\",\"sdp\":\"v=0\"}") == "AHCUPPyOcWPNmRtEBJ6D5PQUJwF9CV5-GHlhUpfTkX8", "phone remote signatures match the protocol's first test vector");
         check(PhoneRemoteProtocol.Sign("ffeeddccbbaa99887766554433221100", "pc", "pair", "0123456789abcdef0123456789abcdef", "ice",
             "{\"candidate\":\"candidate:1 1 UDP 2122317823 192.168.1.20 50000 typ host\",\"mid\":\"0\"}") == "bIGb4K6s3ztFQAOUL2Q3Oof397tsk3TiGq_W2ZB3I_I", "phone remote signatures match the protocol's second test vector");
+        check(PhoneRemoteProtocol.Sign("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", PhoneRemoteProtocol.FromPhoneLan, "a1b2c3d4e5f60718a1b2c3d4e5f60718",
+            "0011223344556677d1e4a9c03b5f7e28", "sdp", "{\"type\":\"offer\",\"sdp\":\"v=0\"}") == "GdkJyJCxBUGJpiHHL2urH73n_M2RuZIlVaNTYTYwyhU" &&
+            PhoneRemoteProtocol.Sign("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", PhoneRemoteProtocol.FromPcLan, "a1b2c3d4e5f60718a1b2c3d4e5f60718",
+            "0011223344556677d1e4a9c03b5f7e28", "sdp", "{\"type\":\"answer\",\"sdp\":\"v=0\"}") == "8PfaZ2C-qbq-HCuNntwQO9rtwXUkaGyZa_cDuwxK3EI",
+            "home-network signatures match the protocol's third and fourth test vectors");
         // A phone's progress saves as the PC's own playback does.
         check(PhoneProgress.From(754000, 6300000, false, false) == new PhoneProgress(754000, true, false), "a phone's progress saves its position and counts as played");
         check(PhoneProgress.From(5000, 6300000, false, false) == new PhoneProgress(5000, false, false), "a few seconds on the phone don't count as played");
@@ -42,8 +47,11 @@ static class PhoneRemoteFixture
         check(PhoneProgress.From(2516000, 2696000, false, false) == new PhoneProgress(2516000, true, false) &&
             PhoneProgress.From(2400000, 2696000, false, false, final: true) == new PhoneProgress(2400000, true, false) && !PhoneProgress.From(100, 0, false, false, final: true).Ended,
             "a pause in the credits, or leaving a video before its last tenth, keeps its resume point");
-        await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", async url => { await Exercise(url, check); await PhoneHostFixture.Run(url, directory, check); });
+        await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", async url => { await Exercise(url, check); await PhoneHostFixture.Run(url, directory, check); await PhoneLanFixture.Replays(url, check); });
         await OtherServers(check);
+        await PhoneLanFixture.Run(check);
+        await PhoneLanFixture.Concurrent(check);
+        await PhoneLanFixture.SenderGuard(check);
     }
 
     // Servers that aren't BlackPearl room servers with the phone remote: the PC keeps trying and says why.
