@@ -157,11 +157,14 @@ jobs:
         shell: pwsh
         env:
           BLACKPEARL_TMDB_API_KEY: ${{ secrets.BLACKPEARL_TMDB_API_KEY }}
+          # Crash reports (CrashReports.cs) go to this Sentry DSN. Without it the app works but sends none.
+          BLACKPEARL_DESKTOP_SENTRY_DSN: ${{ secrets.BLACKPEARL_DESKTOP_SENTRY_DSN }}
         run: |
           $keyFile = Join-Path $env:RUNNER_TEMP "blackpearl-tmdb-key.txt"
           if ([string]::IsNullOrWhiteSpace($env:BLACKPEARL_TMDB_API_KEY)) { throw "BLACKPEARL_TMDB_API_KEY repository secret is required for packaged builds." }
           [IO.File]::WriteAllText($keyFile, $env:BLACKPEARL_TMDB_API_KEY.Trim())
           $env:BLACKPEARL_TMDB_KEY_FILE = $keyFile
+          if ([string]::IsNullOrWhiteSpace($env:BLACKPEARL_DESKTOP_SENTRY_DSN)) { Write-Host "::warning::BLACKPEARL_DESKTOP_SENTRY_DSN is not set; this build sends no crash reports." }
           dotnet publish src/BlackPearl.Desktop -c Release -r win-x64 --self-contained true -o artifacts/BlackPearl -p:Version=$env:APP_VERSION -p:VlcWindowsX86Enabled=false -p:VlcWindowsArm64Enabled=false -p:PublishReadyToRun=true
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build installers

@@ -31,6 +31,7 @@ public partial class App : Application
         DispatcherUnhandledException += (_, args) =>
         {
             PlaybackDiagnostics.Record("ui-error", new { error = args.Exception.GetType().Name, stack = args.Exception.StackTrace });
+            CrashReports.CaptureUiError(args.Exception);
             File.AppendAllText(Path.Combine(DataDirectory, "errors.log"), DateTime.UtcNow + " " + args.Exception + Environment.NewLine);
             args.Handled = true;
             // One notice at a time: an error that repeats while the notice is open is only logged.

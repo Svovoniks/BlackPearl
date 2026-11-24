@@ -192,10 +192,10 @@ public partial class MainWindow : Window
         metadataRetentionTimer.Start();
         scanDelay.Tick += async (_, _) => { scanDelay.Stop(); if (!scanning) await Guard(() => Scan(fromWatcher: true)); };
         if (startupFile is not null) ShowStartupPlayer(startupFile);
-        PlaybackDiagnostics.Record("startup-stage", new { stage = "window" });
+        PlaybackDiagnostics.Record("startup-stage", new { stage = "window" }); CrashReports.StartupStage("window");
         Loaded += async (_, _) =>
         {
-            PlaybackDiagnostics.Record("startup-stage", new { stage = "loaded" });
+            PlaybackDiagnostics.Record("startup-stage", new { stage = "loaded" }); CrashReports.StartupStage("loaded");
             SetStatus("Loading library…"); ResultCount.Text = "Loading library…";
             EmptyLibrary.Visibility = Visibility.Collapsed;
             var roots = folders.ToArray(); var excluded = exclusions.ToArray();
@@ -207,7 +207,7 @@ public partial class MainWindow : Window
             {
                 var loaded = await catalog;
                 if (closing) return;
-                PlaybackDiagnostics.Record("startup-stage", new { stage = "library", items = loaded.Count });
+                PlaybackDiagnostics.Record("startup-stage", new { stage = "library", items = loaded.Count }); CrashReports.StartupStage("library");
                 // Restore the saved queue before refresh persists any queue edits.
                 items = loaded;
                 var byId = loaded.ToDictionary(item => item.Id);
@@ -308,8 +308,8 @@ public partial class MainWindow : Window
             player.Paused += (_, _) => phoneSoundClock.SetRunning(false);
             player.Stopped += (_, _) => phoneSoundClock.SetRunning(false);
             player.EndReached += (_, _) => phoneSoundClock.SetRunning(false);
-            player.Playing += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-playing", new { room = room is not null, targetPlaying = target?.Playing }); ready = true; firstPlayback.TrySetResult(); if (room is null && localResume > 0 && player is not null) { player.Time = localResume; localResume = 0; } RefreshTracks(); ReportReady(); if (playbackPause.Pending || target?.Playing == false) player?.SetPause(true); });
-            player.EncounteredError += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-error", new { state = player?.State.ToString() }); SetStatus(room?.IsPeerRecovering == true ? "Connection interrupted · Reconnecting…" : "Playback failed. Check that the file is available and the connection is active."); });
+            player.Playing += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-playing", new { room = room is not null, targetPlaying = target?.Playing }); CrashReports.PlaybackPlaying(); ready = true; firstPlayback.TrySetResult(); if (room is null && localResume > 0 && player is not null) { player.Time = localResume; localResume = 0; } RefreshTracks(); ReportReady(); if (playbackPause.Pending || target?.Playing == false) player?.SetPause(true); });
+            player.EncounteredError += (_, _) => Dispatcher.BeginInvoke(() => { if (closing || nativeStopCount > 0 || PlayerEmpty.Visibility == Visibility.Visible) return; PlaybackDiagnostics.Record("player-error", new { state = player?.State.ToString() }); CrashReports.PlaybackFailed(); SetStatus(room?.IsPeerRecovering == true ? "Connection interrupted · Reconnecting…" : "Playback failed. Check that the file is available and the connection is active."); });
             player.Buffering += (_, e) => Dispatcher.BeginInvoke(() =>
             {
                 if (closing) return;
@@ -1180,6 +1180,7 @@ public partial class MainWindow : Window
     {
         if (!await EnsurePlayer()) return;
         if (!File.Exists(item.Path)) throw new FileNotFoundException("Movie file is unavailable. Reconnect its drive and rescan.");
+        CrashReports.PlaybackOpening(Path.GetExtension(item.Path), "local");
         await Disconnect(preserveFullscreen: (fullscreen || pictureInPicture) && room is null); target = null; loadedMedia = null; playingItem = item;
         var generation = loadGeneration;
         localResume = !WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0;
@@ -1565,7 +1566,7 @@ public partial class MainWindow : Window
     }
     private async Task LoadRoomMedia(SharedMedia media)
     {
-        PlaybackDiagnostics.Record("media-load-start", new { media.Extension, bytes = media.Length });
+        PlaybackDiagnostics.Record("media-load-start", new { media.Extension, bytes = media.Length }); CrashReports.PlaybackOpening(media.Extension, "room");
         var client = room; if (client is null) return;
         var generation = ++loadGeneration; loadedMedia = media.Id;
         // Whoever plays the video plays its file; everyone else plays the converted stream when one is offered.
@@ -1630,7 +1631,7 @@ public partial class MainWindow : Window
             PlaybackDiagnostics.Record("media-play-request", new { started });
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
-        catch (Exception ex) { PlaybackDiagnostics.Record("media-load-failed", new { error = ex.GetType().Name, media.Extension }); if (generation == loadGeneration) loadedMedia = null; throw; }
+        catch (Exception ex) { PlaybackDiagnostics.Record("media-load-failed", new { error = ex.GetType().Name, media.Extension }); CrashReports.PlaybackFailed(); if (generation == loadGeneration) loadedMedia = null; throw; }
         finally { if (locked) loading.Release(); if (mediaLoadCancellation == cancellation) mediaLoadCancellation = null; }
     }
     private async Task PrepareVideoSurface(bool openPlayer = true)

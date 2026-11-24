@@ -111,6 +111,11 @@
         "resolved": "1.6.0",
         "contentHash": "XmPA81eo+oRxBuyVdswsSkTGTE1d3thfF11Z1PdD7oB56A6HU4G4AAOdySmGRMb/cljwlFTMWUtosGEnwpS6GA=="
       },
+      "Sentry": {
+        "type": "Transitive",
+        "resolved": "7.0.1",
+        "contentHash": "4hyExeUWArJdiO6VlmwCUHgWPosvasauNpgB6pVP7swuwyahWHRqgWHKwj3t5h18wFezIMte6BmI4dqEzl1TYw=="
+      },
       "SkiaSharp": {
         "type": "Transitive",
         "resolved": "2.88.9",
@@ -225,12 +230,13 @@
       "BlackPearl": {
         "type": "Project",
         "dependencies": {
-          "BlackPearl.Core": "[0.3.132, )",
+          "BlackPearl.Core": "[0.3.146, )",
           "LibVLCSharp.WPF": "[3.10.1, )",
           "Microsoft.ML.OnnxRuntime": "[1.31.1, )",
           "NAudio.Wasapi": "[3.3.0, )",
           "Panlingo.LanguageIdentification.CLD3": "[0.8.1, )",
           "QRCoder": "[1.6.0, )",
+          "Sentry": "[7.0.1, )",
           "TesseractOCR": "[5.5.2, )",
           "VideoLAN.LibVLC.Windows": "[3.0.23.1, )",
           "Whisper.net": "[1.9.1, )",

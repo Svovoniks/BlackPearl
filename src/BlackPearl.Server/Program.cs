@@ -14,6 +14,28 @@ using BlackPearl.Core;
 // streaming role, which keeps the room's playback state. Video, voice and controls never pass through here.
 // Apps from before that speak protocol 1, with a host who admits guests; ServeHosted still serves them.
 var builder = WebApplication.CreateBuilder(args);
+// Errors go to Sentry when the server sets BLACKPEARL_SENTRY_DSN; without it nothing is sent. Reports leave out
+// addresses, room names, display names and invitations: no request details, no breadcrumbs, and scrubbed error text.
+if (builder.Configuration[AppEnvironment.Prefix + "SENTRY_DSN"] is { Length: > 0 } sentryDsn)
+    builder.WebHost.UseSentry(options =>
+    {
+        options.Dsn = sentryDsn;
+        options.Release = "blackpearl-server@" + typeof(RoomProtocol).Assembly.GetName().Version?.ToString(3);
+        options.Environment = builder.Configuration[AppEnvironment.Prefix + "SENTRY_ENVIRONMENT"] ?? "production";
+        options.SendDefaultPii = false;
+        options.MaxRequestBodySize = Sentry.Extensibility.RequestSize.None;
+        options.MaxBreadcrumbs = 0;
+        options.TracesSampleRate = 0;
+        options.SetBeforeSend(evt =>
+        {
+            evt.User = new SentryUser(); evt.ServerName = null;
+            // The path says which endpoint failed; the host is the server's own domain.
+            evt.Request = new SentryRequest { Method = evt.Request.Method, Url = Uri.TryCreate(evt.Request.Url, UriKind.Absolute, out var url) ? url.AbsolutePath : null };
+            if (evt.Message is { } message) evt.Message = new SentryMessage { Formatted = ReportText.Scrub(message.Formatted ?? message.Message) };
+            foreach (var exception in evt.SentryExceptions ?? []) exception.Value = ReportText.Scrub(exception.Value);
+            return evt;
+        });
+    });
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
