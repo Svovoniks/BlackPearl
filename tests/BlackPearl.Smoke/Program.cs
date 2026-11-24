@@ -494,7 +494,7 @@ if (part != 2)
     ShuffleOrderFixture.Run(Check);
     OpenedFileFixture.Run(Check);
     await DiagnosticLogFixture.Run(Path.Combine(root, "diagnostic-log"), Check);
-await CrashReportFixture.Run(Check);
+    await CrashReportFixture.Run(Check);
     await RecoveryFixture.Run(Check);
     await MediaCacheFixture.Run(Check);
     await ReadAheadFixture.Run(Check);

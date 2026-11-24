@@ -1566,8 +1566,9 @@ public partial class MainWindow : Window
     }
     private async Task LoadRoomMedia(SharedMedia media)
     {
-        PlaybackDiagnostics.Record("media-load-start", new { media.Extension, bytes = media.Length }); var opening = CrashReports.PlaybackOpening(media.Extension, "room"); var requested = false;
+        PlaybackDiagnostics.Record("media-load-start", new { media.Extension, bytes = media.Length });
         var client = room; if (client is null) return;
+        var opening = CrashReports.PlaybackOpening(media.Extension, "room"); var requested = false;
         var generation = ++loadGeneration; loadedMedia = media.Id;
         // Whoever plays the video plays its file; everyone else plays the converted stream when one is offered.
         var converted = client.Identity?.Host != true && client.Snapshot?.Stream is { } offered && offered.MediaId == media.Id ? offered : null;
@@ -1631,7 +1632,7 @@ public partial class MainWindow : Window
             PlaybackDiagnostics.Record("media-play-request", new { started });
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
-        catch (Exception ex) { PlaybackDiagnostics.Record("media-load-failed", new { error = ex.GetType().Name, media.Extension }); CrashReports.PlaybackFailed(); if (generation == loadGeneration) loadedMedia = null; throw; }
+        catch (Exception ex) { PlaybackDiagnostics.Record("media-load-failed", new { error = ex.GetType().Name, media.Extension }); CrashReports.PlaybackFailed(opening); if (generation == loadGeneration) loadedMedia = null; throw; }
         finally { if (locked) loading.Release(); if (mediaLoadCancellation == cancellation) mediaLoadCancellation = null; if (!requested) CrashReports.PlaybackAbandoned(opening); }
     }
     private async Task PrepareVideoSurface(bool openPlayer = true)

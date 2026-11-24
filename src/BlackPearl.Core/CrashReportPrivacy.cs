@@ -30,7 +30,7 @@ public static class CrashReportPrivacy
         {
             exception.Value = ReportText.Scrub(exception.Value);
             if (exception.Mechanism is { } mechanism)
-                foreach (var key in mechanism.Data.Keys.ToArray()) mechanism.Data[key] = ReportText.Scrub(mechanism.Data[key]?.ToString());
+                foreach (var key in mechanism.Data.Keys.ToArray()) mechanism.Data[key] = ReportText.Scrub(mechanism.Data[key]?.ToString()) ?? "";
             foreach (var frame in exception.Stacktrace?.Frames ?? []) ScrubFrame(frame);
         }
         foreach (var thread in evt.SentryThreads ?? [])

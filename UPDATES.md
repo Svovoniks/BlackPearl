@@ -491,7 +491,8 @@ installations rely on keeps working:
   would stop redirecting the old name, and old links, clones and updaters that fall back to it
   would break. A clone made before the rename needs `git remote set-url origin
   https://github.com/Svovoniks/BlackPearl.git`; `ship.ps1` refuses the old remote. The workflow
-  reads the TMDB key only from the `BLACKPEARL_TMDB_API_KEY` Actions secret.
+  reads the TMDB key only from the `BLACKPEARL_TMDB_API_KEY` Actions secret, and the crash-report
+  DSN from `BLACKPEARL_DESKTOP_SENTRY_DSN` (optional: without it the build warns and sends no reports).
 
 To test: `dotnet run --project tests/BlackPearl.UpdateChecks -c Release`.
 For isolated desktop tests set `BLACKPEARL_DISABLE_UPDATES=1`; normal users do not

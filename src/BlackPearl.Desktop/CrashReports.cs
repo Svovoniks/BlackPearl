@@ -134,5 +134,10 @@ public static class CrashReports
         if (opening is ITransactionTracer transaction && Interlocked.CompareExchange(ref playback, null, transaction) == transaction) transaction.Finish(SpanStatus.Cancelled);
     }
     public static void PlaybackPlaying() => Interlocked.Exchange(ref playback, null)?.Finish(SpanStatus.Ok);
-    public static void PlaybackFailed() => Interlocked.Exchange(ref playback, null)?.Finish(SpanStatus.InternalError);
+    // The player's error ends whichever open is current; a failed load passes the open it started.
+    public static void PlaybackFailed(object? opening = null)
+    {
+        if (opening is null) Interlocked.Exchange(ref playback, null)?.Finish(SpanStatus.InternalError);
+        else if (opening is ITransactionTracer transaction && Interlocked.CompareExchange(ref playback, null, transaction) == transaction) transaction.Finish(SpanStatus.InternalError);
+    }
 }
