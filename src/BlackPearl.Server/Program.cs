@@ -519,7 +519,9 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
     public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null, false))) End(); }
     // Turns the app away with the reason, for its handler once nothing else reads the socket. As in Close, the reason is
     // the last thing sent and a proper close follows; this waits up to two seconds for the app to close its side, since
-    // the connection reset that follows cutting it can discard the reason before the app has read it.
+    // the connection reset that follows cutting it can discard the reason before the app has read it. A refused member
+    // who had entered leaves the room only after this, when the handler ends: one round trip later with BlackPearl,
+    // which closes as soon as it is told.
     public async Task RefuseAsync(string reason)
     {
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -125,6 +125,8 @@ static class RoomServerFixture
         using var server = Process.Start(start)!;
         var stdout = server.StandardOutput.ReadToEndAsync(); var stderr = server.StandardError.ReadToEndAsync();
         var welcomed = 0;
+        const int Refusals = 150;
+        var toldWhy = 0; var room = ""; var lastRefusal = "";
         try
         {
             using var http = new HttpClient();
@@ -142,6 +144,34 @@ static class RoomServerFixture
                 if (i % 2 == 0) { try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, default); } catch (Exception) { } }
                 else socket.Abort();
             }
+            // Someone turned away after entering is told why, and the connection then closes properly. Cutting it
+            // straight after the reason lost the reason for a few in a hundred, so many people are turned away here: a
+            // room an older app holds refuses newer apps once they have entered.
+            using (var older = new ClientWebSocket())
+            {
+                older.Options.SetRequestHeader("X-Forwarded-For", "198.51.100.200");
+                await older.ConnectAsync(new Uri(url.Replace("http", "ws") + "/room"), default);
+                await SocketMessages.SendAsync(older, new("create", Text: "Older app"), default);
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                    room = Wire.Read<Welcome>((await SocketMessages.ReadAsync(older, timeout.Token))!.Data!).Room;
+                for (var i = 0; i < Refusals; i++)
+                {
+                    using var socket = new ClientWebSocket();
+                    socket.Options.SetRequestHeader("X-Forwarded-For", $"203.0.113.{i + 1}");
+                    await socket.ConnectAsync(new Uri(url.Replace("http", "ws") + "/room"), default);
+                    await SocketMessages.SendAsync(socket, new("enter", Text: "Newer app", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, room))), default);
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    try
+                    {
+                        var reply = await SocketMessages.ReadAsync(socket, timeout.Token);
+                        if (reply is { Type: "error", Text.Length: > 0 } && await SocketMessages.ReadAsync(socket, timeout.Token) is null) toldWhy++;
+                        else lastRefusal = reply?.Type ?? "closed without a reason";
+                    }
+                    catch (Exception ex) { lastRefusal = ex.Message; }
+                    // Answering the close lets the server end the connection at once rather than waiting for it.
+                    try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, timeout.Token); } catch (Exception) { }
+                }
+            }
             await Task.Delay(1000);
         }
         finally
@@ -150,6 +180,8 @@ static class RoomServerFixture
             await server.WaitForExitAsync();
             await File.WriteAllTextAsync(Path.Combine(directory, "leaving-server.log"), await stdout + await stderr);
         }
+        check(toldWhy == Refusals, $"everyone turned away after entering gets the reason and then a proper close ({toldWhy} of {Refusals}" +
+            (lastRefusal == "" ? ")" : $"; last failure: {lastRefusal})"));
         var lines = (await stdout + await stderr).Split('\n').Select(line => line.Trim()).ToArray();
         var unobserved = Array.FindIndex(lines, line => line.Contains("Unobserved task exception", StringComparison.Ordinal));
         check(welcomed == 60 && unobserved < 0, $"members leaving end their connections without failed tasks nobody awaited ({welcomed} of 60 entered)" +
