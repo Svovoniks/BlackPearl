@@ -21,6 +21,8 @@ public partial class MainWindow
     {
         UpdateStatus.Text = $"Installed version {InstalledVersion}";
         AutoCheckUpdates.IsChecked = library.Setting("autoUpdates") != "false";
+        SendCrashReports.IsChecked = CrashReports.Available && CrashReports.Allowed;
+        if (!CrashReports.Available) { SendCrashReports.IsEnabled = false; CrashReportsHint.Text = "This build doesn't send crash reports."; }
         updateDirectory = UpdateLocation.InstallTarget(AppContext.BaseDirectory, RegisteredInstall(),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "BlackPearl"));
         if (updateDirectory is null)
@@ -39,6 +41,8 @@ public partial class MainWindow
     }
     private void AutoUpdatesChanged(object sender, RoutedEventArgs e)
     { if (library is not null) library.Setting("autoUpdates", AutoCheckUpdates.IsChecked == true ? "true" : "false"); }
+    private void CrashReportsChanged(object sender, RoutedEventArgs e)
+    { if (CrashReports.Available) CrashReports.SetAllowed(SendCrashReports.IsChecked == true); }
     private async void CheckUpdatesClick(object sender, RoutedEventArgs e) => await CheckAppUpdates(true);
     private async Task CheckAppUpdates(bool manual)
     {

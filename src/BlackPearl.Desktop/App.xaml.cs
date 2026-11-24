@@ -33,8 +33,9 @@ public partial class App : Application
             PlaybackDiagnostics.Record("ui-error", new { error = args.Exception.GetType().Name, stack = args.Exception.StackTrace });
             File.AppendAllText(Path.Combine(DataDirectory, "errors.log"), DateTime.UtcNow + " " + args.Exception + Environment.NewLine);
             args.Handled = true;
-            // One notice at a time: an error that repeats while the notice is open is only logged.
+            // One notice at a time: an error that repeats while the notice is open is only logged, and reported once.
             if (InAppDialog.Open.Any(dialog => dialog.Title == "Something went wrong")) return;
+            CrashReports.CaptureUiError(args.Exception);
             if (MainWindow is { IsLoaded: true } window) Dialogs.Alert(window, "Something went wrong", args.Exception.Message);
             else MessageBox.Show(args.Exception.Message, "BlackPearl", MessageBoxButton.OK, MessageBoxImage.Warning);
         };

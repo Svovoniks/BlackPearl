@@ -126,6 +126,11 @@ if (args.FirstOrDefault() == "--file-details")
     await LibraryPicturesFixture.Run(Path.GetFullPath("artifacts/library-pictures-" + Guid.NewGuid().ToString("N")), FileDetailsCheck); return;
 }
 
+if (args.FirstOrDefault() == "--crash-reports")
+{
+    await CrashReportFixture.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }); return;
+}
+
 if (args.FirstOrDefault() == "--track-languages")
 {
     TrackLanguageFixture.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); }); return;
@@ -489,6 +494,7 @@ if (part != 2)
     ShuffleOrderFixture.Run(Check);
     OpenedFileFixture.Run(Check);
     await DiagnosticLogFixture.Run(Path.Combine(root, "diagnostic-log"), Check);
+    await CrashReportFixture.Run(Check);
     await RecoveryFixture.Run(Check);
     await MediaCacheFixture.Run(Check);
     await ReadAheadFixture.Run(Check);

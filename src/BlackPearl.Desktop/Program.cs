@@ -44,9 +44,9 @@ public static class Program
             if (BackgroundFollow.Activate(link)) return;
             OpenDownloads = true;
         }
-        else if (args.Contains("--check-episodes")) { BackgroundFollow.Check(); return; }
+        else if (args.Contains("--check-episodes")) { using (CrashReports.Start("follow-check")) BackgroundFollow.Check(); return; }
         // Paired phones keep the library while BlackPearl is closed; this never becomes the running app either.
-        else if (args.Contains(PhoneHost.Argument)) { PhoneHost.Run(args.Contains(PhoneHost.SignInArgument)); return; }
+        else if (args.Contains(PhoneHost.Argument)) { using (CrashReports.Start("phone-host")) PhoneHost.Run(args.Contains(PhoneHost.SignInArgument)); return; }
         PlayMediaId = PlayId(args);
         OpenedFile = OpenDownloads ? null : OpenFileHandoff.FileArgument(args);
         Primary = OpenFileHandoff.Claim();
@@ -57,7 +57,8 @@ public static class Program
             if (OpenFileHandoff.Forward(handoff)) return;
             Primary = OpenFileHandoff.Claimed;
         }
-        Run();
+        // Reporting starts once this process knows it shows the window; one that hands its video over sends nothing.
+        using (CrashReports.Start("app")) { CrashReports.StartupBegan(); Run(); }
     }
     // Takes "--data-dir <folder>" out of the arguments and uses that data folder.
     internal static string[] DataArgument(string[] args)

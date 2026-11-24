@@ -14,6 +14,19 @@ using BlackPearl.Core;
 // streaming role, which keeps the room's playback state. Video, voice and controls never pass through here.
 // Apps from before that speak protocol 1, with a host who admits guests; ServeHosted still serves them.
 var builder = WebApplication.CreateBuilder(args);
+// Errors go to Sentry when the server sets BLACKPEARL_SENTRY_DSN; without it nothing is sent. CrashReportPrivacy (Core)
+// decides what reports leave out: addresses, request details beyond the path, breadcrumbs, and paths and ids in error text.
+if (builder.Configuration[AppEnvironment.Prefix + "SENTRY_DSN"] is { Length: > 0 } sentryDsn)
+    builder.WebHost.UseSentry(options =>
+    {
+        options.Dsn = sentryDsn;
+        options.Release = "blackpearl-server@" + typeof(RoomProtocol).Assembly.GetName().Version?.ToString(3);
+        options.Environment = builder.Configuration[AppEnvironment.Prefix + "SENTRY_ENVIRONMENT"] ?? "production";
+        CrashReportPrivacy.Apply(options);
+        options.MaxRequestBodySize = Sentry.Extensibility.RequestSize.None;
+        options.TracesSampleRate = 0;
+        options.SetBeforeSend(evt => CrashReportPrivacy.Scrub(evt));
+    });
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;

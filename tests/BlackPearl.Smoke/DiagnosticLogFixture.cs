@@ -27,6 +27,15 @@ static class DiagnosticLogFixture
             await log.FlushAsync().WaitAsync(TimeSpan.FromSeconds(5));
             check(true, "unwritable diagnostic directory cannot interrupt or hang playback");
         }
+        // Crash reports carry error text only after ReportText takes out what identifies people, their files and servers.
+        check(ReportText.Scrub(@"Could not find file 'C:\Users\Ann Lee\Videos\Night Show S01E02.mkv'.") == "Could not find file '<path>'.", "crash reports drop Windows file paths");
+        check(ReportText.Scrub(@"Access to the path '\\nas\media\Films\Heat (1995).mkv' is denied.") == "Access to the path '<path>' is denied.", "crash reports drop network share paths");
+        check(ReportText.Scrub("Failed /home/ann/films/x.mkv") == "Failed <path>", "crash reports drop Unix paths");
+        check(ReportText.Scrub("GET https://rooms.example.org/remote?key=abc failed") == "GET <url> failed", "crash reports drop web addresses with their queries");
+        check(ReportText.Scrub("No route to 192.168.1.20:5000 or fe80::1c2b:3a4d") == "No route to <address> or <address>", "crash reports drop network addresses");
+        check(ReportText.Scrub("Invitation 0123456789ABCDEF01234567 expired") == "Invitation <id> expired", "crash reports drop invitations and keys");
+        check(ReportText.Scrub("Index was outside the bounds of the array.") == "Index was outside the bounds of the array." && ReportText.Scrub("Took 12:34:56") == "Took 12:34:56",
+            "crash reports keep ordinary error text and times");
     }
     private static string[] ReadLines(string path)
     {
