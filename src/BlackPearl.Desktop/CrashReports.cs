@@ -91,6 +91,8 @@ public static class CrashReports
     public static bool FileNamesAllowed => File.Exists(Path.Combine(Data, FileNamesFile));
     public static void SetFileNamesAllowed(bool allowed)
     {
+        // Settings sets the switch to its saved value as it opens, which is no change.
+        if (allowed == FileNamesAllowed) return;
         var path = Path.Combine(Data, FileNamesFile);
         try
         {
@@ -126,6 +128,9 @@ public static class CrashReports
     // Settings › Updates & about › Send crash reports.
     public static void SetAllowed(bool allowed)
     {
+        // Settings sets the switch to its saved value at every start (SendCrashReports' Checked handler), which is no change:
+        // it must not touch what waits on disk.
+        if (allowed == Allowed && allowed == enabled) return;
         var path = Path.Combine(Data, OffFile);
         try
         {
@@ -134,12 +139,11 @@ public static class CrashReports
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         // Turned off, nothing more leaves (Gate), and reports still waiting for Sentry are deleted rather than sent later.
-        turnedOff = !allowed;
-        if (!allowed) { enabled = false; HookMetadata(false); lock (gate) { startup = playback = null; startupStage = null; } DeleteWaiting(); }
+        if (!allowed) { turnedOff = true; enabled = false; HookMetadata(false); lock (gate) { startup = playback = null; startupStage = null; } DeleteWaiting(); return; }
         // Back on: what still waits is from before turning them off (a report being retried could not be deleted then), so it
-        // goes first. The running SDK then resumes as it was started; otherwise it starts now.
-        else if (sdk is not null && startedAs is { } running) { DeleteWaiting(); Initialize(running.Dsn, running.Environment); }
-        else if (Available) Initialize(Source.Dsn!, AppEnvironment.Get("SENTRY_ENVIRONMENT") ?? (Source.FromEnvironment ? "development" : "production"));
+        // goes before the gate opens. The running SDK then resumes as it was started; otherwise it starts now.
+        if (sdk is not null && startedAs is { } running) { DeleteWaiting(); turnedOff = false; Initialize(running.Dsn, running.Environment); }
+        else { turnedOff = false; if (Available) Initialize(Source.Dsn!, AppEnvironment.Get("SENTRY_ENVIRONMENT") ?? (Source.FromEnvironment ? "development" : "production")); }
     }
 
     // A check's own reporting, into its own data folder (CrashReportCacheChecks).

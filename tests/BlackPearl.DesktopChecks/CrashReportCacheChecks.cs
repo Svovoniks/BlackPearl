@@ -79,8 +79,16 @@ static class CrashReportCacheChecks
                 // Sentry down: a report waits on disk, then goes out once Sentry is back.
                 SentrySdk.CaptureMessage("cache-check waits");
                 check(Until(() => Waiting() > 0, 15), "a report waits on disk while Sentry cannot be reached");
+                // Settings sets both switches to their saved values as it opens (reports on, file names off): no change. Several
+                // reports wait, since the one the SDK is retrying is locked and would survive a delete anyway.
+                SentrySdk.CaptureMessage("cache-check settings one"); SentrySdk.CaptureMessage("cache-check settings two");
+                Until(() => Waiting() >= 3, 15);
+                var before = Waiting();
+                CrashReports.SetAllowed(true); CrashReports.SetFileNamesAllowed(false);
+                check(before >= 3 && Waiting() == before, $"opening Settings with reports on keeps the reports waiting on disk ({before} before, {Waiting()} after)");
                 using (var sentry = new FakeSentry(port))
-                    check(Until(() => sentry.Received("cache-check waits"), 30), "a waiting report goes out once Sentry is reachable again");
+                    check(Until(() => sentry.Received("cache-check waits") && sentry.Received("cache-check settings one") && sentry.Received("cache-check settings two"), 30),
+                        "waiting reports go out once Sentry is reachable again");
 
                 // Sentry down, reports turned off: the waiting report is never sent, also once Sentry is back.
                 SentrySdk.CaptureMessage("cache-check turned off");
