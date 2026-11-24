@@ -118,6 +118,17 @@ static class CrashReportCacheChecks
                     check(!sentry.Received("cache-check names a file") && !sentry.Received("S01E01.mkv"), "with file names turned off, a waiting report that names a file is never sent");
                 }
             }
+            // Closing the process right after a report: what is queued is still sent, or stays on disk if the 500 ms
+            // shutdown runs out, but is never deleted unsent.
+            foreach (var file in Directory.EnumerateFiles(Path.Combine(data, "crash-reports-cache"), "*.envelope", SearchOption.AllDirectories)) File.Delete(file);
+            using (var sentry = new FakeSentry(port))
+            {
+                using (CrashReports.StartForCheck($"http://0123456789abcdef0123456789abcdef@127.0.0.1:{port}/1", data))
+                    SentrySdk.CaptureMessage("cache-check at exit");
+                var sent = Until(() => sentry.Received("cache-check at exit"), 3);
+                var kept = Waiting();
+                check(sent || kept > 0, $"a report queued when the process closes is sent or kept, never deleted unsent (sent {sent}, kept {kept})");
+            }
         }
         finally { try { Directory.Delete(data, true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { } }
     }

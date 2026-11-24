@@ -64,7 +64,7 @@ public static class CrashReports
             return await base.SendAsync(request, cancellationToken);
         }
         private static async Task<bool> Drops(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            !enabled || !FileNamesAllowed && request.Content is { } content && NamesFiles(await content.ReadAsStringAsync(cancellationToken));
+            turnedOff || !FileNamesAllowed && request.Content is { } content && NamesFiles(await content.ReadAsStringAsync(cancellationToken));
     }
     private static readonly object gate = new();
     private static IDisposable? sdk;
@@ -72,6 +72,8 @@ public static class CrashReports
     private static ITransactionTracer? startup, playback;
     private static ISpan? startupStage;
     private static volatile bool enabled;
+    // Set only by Settings (SetAllowed), never by the process ending: what is still queued at exit is still sent.
+    private static volatile bool turnedOff;
 
     private static readonly (string? Dsn, bool FromEnvironment) Source = FindDsn();
     private static (string?, bool) FindDsn()
@@ -132,6 +134,7 @@ public static class CrashReports
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         // Turned off, nothing more leaves (Gate), and reports still waiting for Sentry are deleted rather than sent later.
+        turnedOff = !allowed;
         if (!allowed) { enabled = false; HookMetadata(false); lock (gate) { startup = playback = null; startupStage = null; } DeleteWaiting(); }
         // Back on: what still waits is from before turning them off (a report being retried could not be deleted then), so it
         // goes first. The running SDK then resumes as it was started; otherwise it starts now.
@@ -142,7 +145,7 @@ public static class CrashReports
     // A check's own reporting, into its own data folder (CrashReportCacheChecks).
     internal static IDisposable StartForCheck(string dsn, string data)
     {
-        dataForCheck = data; process = "check";
+        dataForCheck = data; process = "check"; turnedOff = false;
         Initialize(dsn, "development");
         return new Finish();
     }
