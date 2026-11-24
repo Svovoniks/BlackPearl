@@ -369,7 +369,7 @@ app.Map("/room", async context =>
     }
     catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException or FormatException)
     {
-        if (connection is not null) { try { await connection.SendAndWaitAsync(new("error", Text: ex.Message)); } catch (Exception) { } }
+        if (connection is not null) await connection.RefuseAsync(ex.Message);
         else if (socket.State == WebSocketState.Open)
         {
             await SocketMessages.SendAsync(socket, new("error", Text: ex.Message), CancellationToken.None);
@@ -404,7 +404,7 @@ app.Map("/remote", async context =>
     }
     catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException or FormatException)
     {
-        if (connection is not null) { try { await connection.SendAndWaitAsync(new("error", Text: ex.Message)); } catch (Exception) { } }
+        if (connection is not null) await connection.RefuseAsync(ex.Message);
         else if (socket.State == WebSocketState.Open)
         {
             await SocketMessages.SendAsync(socket, new("error", Text: ex.Message), CancellationToken.None);
@@ -517,11 +517,20 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
     }
     private readonly Channel<(WireMessage Message, TaskCompletionSource? Sent, bool Last)> outgoing = Channel.CreateBounded<(WireMessage, TaskCompletionSource?, bool)>(128);
     public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null, false))) End(); }
-    public async Task SendAndWaitAsync(WireMessage message)
+    // Turns the app away with the reason, for its handler once nothing else reads the socket. As in Close, the reason is
+    // the last thing sent and a proper close follows; this waits up to two seconds for the app to close its side, since
+    // the connection reset that follows cutting it can discard the reason before the app has read it.
+    public async Task RefuseAsync(string reason)
     {
-        var sent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!outgoing.Writer.TryWrite((message, sent, false))) throw new IOException("Room send queue full");
-        await sent.Task.WaitAsync(TimeSpan.FromSeconds(2), lifetime.Token);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!outgoing.Writer.TryWrite((new("error", Text: reason), closed, true))) return;
+        try
+        {
+            using var waiting = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); waiting.CancelAfter(TimeSpan.FromSeconds(2));
+            await closed.Task.WaitAsync(waiting.Token);
+            while (await SocketMessages.ReadAsync(socket, waiting.Token) is not null) { }
+        }
+        catch (Exception) { }
     }
     // Tells the app why its connection ends, then ends it. The app does not come back on its own after this.
     // The reason is the last thing sent, followed by a proper close: cutting the connection straight after sending can
@@ -537,9 +546,10 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
         {
             await foreach (var msg in outgoing.Reader.ReadAllAsync(lifetime.Token))
             {
-                await SocketMessages.SendAsync(socket, msg.Message, lifetime.Token); msg.Sent?.TrySetResult();
-                if (!msg.Last) continue;
+                await SocketMessages.SendAsync(socket, msg.Message, lifetime.Token);
+                if (!msg.Last) { msg.Sent?.TrySetResult(); continue; }
                 await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, lifetime.Token);
+                msg.Sent?.TrySetResult();
                 return;
             }
         }

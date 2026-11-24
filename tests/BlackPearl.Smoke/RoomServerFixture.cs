@@ -151,7 +151,7 @@ static class RoomServerFixture
             await File.WriteAllTextAsync(Path.Combine(directory, "leaving-server.log"), await stdout + await stderr);
         }
         var lines = (await stdout + await stderr).Split('\n').Select(line => line.Trim()).ToArray();
-        var unobserved = Array.IndexOf(lines, "Unobserved task exception");
+        var unobserved = Array.FindIndex(lines, line => line.Contains("Unobserved task exception", StringComparison.Ordinal));
         check(welcomed == 60 && unobserved < 0, $"members leaving end their connections without failed tasks nobody awaited ({welcomed} of 60 entered)" +
             (unobserved < 0 ? "" : $" ({string.Join(" | ", lines.Skip(unobserved).Take(3))})"));
     }
