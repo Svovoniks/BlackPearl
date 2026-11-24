@@ -36,6 +36,15 @@ static class HomeLibraryFixture
         check(LibraryHome.Browse(items, playback, 7).First(entry => entry.Section == "continue").Card.Media.Id == "film", "the most recently played title leads continue watching");
         playback["played:a3"] = "3000";
         check(LibraryHome.Browse(items, playback, 7).First(entry => entry.Section == "continue").Card.Media.Series == "Started show", "any episode played later moves its show to the front");
+        // Shuffle: an earlier episode left part-way, then a later one played after it.
+        playback["position:a2"] = "86000"; playback["played:a2"] = "2500";
+        HomeLibraryCard ShowCard() => LibraryHome.Browse(items, playback, 7).Single(entry => entry.Section == "continue" && entry.Card.Media.Series is not null);
+        check(ShowCard() is { Card.Media.Id: "a3", PositionMs: 45000 }, "a show continues with the part-way episode played last, not the earliest one");
+        playback["played:a2"] = "4000";
+        check(ShowCard() is { Card.Media.Id: "a2", PositionMs: 86000 }, "going back to an earlier part-way episode makes it the show's card again");
+        playback.Remove("played:a2"); playback.Remove("played:a3");
+        check(ShowCard().Card.Media.Id == "a2", "part-way episodes with no play time keep episode order");
+        playback.Remove("position:a2"); playback["played:a3"] = "3000";
         var overview = LibraryHome.Overview(items, playback, 7);
         check(overview.Unseen.Select(title => title.Card.Media.Id).Order().SequenceEqual(["anime", "fresh", "new"]), "Home reports every unstarted title for filters and counts");
         var mysteryIds = Enumerable.Range(0, 100).Select(seed => LibraryHome.Browse(items, playback, seed).Single(entry => entry.Section == "mystery").Card.Media.Id).ToHashSet();
