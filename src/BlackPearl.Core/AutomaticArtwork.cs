@@ -27,6 +27,7 @@ public static class AutomaticArtwork
         if (relocalize) mode = MetadataRefresh.RefreshText;
         var followRefresh = relocalize ? MetadataRefresh.RefreshText : refresh;
         PlaybackDiagnostics.Record("metadata-fetch-start", new { Mode = mode.ToString(), Providers = options.ProviderOrder, TmdbAvailable = tmdb is not null });
+        MetadataReports.UseFolders(library); using var reporting = MetadataReports.Begin(ct); var started = System.Diagnostics.Stopwatch.StartNew(); int lookedUp = 0, matched = 0, unmatched = 0, incomplete = 0; var unmatchedReasons = new Dictionary<string, int>();
         // Music keeps the names and artwork of its own files; film and show providers know nothing of albums.
         var catalog = library.All().Where(x => !x.IsMusic).ToList(); var localChanged = false;
         foreach (var entry in catalog.Where(x => mode != MetadataRefresh.RetryArtwork && x.Available && !x.IsVirtual && !x.IsExtra && !x.IsBonus))
@@ -116,7 +117,7 @@ public static class AutomaticArtwork
             var item = entries[0]; progress?.Report("Finding metadata · " + item.DisplayTitle);
             using var context = MetadataDiagnostics.BeginItem("title", item);
             MetadataDiagnostics.Record("metadata-title-start", new { Queries = MetadataTitles.Queries(item).ToArray(), needsOverview, needsPoster, needsClassification });
-            var attemptFailed = false; var attemptUnmatched = false; var imageFailed = false;
+            var attemptFailed = false; var attemptUnmatched = false; var imageFailed = false; lookedUp++;
             try
             {
                 string? poster = null, source = null, overview = null;
@@ -128,6 +129,7 @@ public static class AutomaticArtwork
                     recheck ? entries.Select(TmdbRetention.Revert).ToArray() : entries, MetadataRejections.For(library, item), known.For(lookup),
                     recheck ? (item.MetadataType ?? (item.Series is null ? "movie" : "tv"), item.MetadataId!.Value) : null);
                 attemptUnmatched = resolved is null;
+                if (resolved is null) { unmatched++; var reason = MetadataDiagnostics.MatchOutcome ?? "no-confident-match"; unmatchedReasons[reason] = unmatchedReasons.GetValueOrDefault(reason) + 1; } else matched++;
                 var currentEntries = library.ByIds(ids).ToDictionary(x => x.Id);
                 if (entries.Any(x => !currentEntries.TryGetValue(x.Id, out var current) || !SameFetchIdentity(x, current)))
                 {
@@ -209,7 +211,7 @@ public static class AutomaticArtwork
                 }
                 if (needsPoster && poster is null || needsOverview && string.IsNullOrWhiteSpace(overview))
                 {
-                    missing++;
+                    missing++; if (resolved is not null) incomplete++;
                     var issue = new { Title = item.DisplayTitle, Code = resolved is null ? MetadataDiagnostics.MatchOutcome ?? "no-confident-match" : "provider-missing-fields",
                         PosterMissing = needsPoster && poster is null, OverviewMissing = needsOverview && string.IsNullOrWhiteSpace(overview) };
                     issues.Add(issue); MetadataDiagnostics.Record("metadata-title-incomplete", issue);
@@ -253,6 +255,12 @@ public static class AutomaticArtwork
         await File.WriteAllTextAsync(Path.Combine(directory, "metadata-fetch-report.json"), Wire.Serialize(new { FetchedAt = Wire.Now,
             TmdbAvailable = tmdb is not null, Providers = options.ProviderOrder, Summary = summary, DeferredTitles = deferred, Issues = unresolved, CurrentIssues = issues }), ct);
         PlaybackDiagnostics.Record("metadata-fetch-complete", new { Summary = summary });
+        MetadataReports.Run(reporting, () =>
+        {
+            var (libraryTitles, libraryUnmatched) = MetadataReports.Library(library.All(), unresolved);
+            return new MetadataRun(mode.ToString(), tmdb is not null, string.Join(",", options.ProviderOrder), started.Elapsed, !superseded, lookedUp, matched, unmatched,
+                incomplete, failed, artworkFailed, deferred, libraryTitles, unmatchedReasons, libraryUnmatched);
+        });
         return summary + (tmdb is null && options.ProviderOrder.Contains("tmdb") ? " TMDB is unavailable without a token; movie coverage is limited to Wikipedia." : "");
     }
     internal static bool Relocalizes(LibraryStore library, MetadataOptions options, bool tmdbAvailable) =>

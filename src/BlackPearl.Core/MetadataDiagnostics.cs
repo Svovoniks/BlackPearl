@@ -4,14 +4,14 @@ namespace BlackPearl.Core;
 
 internal static class MetadataDiagnostics
 {
-    private sealed record Context(string Stage, string MediaId, string Title, int? Season, int? Episode) { internal string? Outcome { get; set; } }
+    private sealed record Context(string Stage, string MediaId, string Title, int? Season, int? Episode, [property: System.Text.Json.Serialization.JsonIgnore] string? Path) { internal string? Outcome { get; set; } }
     private static readonly AsyncLocal<Context?> current = new();
     internal static string? MatchOutcome => current.Value?.Outcome;
     internal static void Outcome(string value) { if (current.Value is { } context && (context.Outcome != "ambiguous-candidates" || value == "matched")) context.Outcome = value; }
     internal static IDisposable BeginItem(string stage, MediaItem item)
     {
         var previous = current.Value;
-        current.Value = new(stage, item.Id, item.DisplayTitle, item.Season, item.Episode);
+        current.Value = new(stage, item.Id, item.DisplayTitle, item.Season, item.Episode, item.Path);
         return new Scope(() => current.Value = previous);
     }
     private sealed class Scope(Action close) : IDisposable { public void Dispose() => close(); }
@@ -32,6 +32,9 @@ internal static class MetadataDiagnostics
         Inner = ex.InnerException is null ? null : Error(ex.InnerException)
     };
 
-    internal static void Failure(string stage, string? title, string? provider, Exception ex) =>
+    internal static void Failure(string stage, string? title, string? provider, Exception ex)
+    {
         Record("metadata-failure", new { Stage = stage, Title = title, Provider = provider, Error = Error(ex) });
+        MetadataReports.Failure(stage, provider, ex, current.Value?.Path);
+    }
 }

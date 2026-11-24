@@ -16,7 +16,7 @@ namespace BlackPearl.Desktop;
 // Program.Main starts this before any WPF type loads; nothing here may touch WPF.
 public static class CrashReports
 {
-    private const string OffFile = "crash-reports-off";
+    private const string OffFile = "crash-reports-off", FileNamesFile = "crash-reports-file-names";
     private static readonly object gate = new();
     private static IDisposable? sdk;
     private static string process = "app";
@@ -36,6 +36,18 @@ public static class CrashReports
     // The person's choice, stored beside the library; reports are on unless they turned them off.
     public static bool Allowed => !File.Exists(Path.Combine(Program.DataDirectory, OffFile));
     public static bool Enabled => enabled;
+    // Settings › Updates & about › Include names of files that weren't identified: off unless turned on, and only with reports on.
+    public static bool FileNamesAllowed => File.Exists(Path.Combine(Program.DataDirectory, FileNamesFile));
+    public static void SetFileNamesAllowed(bool allowed)
+    {
+        var path = Path.Combine(Program.DataDirectory, FileNamesFile);
+        try
+        {
+            if (!allowed) { File.Delete(path); File.Delete(Path.Combine(Program.DataDirectory, UnmatchedSentFile)); }
+            else { Directory.CreateDirectory(Program.DataDirectory); File.WriteAllText(path, "Crash reports include the names of files that weren't identified (Settings › Updates & about)."); }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
 
     // Starts reporting for this process (app, phone-host or follow-check). Disposing it sends what is still queued.
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -65,7 +77,7 @@ public static class CrashReports
             else { Directory.CreateDirectory(Program.DataDirectory); File.WriteAllText(path, "Crash reports are turned off in Settings › Updates & about."); }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-        if (!allowed) { enabled = false; lock (gate) { startup = playback = null; startupStage = null; } }
+        if (!allowed) { enabled = false; HookMetadata(false); lock (gate) { startup = playback = null; startupStage = null; } }
         else if (Available) Initialize(Source.Dsn!, AppEnvironment.Get("SENTRY_ENVIRONMENT") ?? (Source.FromEnvironment ? "development" : "production"));
     }
 
@@ -74,7 +86,7 @@ public static class CrashReports
         lock (gate)
         {
             enabled = true;
-            if (sdk is not null) return;
+            if (sdk is not null) { HookMetadata(true); return; }
             var version = typeof(CrashReports).Assembly.GetName().Version;
             sdk = SentrySdk.Init(options =>
             {
@@ -85,10 +97,13 @@ public static class CrashReports
                 CrashReportPrivacy.Apply(options);
                 // Every trace while developing; a tenth of them from people's apps.
                 options.TracesSampleRate = environment == "production" ? 0.1 : 1.0;
+                // Every metadata run, so the share of titles left unmatched can be followed; others use the rate above.
+                options.TracesSampler = context => context.TransactionContext.Name == MetadataRunName ? 1.0 : null;
                 options.SetBeforeSend(evt => enabled ? CrashReportPrivacy.Scrub(evt) : null);
                 options.SetBeforeSendTransaction(transaction => enabled ? CrashReportPrivacy.Scrub(transaction) : null);
             });
             SentrySdk.ConfigureScope(scope => scope.SetTag("process", process));
+            HookMetadata(true);
         }
     }
 
@@ -139,5 +154,81 @@ public static class CrashReports
     {
         if (opening is null) Interlocked.Exchange(ref playback, null)?.Finish(SpanStatus.InternalError);
         else if (opening is ITransactionTracer transaction && Interlocked.CompareExchange(ref playback, null, transaction) == transaction) transaction.Finish(SpanStatus.InternalError);
+    }
+
+    // Metadata: provider failures as warnings, and one trace per run with what it looked up and how many titles stayed unmatched.
+    private const string MetadataRunName = "metadata.refresh";
+    private static readonly Dictionary<string, DateTime> metadataFailures = [];
+    private const string UnmatchedSentFile = "crash-reports-unmatched-sent";
+    private static DateTime idleRunSent;
+
+    // Metadata reports reach Sentry only while crash reports are on; off, the run summary is not even built.
+    private static void HookMetadata(bool on)
+    {
+        MetadataReports.Starting = on ? () => enabled ? SentrySdk.StartTransaction(MetadataRunName, "metadata") : null : null;
+        MetadataReports.Abandoned = on ? (trace, failed) => (trace as ITransactionTracer)?.Finish(failed ? SpanStatus.InternalError : SpanStatus.Cancelled) : null;
+        MetadataReports.Failures = on ? MetadataFailed : null;
+        MetadataReports.Runs = on ? MetadataRunEnded : null;
+    }
+
+    // One report per kind of failure an hour: a provider that is down fails every title, and one report says so.
+    private static void MetadataFailed(MetadataFailure failure)
+    {
+        if (!enabled) return;
+        var error = failure.Error;
+        var status = error is System.Net.Http.HttpRequestException { StatusCode: { } code } ? ((int)code).ToString() : null;
+        var provider = failure.Provider ?? "unknown";
+        string[] fingerprint = ["metadata-failure", failure.Stage, provider, error.GetType().FullName ?? "", status ?? ""];
+        lock (metadataFailures)
+        {
+            var key = string.Join("|", fingerprint);
+            if (metadataFailures.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromHours(1)) return;
+            metadataFailures[key] = DateTime.UtcNow;
+        }
+        SentrySdk.CaptureException(error, scope =>
+        {
+            scope.Level = SentryLevel.Warning;
+            scope.SetTag("metadata.stage", failure.Stage);
+            scope.SetTag("metadata.provider", provider);
+            if (status is not null) scope.SetTag("http.status", status);
+            scope.SetFingerprint(fingerprint);
+            if (FileNamesAllowed && failure.File is { } file) scope.SetExtra("file", file);
+        });
+    }
+
+    private static void MetadataRunEnded(MetadataRun run)
+    {
+        if (!enabled) return;
+        // A run that looked nothing up and nothing failed (most startup and folder-watcher runs) is sent once every six hours,
+        // which keeps the library's counts current without a trace for each.
+        var idle = run.LookedUp == 0 && run.ProviderFailures == 0 && run.ArtworkFailures == 0;
+        if (idle && DateTime.UtcNow - idleRunSent < TimeSpan.FromHours(6)) return;
+        if (idle) idleRunSent = DateTime.UtcNow;
+        if (run.Trace is ITransactionTracer trace)
+        {
+            trace.SetTag("metadata.mode", run.Mode);
+            trace.SetTag("metadata.providers", run.Providers);
+            trace.SetTag("metadata.tmdb", run.TmdbAvailable ? "yes" : "no");
+            foreach (var (name, value) in run.Measurements) trace.SetMeasurement(name, value);
+            // Sentry keeps ten measurements at most, so the counts per reason go as span data.
+            foreach (var (reason, count) in run.UnmatchedReasons) trace.SetData("unmatched." + Regex.Replace(reason.ToLowerInvariant(), "[^a-z0-9]+", "_"), count);
+            trace.Finish(run.Completed ? SpanStatus.Ok : SpanStatus.Aborted);
+        }
+        // With file names allowed: the library's unmatched titles, after a run that looked something up, when the list changed.
+        if (!FileNamesAllowed || run.LookedUp == 0 || run.LibraryUnmatched.Count == 0) return;
+        var list = string.Join("\n", run.LibraryUnmatched.Select(x => $"{x.Reason}\t{x.Files}\t{x.File}"));
+        // The same list is sent once, also across launches; only a hash of it is kept beside the library.
+        var sentPath = Path.Combine(Program.DataDirectory, UnmatchedSentFile);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(list)));
+        try { if (File.Exists(sentPath) && File.ReadAllText(sentPath).Trim() == hash) return; File.WriteAllText(sentPath, hash); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        var text = $"{run.LibraryUnmatched.Count} of {run.LibraryTitles} titles unmatched\nreason\tfiles\tfirst file\n{list}\n";
+        SentrySdk.CaptureMessage("Unmatched files in the library", scope =>
+        {
+            scope.SetFingerprint(["metadata-unmatched-files"]);
+            scope.SetTag("metadata.library_unmatched", run.LibraryUnmatched.Count.ToString());
+            scope.SetExtra("unmatched", string.Join("\n", run.LibraryUnmatched.Take(100).Select(x => $"{x.Reason}  {x.File}")));
+            scope.AddAttachment(System.Text.Encoding.UTF8.GetBytes(text), "unmatched-files.txt", AttachmentType.Default, "text/plain");
+        }, SentryLevel.Info);
     }
 }
