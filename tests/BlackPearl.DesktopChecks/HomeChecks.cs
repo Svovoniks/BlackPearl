@@ -261,6 +261,41 @@ static class HomeChecks
             Call("RefreshSharedLibrary");
             await Until(() => Continuing().Length == 2);
             Check(System.Windows.Automation.AutomationProperties.GetName(Control<ScrollViewer>("HomePage")) == "Home", "leaving a room restores local Home content");
+
+            // A phone's progress (PhonePlayback.cs, PhoneProgressSaved). Home put the phone's title first only once the phone
+            // left it, which a phone left paused never does; and then once per title, so a title the PC played in between
+            // stayed first while the phone went on watching.
+            async Task<bool> Within(Func<bool> condition)
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                while (!condition() && DateTime.UtcNow < deadline) await Task.Delay(20);
+                return condition();
+            }
+            string? Leading() => Field<LibraryCardView?>("homeHero")?.Card.Media.Id;
+            void PhoneSaved(string id, long at, long playedAt)
+            {
+                // What PhoneLibrary.SaveProgress writes before it reports a report that isn't the viewing's last.
+                store.SetSettings([KeyValuePair.Create("position:" + id, at.ToString()), KeyValuePair.Create("played:" + id, playedAt.ToString())]);
+                Call("PhoneProgressSaved", items.Single(item => item.Id == id), new PhoneProgress(at, true, false), false);
+            }
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            PhoneSaved("home-new0", 60000, now);
+            Check(await Within(() => Leading() == "home-new0"), "a phone's progress puts its title first on Home without waiting for the phone to leave it");
+            store.Setting("played:home-movie", (now + 1000).ToString());
+            Call("RefreshHome");
+            Check(await Within(() => Leading() == "home-movie"), "a title played on the PC afterwards leads Home");
+            PhoneSaved("home-new0", 70000, now + 2000);
+            Check(await Within(() => Leading() == "home-new0"), "the phone's next report puts its title first again once Home was built for something else");
+            var generation = Field<long>("homeGeneration");
+            PhoneSaved("home-new1", 30000, now - 5000);
+            var once = Field<long>("homeGeneration");
+            PhoneSaved("home-new1", 40000, now - 4000);
+            PhoneSaved("home-new0", 80000, now + 3000);
+            await Task.Delay(200);
+            Check(once == generation + 1 && Field<long>("homeGeneration") == once && Leading() == "home-new0",
+                $"a second phone's title that doesn't lead Home refreshes it once, not on every report ({generation} → {once} → {Field<long>("homeGeneration")})");
+            store.SetSettings(new[] { "home-new0", "home-new1" }.SelectMany(id => new[] { KeyValuePair.Create("position:" + id, "0"), KeyValuePair.Create("played:" + id, "0") })
+                .Append(KeyValuePair.Create("played:home-movie", "0")));
         }
         finally { window.Close(); }
     }

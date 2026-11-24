@@ -1207,8 +1207,9 @@ public partial class MainWindow : Window
         var position = (view.IsEpisode || view.IsMovie) && long.TryParse(library.Setting("position:" + view.Card.Media.Id), out var saved) ? saved : 0;
         view.SetPlayback(position, LibraryWatchProgress.IsWatched(items, view.Card, WasWatched, _ => position));
     }
-    // The place last saved by SavePlaybackPosition: a video that hasn't moved since is not saved again.
-    private (string Id, long Time)? lastSavedPlayback;
+    // The place last saved by SavePlaybackPosition, with whether the video was marked watched then: a video that hasn't
+    // moved or been marked since is not saved again.
+    private (string Id, long Time, bool Watched)? lastSavedPlayback;
     // handingOver: the streaming role just left this app, and its own video is still in the player.
     private void SavePlaybackPosition(bool handingOver = false)
     {
@@ -1218,13 +1219,16 @@ public partial class MainWindow : Window
             var time = player.Time; var length = player.Length;
             // A paused or finished video is saved once, not every few seconds. Saved again, its old place replaced the
             // progress a phone saved since on the same video, and its "played" time, renewed each time, kept it first in
-            // Continue watching ahead of what the phone had just watched.
-            if (lastSavedPlayback == (playingItem.Id, time)) return;
-            lastSavedPlayback = (playingItem.Id, time);
-            var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + playingItem.Id, WasWatched(playingItem.Id) || length > 0 && time >= length - 2000 ? "0" : Math.Max(0, time).ToString()) };
+            // Continue watching ahead of what the phone had just watched. Marking it watched, or unwatched again, saves it
+            // once more, so an undone mark gets its place back.
+            var watched = WasWatched(playingItem.Id);
+            if (lastSavedPlayback == (playingItem.Id, time, watched)) return;
+            var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + playingItem.Id, watched || length > 0 && time >= length - 2000 ? "0" : Math.Max(0, time).ToString()) };
             // Home orders unfinished titles by when they were last played.
             if (time >= 10000) saved.Add(KeyValuePair.Create("played:" + playingItem.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString()));
             library.SetSettings(saved);
+            // Only once written: a save that failed is tried again.
+            lastSavedPlayback = (playingItem.Id, time, watched);
             foreach (var card in libraryCards.Where(x => x.Card.Media.Id == playingItem.Id)) UpdateCardPlayback(card);
             // A film card showing another copy now leads with this one, the copy played last, unless a version was chosen
             // for the film. Positions save every few seconds, so this refreshes the library once, when the copy changes.
