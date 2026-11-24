@@ -106,7 +106,86 @@ static class RoomServerFixture
             await server.WaitForExitAsync();
             await File.WriteAllTextAsync(Path.Combine(directory, "server.log"), await stdout + await stderr);
         }
+        await ConnectionsEndCleanly(sdk, serverDll, directory, check);
         await CloudflareRelay(sdk, serverDll, directory, check);
+    }
+
+    // Members leaving must not leave failed tasks behind: on the live server each one was an error report. A server of
+    // its own collects garbage often, since a task that failed with nobody awaiting it is only reported once collected;
+    // the other checks keep their timing on a server that runs normally.
+    private static async Task ConnectionsEndCleanly(string sdk, string serverDll, string directory, Action<bool, string> check)
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+        var url = "http://localhost:" + ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop();
+        var start = new ProcessStartInfo(sdk) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        start.Environment["BLACKPEARL_DATA"] = Path.Combine(directory, "leaving-server");
+        // A 256 KB first generation; the value is hex.
+        start.Environment["DOTNET_GCgen0MaxBudget"] = "40000";
+        start.ArgumentList.Add(serverDll); start.ArgumentList.Add("--urls"); start.ArgumentList.Add(url);
+        using var server = Process.Start(start)!;
+        var stdout = server.StandardOutput.ReadToEndAsync(); var stderr = server.StandardError.ReadToEndAsync();
+        var welcomed = 0;
+        const int Refusals = 150;
+        var toldWhy = 0; var room = ""; var lastRefusal = "";
+        try
+        {
+            using var http = new HttpClient();
+            for (var i = 0; i < 100; i++) { try { if ((await http.GetAsync(url + "/health")).IsSuccessStatusCode) break; } catch (HttpRequestException) { } await Task.Delay(200); }
+            // Members enter and leave, some closing properly and some dropping. Each comes from its own address, as
+            // the loopback proxy reports it, so the per-address request limit doesn't turn them away.
+            for (var i = 0; i < 60; i++)
+            {
+                using var socket = new ClientWebSocket();
+                socket.Options.SetRequestHeader("X-Forwarded-For", $"198.51.100.{i + 1}");
+                await socket.ConnectAsync(new Uri(url.Replace("http", "ws") + "/room"), default);
+                await SocketMessages.SendAsync(socket, new("enter", Text: "Leaving", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, Temporary: true))), default);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                if (await SocketMessages.ReadAsync(socket, timeout.Token) is { Type: "welcome" }) welcomed++;
+                if (i % 2 == 0) { try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, default); } catch (Exception) { } }
+                else socket.Abort();
+            }
+            // Someone turned away after entering is told why, and the connection then closes properly. Cutting it
+            // straight after the reason lost the reason for a few in a hundred, so many people are turned away here: a
+            // room an older app holds refuses newer apps once they have entered.
+            using (var older = new ClientWebSocket())
+            {
+                older.Options.SetRequestHeader("X-Forwarded-For", "198.51.100.200");
+                await older.ConnectAsync(new Uri(url.Replace("http", "ws") + "/room"), default);
+                await SocketMessages.SendAsync(older, new("create", Text: "Older app"), default);
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                    room = Wire.Read<Welcome>((await SocketMessages.ReadAsync(older, timeout.Token))!.Data!).Room;
+                for (var i = 0; i < Refusals; i++)
+                {
+                    using var socket = new ClientWebSocket();
+                    socket.Options.SetRequestHeader("X-Forwarded-For", $"203.0.113.{i + 1}");
+                    await socket.ConnectAsync(new Uri(url.Replace("http", "ws") + "/room"), default);
+                    await SocketMessages.SendAsync(socket, new("enter", Text: "Newer app", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, room))), default);
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    try
+                    {
+                        var reply = await SocketMessages.ReadAsync(socket, timeout.Token);
+                        if (reply is { Type: "error", Text.Length: > 0 } && await SocketMessages.ReadAsync(socket, timeout.Token) is null) toldWhy++;
+                        else lastRefusal = reply?.Type ?? "closed without a reason";
+                    }
+                    catch (Exception ex) { lastRefusal = ex.Message; }
+                    // Answering the close lets the server end the connection at once rather than waiting for it.
+                    try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, null, timeout.Token); } catch (Exception) { }
+                }
+            }
+            await Task.Delay(1000);
+        }
+        finally
+        {
+            if (!server.HasExited) server.Kill(true);
+            await server.WaitForExitAsync();
+            await File.WriteAllTextAsync(Path.Combine(directory, "leaving-server.log"), await stdout + await stderr);
+        }
+        check(toldWhy == Refusals, $"everyone turned away after entering gets the reason and then a proper close ({toldWhy} of {Refusals}" +
+            (lastRefusal == "" ? ")" : $"; last failure: {lastRefusal})"));
+        var lines = (await stdout + await stderr).Split('\n').Select(line => line.Trim()).ToArray();
+        var unobserved = Array.FindIndex(lines, line => line.Contains("Unobserved task exception", StringComparison.Ordinal));
+        check(welcomed == 60 && unobserved < 0, $"members leaving end their connections without failed tasks nobody awaited ({welcomed} of 60 entered)" +
+            (unobserved < 0 ? "" : $" ({string.Join(" | ", lines.Skip(unobserved).Take(3))})"));
     }
 
     // A stand-in for Cloudflare's credential API checks that the server turns its ICE servers into libdatachannel URLs,
