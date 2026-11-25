@@ -215,7 +215,7 @@
        <TextBlock Text="Unwatched" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Bottom"/>
        <TextBlock x:Name="HomeUnwatchedCount" Foreground="{DynamicResource Muted}" FontSize="12" Margin="10,0,0,4" VerticalAlignment="Bottom"/>
       </DockPanel>
-      <!-- Room above for artwork that lifts when pointed at, and below for its shadow, which the scroller would cut off. -->
+      <!-- Room around the artwork for its shadow, which the scroller would cut off. -->
       <local:HorizontalScroller Padding="0,10,0,26" ArrowCenter="115">
        <ItemsControl x:Name="HomeUnwatched" ItemTemplate="{StaticResource HomeTilePoster}" AutomationProperties.Name="Unwatched"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel></ItemsControl>
       </local:HorizontalScroller>
