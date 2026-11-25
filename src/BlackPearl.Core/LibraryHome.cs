@@ -1,11 +1,11 @@
 namespace BlackPearl.Core;
 
 public record HomeLibraryCard(LibraryCard Card, string Section, long PositionMs = 0);
-// An unstarted title with the facts Home uses to describe it and filter mystery draws. AddedAt: when its newest file
-// arrived (LibraryAdded), 0 when unknown.
-public record HomeTitle(LibraryCard Card, int Episodes, int? Minutes, long AddedAt = 0);
-// Unseen lists the unstarted titles newest first, as the Unwatched row does.
-public record HomeOverview(List<HomeLibraryCard> Entries, HomeTitle[] Unseen);
+// A title with the facts Home uses to describe it and filter mystery draws. AddedAt: when its newest file arrived
+// (LibraryAdded), 0 when unknown. Finished: a started title watched to the end, as its watched mark says.
+public record HomeTitle(LibraryCard Card, int Episodes, int? Minutes, long AddedAt = 0, bool Finished = false);
+// Unseen lists the unstarted titles newest first, as the Unwatched row does; Seen the started ones, to draw a rewatch from.
+public record HomeOverview(List<HomeLibraryCard> Entries, HomeTitle[] Unseen, HomeTitle[] Seen);
 public enum MysteryLength { Any, Short, Evening, LongNight }
 
 public static class LibraryHome
@@ -28,6 +28,7 @@ public static class LibraryHome
         var groups = all.GroupBy(LibraryIdentity.TitleKey).ToDictionary(group => group.Key, group => group.ToArray());
         var continuing = new List<(HomeLibraryCard Entry, long Played)>();
         var unseen = new List<HomeTitle>();
+        var seen = new List<HomeTitle>();
         foreach (var title in titles)
         {
             var members = groups[LibraryIdentity.TitleKey(title.Media)];
@@ -35,13 +36,11 @@ public static class LibraryHome
                 new("", "", null, item, item.Series is null ? "movie" : "episode"), Watched);
             var started = members.Any(item => Watched(item.Id) || Position(item.Id) >= 10000);
             var files = LibraryCatalog.PreferredFiles(members.Where(item => item.Available)).ToArray();
-            if (!started)
-            {
-                unseen.Add(new(title, title.Level == "series" ? files.Length : 0,
-                    files.Select(item => item.RuntimeMinutes).FirstOrDefault(minutes => minutes > 0),
-                    files.Select(item => LibraryAdded.At(playback, item.Id) ?? 0).DefaultIfEmpty().Max()));
-                continue;
-            }
+            HomeTitle Facts(bool finished) => new(title, title.Level == "series" ? files.Length : 0,
+                files.Select(item => item.RuntimeMinutes).FirstOrDefault(minutes => minutes > 0),
+                files.Select(item => LibraryAdded.At(playback, item.Id) ?? 0).DefaultIfEmpty().Max(), finished);
+            if (!started) { unseen.Add(Facts(false)); continue; }
+            seen.Add(Facts(LibraryWatchProgress.IsWatched(members, title, Watched, Position)));
             // A film continues with a copy left part-way, the one played last; with none, a watched copy means it's done.
             if (title.Level == "movie")
             {
@@ -77,7 +76,7 @@ public static class LibraryHome
         // apps that don't know it find the other sections where they were.
         var newest = unseen.OrderByDescending(title => title.AddedAt).ThenBy(title => LibraryIdentity.TitleKey(title.Card.Media), StringComparer.Ordinal).ToArray();
         result.AddRange(newest.Take(UnwatchedLimit).Select(title => new HomeLibraryCard(title.Card, "unwatched")));
-        return new(result, newest);
+        return new(result, newest, seen.ToArray());
     }
     public static bool Matches(HomeTitle title, string? kind, MysteryLength length)
     {
@@ -98,7 +97,7 @@ public static class LibraryHome
         return (redraw || current is null ? null : titles.FirstOrDefault(title => LibraryIdentity.TitleKey(title.Card.Media) == current && Matches(title, kind, length)))
             ?? Draw(titles, kind, length, seed, redraw ? current : null);
     }
-    // Draws one unstarted title, avoiding the current pick when another match exists.
+    // Draws one title from the pool, avoiding the current pick when another match exists.
     public static HomeTitle? Draw(IEnumerable<HomeTitle> pool, string? kind, MysteryLength length, int seed, string? avoid = null)
     {
         var matches = pool.Where(title => Matches(title, kind, length)).ToArray();

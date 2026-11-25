@@ -92,6 +92,23 @@ static class HomeChecks
                 "mystery filters with no matching titles say so instead of drawing something else");
             Control<RadioButton>("MysteryAnything").IsChecked = true;
             Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } && Control<Button>("HomeMysteryPlay").IsEnabled, "clearing the type filter draws again");
+            // Watched: a draw from the titles already watched or started, under the same filters.
+            Check(Control<FrameworkElement>("MysteryPoolBar").Visibility == Visibility.Visible, "your own library offers a draw from the titles you've watched");
+            Control<RadioButton>("MysterySeen").IsChecked = true;
+            await Until(() => Control<TextBlock>("HomeMysteryMeta").Text.EndsWith("In progress"));
+            Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } rewatch && rewatch.DisplayTitle is "Night Train" or "A Sunday in October" &&
+                Control<Button>("HomeMysteryPlay").IsEnabled && Control<Button>("HomeMysteryDraw").IsEnabled,
+                "the Watched choice draws a started title and says it's in progress");
+            ((Panel)Control<RadioButton>("MysteryAnime").Parent).Children.OfType<RadioButton>().Single(choice => choice.Tag as string == "Movie").IsChecked = true;
+            await Until(() => Control<TextBlock>("HomeMysteryTitle").Text == "A Sunday in October");
+            Check(Control<TextBlock>("HomeMysteryMeta").Text == "Movie · 1 h 40 m · 2025 · In progress" && !Control<Button>("HomeMysteryDraw").IsEnabled,
+                "a watched draw keeps to the type filter, and with one match there is nothing else to draw");
+            Control<RadioButton>("MysteryAnime").IsChecked = true;
+            await Until(() => Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches");
+            Control<RadioButton>("MysteryAnything").IsChecked = true; Control<RadioButton>("MysteryUnseen").IsChecked = true;
+            await Until(() => Control<TextBlock>("HomeMysteryMeta").Text.EndsWith("Not started yet"));
+            Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } back && back.Card.Media.Id.StartsWith("home-new", StringComparison.Ordinal),
+                "going back to Not started draws an unstarted title again");
             Layout(1280, 850, "home-desktop"); Layout(900, 640, "home-compact");
             Check(Control<ScrollViewer>("HomePage").ScrollableHeight > 0, "Home remains vertically scrollable at the minimum window size");
             Control<ScrollViewer>("HomePage").ScrollToBottom();
@@ -207,8 +224,10 @@ static class HomeChecks
             }
             Sent("catalog-draw");
             typeof(RoomClient).GetField("hostFeatures", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(client, 3);
+            // A Watched choice left from your own library doesn't apply to someone else's: their app draws titles not started.
+            Control<RadioButton>("MysterySeen").IsChecked = true;
             Call("RenderGuestHome");
-            Check(Control<StackPanel>("HomeMysteryFilters").Visibility == Visibility.Visible && Field<LibraryCardView?>("homeMystery") is null &&
+            Check(Control<StackPanel>("HomeMysteryFilters").Visibility == Visibility.Visible && Control<FrameworkElement>("MysteryPoolBar").Visibility == Visibility.Collapsed && Field<LibraryCardView?>("homeMystery") is null &&
                 Control<Button>("HomeMysteryCard").Visibility == Visibility.Hidden && Control<TextBlock>("HomeMysteryTitle").Text == "" &&
                 !Control<Button>("HomeMysteryPlay").IsEnabled && !Control<Button>("HomeMysteryDraw").IsEnabled,
                 "while the streamer draws, the filters keep their place and the card waits blank instead of showing a fixed pick");
@@ -219,6 +238,7 @@ static class HomeChecks
                 guestPick.Card.Media.Id.StartsWith("home-new") && Control<TextBlock>("HomeMysteryMeta").Text == "Movie · 2026 · Not started yet" &&
                 Control<Button>("HomeMysteryDraw").IsEnabled && Control<Button>("HomeMysteryCard").DataContext == guestPick,
                 "guest Home shows the type and length filters and a title the streamer's app drew from its unstarted titles");
+            Control<RadioButton>("MysteryUnseen").IsChecked = true;
             Call("RenderGuestHome"); Call("RefreshSharedLibrary");
             Check(Sent("catalog-draw").Count == 0, "refreshing guest Home does not ask the streamer to draw again");
             Call("DrawMystery", null, new RoutedEventArgs());
