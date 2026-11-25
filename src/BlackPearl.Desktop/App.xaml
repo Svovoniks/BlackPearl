@@ -379,10 +379,11 @@
    </ControlTemplate></Setter.Value></Setter>
    <Style.Triggers><DataTrigger Binding="{Binding IsEpisode}" Value="True"><Setter Property="Width" Value="300"/><Setter Property="Height" Value="278"/></DataTrigger></Style.Triggers>
   </Style>
-  <!-- Artwork rests on the page as a stone: a soft shadow below and no frame. Pointing at its card lifts it a little higher. -->
+  <!-- Artwork rests on the page as a stone: a soft shadow below and no frame. Pointing at its card zooms the picture a little
+       inside the frame, which stays where it is (ArtworkZoom). -->
   <Style x:Key="ArtworkFrame" TargetType="local:Stone">
    <Setter Property="Depth" Value="Poster"/><Setter Property="Background" Value="{DynamicResource Elevated}"/><Setter Property="CornerRadius" Value="12"/><Setter Property="local:RoundedClip.Radius" Value="12"/>
-   <Style.Triggers><DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True"><Setter Property="Depth" Value="Lifted"/><Setter Property="RenderTransform"><Setter.Value><TranslateTransform Y="-3"/></Setter.Value></Setter></DataTrigger></Style.Triggers>
+   <Style.Triggers><DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True"><Setter Property="local:ArtworkZoom.Hovered" Value="True"/></DataTrigger></Style.Triggers>
   </Style>
   <!-- Round arrow that pages a horizontal row; it floats over the artwork, so it carries its own shadow. -->
   <Style x:Key="PagerButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>

@@ -770,8 +770,11 @@ public partial class MainWindow : Window
                     var placeholders = (card.Level switch { "series" => members, "season" => members.Where(x => (x.Season ?? -1) == card.Season), _ => [card.Media] }).Where(x => x.IsVirtual).ToArray();
                     var position = card.Level is "episode" or "movie" && long.TryParse(settings.GetValueOrDefault("position:" + card.Media.Id), out var saved) ? saved : 0;
                     var existing = views.GetValueOrDefault(LibraryCardView.Identity(card));
+                    bool WatchedId(string id) => settings.GetValueOrDefault("watched:" + id) == "true";
+                    long PositionOf(string id) => long.TryParse(settings.GetValueOrDefault("position:" + id), out var at) ? at : 0;
                     return (Card: card, View: existing ?? new LibraryCardView(card),
-                        PosterFile: existing is null ? default : LibraryCardView.Version(card.Poster), Position: position, Watched: LibraryWatchProgress.IsWatched(members, card, id => settings.GetValueOrDefault("watched:" + id) == "true", id => long.TryParse(settings.GetValueOrDefault("position:" + id), out var at) ? at : 0),
+                        PosterFile: existing is null ? default : LibraryCardView.Version(card.Poster), Position: position, Watched: LibraryWatchProgress.IsWatched(members, card, WatchedId, PositionOf),
+                        Show: LibraryWatchProgress.Progress(members, card, WatchedId, PositionOf),
                         Continuing: status == 2 && LibraryWatchProgress.CanContinue(members, card, settings),
                         Missing: placeholders.Any(Aired), Upcoming: placeholders.Any(x => !Aired(x)));
                 }).Where(state => status switch { 2 => state.Continuing, 3 => !state.Watched, 4 => state.Watched, 5 => state.Missing, 6 => state.Upcoming, _ => true }).ToArray();
@@ -806,7 +809,7 @@ public partial class MainWindow : Window
                 var view = playback[index].View;
                 if (views.ContainsKey(view.Key)) view.Update(cards[index], playback[index].PosterFile);
                 else view.ShowInGrid();
-                view.SetPlayback(playback[index].Position, playback[index].Watched);
+                view.SetPlayback(playback[index].Position, playback[index].Watched, playback[index].Show);
                 if (initialBatch is not null) initialBatch.Add(view);
                 else if (index >= libraryCards.Count || libraryCards[index] != view)
                 {
@@ -1206,7 +1209,9 @@ public partial class MainWindow : Window
     private void UpdateCardPlayback(LibraryCardView view)
     {
         var position = (view.IsEpisode || view.IsMovie) && long.TryParse(library.Setting("position:" + view.Card.Media.Id), out var saved) ? saved : 0;
-        view.SetPlayback(position, LibraryWatchProgress.IsWatched(items, view.Card, WasWatched, _ => position));
+        long PositionOf(string id) => id == view.Card.Media.Id && position > 0 ? position : long.TryParse(library.Setting("position:" + id), out var at) ? at : 0;
+        view.SetPlayback(position, LibraryWatchProgress.IsWatched(items, view.Card, WasWatched, _ => position),
+            view.Card.Level is "series" or "season" && !view.IsRemote ? LibraryWatchProgress.Progress(items, view.Card, WasWatched, PositionOf) : default);
     }
     // The place last saved by SavePlaybackPosition, with whether the video was marked watched then: a video that hasn't
     // moved or been marked since is not saved again.
@@ -1230,7 +1235,7 @@ public partial class MainWindow : Window
             library.SetSettings(saved);
             // Only once written: a save that failed is tried again.
             lastSavedPlayback = (playingItem.Id, time, watched);
-            foreach (var card in libraryCards.Where(x => x.Card.Media.Id == playingItem.Id)) UpdateCardPlayback(card);
+            foreach (var card in libraryCards.Where(x => x.Card.Media.Id == playingItem.Id || ShowCardOf(x, playingItem))) UpdateCardPlayback(card);
             // A film card showing another copy now leads with this one, the copy played last, unless a version was chosen
             // for the film. Positions save every few seconds, so this refreshes the library once, when the copy changes.
             if (time >= 10000 && filmCardsRefreshedFor != playingItem.Id && libraryCards.Any(x => x.Card is { Level: "movie", Versions: > 1 } && x.Card.Media.Id != playingItem.Id && LibraryIdentity.SameFilm(x.Card.Media, playingItem)) &&

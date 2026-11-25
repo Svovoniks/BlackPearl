@@ -124,15 +124,24 @@ public sealed class LibraryCardView : INotifyPropertyChanged
         posterVersion = version;
         if (changed) Reload();
     }
-    public void SetPlayback(long positionMs, bool watched)
+    // Films, shows and seasons light the bottom of their artwork with how far they have been watched, under a label.
+    public bool ShowsPlaybackBar => HasPlaybackProgress && !IsMusic && Card.Level is "movie" or "series" or "season";
+    // A show or season passes its progress over the episodes the library has (LibraryWatchProgress.Progress); without it
+    // (Home, a host's cards) a card shows its own saved place as before.
+    public void SetPlayback(long positionMs, bool watched, ShowProgress show = default)
     {
         if (IsWatched != watched) { IsWatched = watched; Changed(nameof(IsWatched)); }
-        var progress = watched ? 100 : Card.Media.RuntimeMinutes is > 0 ? Math.Clamp(positionMs / (Card.Media.RuntimeMinutes.Value * 600d), 0, 100) : 0;
-        var label = watched ? "Watched" : positionMs >= 10000 ? $"Resume · {(int)(positionMs / 60000)}:{positionMs / 1000 % 60:00}" : "";
+        var whole = Card.Level is "series" or "season" && show.Episodes > 0;
+        var progress = watched ? 100 : whole ? show.Percent : Card.Media.RuntimeMinutes is > 0 ? Math.Clamp(positionMs / (Card.Media.RuntimeMinutes.Value * 600d), 0, 100) : 0;
+        var label = watched ? "Watched" : whole ? ShowLabel(show) : positionMs >= 10000 ? $"Resume · {(int)(positionMs / 60000)}:{positionMs / 1000 % 60:00}" : "";
         if (Progress != progress) { Progress = progress; Changed(nameof(Progress)); }
-        if (PlaybackLabel != label) { PlaybackLabel = label; Changed(nameof(PlaybackLabel)); Changed(nameof(HasPlaybackProgress)); }
+        SetPlaybackLabel(label);
     }
-    public void SetPlaybackLabel(string label) { if (PlaybackLabel == label) return; PlaybackLabel = label; Changed(nameof(PlaybackLabel)); Changed(nameof(HasPlaybackProgress)); }
+    // "40% · 5 of 12 episodes": the share is by running time, so it moves within an episode; never 0% or 100% while
+    // some, but not all, has been watched.
+    private static string ShowLabel(ShowProgress show) => show.Percent <= 0 || show.Episodes == 0 ? ""
+        : $"{Math.Clamp(Math.Round(show.Percent), 1, 99)}% · {show.Watched} of {show.Episodes} episode{(show.Episodes == 1 ? "" : "s")}";
+    public void SetPlaybackLabel(string label) { if (PlaybackLabel == label) return; PlaybackLabel = label; Changed(nameof(PlaybackLabel)); Changed(nameof(HasPlaybackProgress)); Changed(nameof(ShowsPlaybackBar)); }
     // A decoded poster takes about half a megabyte, and as much again on the graphics card while it is drawn, so a
     // card holds its artwork only while an image on screen shows it (see PosterLease) and decodes it no larger than the
     // frame it is drawn in. Cards nothing has leased, such as queue rows, keep their artwork as long as they live.

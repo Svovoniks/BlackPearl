@@ -50,5 +50,25 @@ static class EpisodePlaybackFixture
         check(!LibraryWatchProgress.IsWatched([movie], movieCard, completed.Contains), "unwatched movie has no completed badge");
         completed.Add(movie.Id);
         check(LibraryWatchProgress.IsWatched([movie], movieCard, completed.Contains), "completed movie has a watched badge");
+
+        // Show and season progress is by running time, over the episodes that have a file.
+        var e1 = first with { RuntimeMinutes = 20 }; var e2 = second with { RuntimeMinutes = 20 };
+        var e3 = first with { Id = "e3", Path = "e3.mkv", Episode = 3, RuntimeMinutes = 40 };
+        var copy = e2 with { Id = "e2-copy", Path = "e2-copy.mkv" };
+        var missing = first with { Id = "e4", Path = "", Episode = 4, RuntimeMinutes = 500, IsVirtual = true };
+        var s2 = nextSeason with { RuntimeMinutes = null };
+        MediaItem[] shows = [e1, e2, copy, e3, missing, s2, first with { Id = "bonus", IsExtra = true, RuntimeMinutes = 90 }, otherShow with { RuntimeMinutes = 20 }];
+        var done = new HashSet<string>(); var places = new Dictionary<string, long>();
+        ShowProgress Of(LibraryCard card) => LibraryWatchProgress.Progress(shows, card, done.Contains, id => places.GetValueOrDefault(id));
+        check(Of(seasonCard) == new ShowProgress(0, 0, 3) && Of(showCard).Episodes == 4, "an unwatched show has no progress; copies count once and placeholders and extras not at all");
+        done.Add(e1.Id); places[e3.Id] = 20 * 60000;
+        check(Math.Abs(Of(seasonCard).Percent - 50) < 0.01 && Of(seasonCard).Watched == 1, "a season's progress counts watched episodes whole and part-way ones to their place, by running time");
+        // Season 2's one episode has no known length, so it counts as the show's typical one (20 minutes of 20, 20, 40).
+        check(Math.Abs(Of(showCard).Percent - 40) < 0.01, "an episode with no known length counts as long as a typical one");
+        done.Add(copy.Id);
+        check(Of(seasonCard).Watched == 2 && Math.Abs(Of(seasonCard).Percent - 75) < 0.01, "one watched copy counts its episode as watched");
+        places[e1.Id] = 5000; places[s2.Id] = 9000;
+        check(Math.Abs(Of(showCard).Percent - 60) < 0.01, "a moment's start does not count as progress");
+        check(Of(movieCard) == default && Of(seasonCard with { Season = 99 }) == default, "films and empty seasons have no show progress");
     }
 }
