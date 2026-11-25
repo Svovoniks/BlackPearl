@@ -104,6 +104,22 @@ static class PhoneLibraryChecks
             page = await phone.Next("page", 10000);
             Check(page?.GetProperty("entries").EnumerateArray().Select(e => e.GetProperty("id").GetString()).SequenceEqual(["harbor-1", "harbor-2", "harbor-3"]) == true,
                 "a show's episodes are listed for a video of it");
+            // A show's card is watched once all its episodes are, as the PC's own card, though its card stands on one episode.
+            async Task<bool?> ShowWatched(long request)
+            {
+                phone.Send(new { type = "browse", request, category = 2 });
+                var shows = await phone.Next("page", 10000);
+                return shows?.GetProperty("entries").EnumerateArray().Where(e => e.GetProperty("level").GetString() == "series")
+                    .Select(e => (bool?)e.GetProperty("watched").GetBoolean()).SingleOrDefault();
+            }
+            Check(await ShowWatched(21) == false, "a show with episodes left isn't marked watched for the phone");
+            store.SetSettings([KeyValuePair.Create("watched:harbor-1", "true"), KeyValuePair.Create("watched:harbor-2", "true")]);
+            Check(await ShowWatched(22) == true, "a show whose episodes are all watched is marked watched for the phone, as on the PC");
+            phone.Send(new { type = "browse", request = 23, parentId = "harbor-2" });
+            var seasons = (await phone.Next("page", 10000))?.GetProperty("entries").EnumerateArray().ToArray() ?? [];
+            Check(seasons.Length == 1 && seasons[0].GetProperty("level").GetString() == "season" && seasons[0].GetProperty("watched").GetBoolean(),
+                "a season whose episodes are all watched is marked watched for the phone");
+            store.SetSettings([KeyValuePair.Create("watched:harbor-1", "false"), KeyValuePair.Create("watched:harbor-2", "false")]);
             // A queue named at absurd length still lists its videos: phones are sent the first 120 characters of a name.
             store.Setting("queues", Wire.Serialize(new[] { queued, new SavedQueue("long", new string('x', 70000), ["harbor-1"]) }));
             phone.Send(new { type = "browse", request = 20, queue = "long" });
