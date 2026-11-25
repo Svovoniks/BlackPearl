@@ -1221,7 +1221,15 @@ public partial class MainWindow : Window
     private void UpdateCardPlayback(LibraryCardView view)
     {
         var position = (view.IsEpisode || view.IsMovie) && long.TryParse(library.Setting("position:" + view.Card.Media.Id), out var saved) ? saved : 0;
-        long PositionOf(string id) => id == view.Card.Media.Id && position > 0 ? position : long.TryParse(library.Setting("position:" + id), out var at) ? at : 0;
+        // A show card's progress asks for each unwatched episode's place; positions save every few seconds while one plays,
+        // so the show's places are read together, on one connection.
+        Dictionary<string, string>? places = null;
+        long PositionOf(string id)
+        {
+            if (id == view.Card.Media.Id && position > 0) return position;
+            places ??= library.Settings(items.Where(item => !WasWatched(item.Id) && LibraryIdentity.SameShow(item, view.Card.Media)).Select(item => "position:" + item.Id));
+            return long.TryParse(places.GetValueOrDefault("position:" + id), out var at) ? at : 0;
+        }
         view.SetPlayback(position, LibraryWatchProgress.IsWatched(items, view.Card, WasWatched, _ => position),
             view.Card.Level is "series" or "season" && !view.IsRemote ? LibraryWatchProgress.Progress(items, view.Card, WasWatched, PositionOf) : default);
     }

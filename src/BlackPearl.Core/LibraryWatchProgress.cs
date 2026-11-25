@@ -46,33 +46,43 @@ public static class LibraryWatchProgress
         return required.Length > 0 && required.SelectMany(Keys).All(completed.Contains);
     }
 
-    // How much of a show, or of one of its seasons, has been watched, by running time. Only episodes with a file count:
-    // placeholders for episodes the library doesn't have add nothing to the total, and neither do extras or bonus clips.
-    // A watched episode counts its whole length, one part-way its saved place. Copies of one episode count once, and an
-    // episode with no known length counts as long as the others' typical one. Episodes are counted as the card's caption
-    // counts them (LibraryIdentity.EpisodeCount), so "5 of 12 episodes" matches the 12 below the card.
+    // How much of a show, or of one of its seasons, has been watched, by running time. Only files the library has count:
+    // placeholders for episodes it doesn't have add nothing to the total, and neither do extras. Bonus clips (openings,
+    // endings) count towards the time, as the watched mark (IsWatched) waits for them too, but not as episodes. A watched
+    // episode counts its whole length, one part-way its saved place. Copies of one episode count once, a file holding
+    // several episodes shares its length among them, and an episode with no known length counts as long as the others'
+    // typical one. Episodes are counted as the card's caption counts them (LibraryIdentity.EpisodeCount), so "5 of 12
+    // episodes" matches the 12 below the card. It reaches 100% only when the watched mark would be set.
     public static ShowProgress Progress(IEnumerable<MediaItem> source, LibraryCard card, Func<string, bool> watched, Func<string, long> position)
     {
         if (card.Level is not ("series" or "season")) return default;
-        var episodes = source.Where(item => LibraryIdentity.SameShow(item, card.Media) && !item.IsExtra && !item.IsVirtual && !item.IsBonus).ToArray();
-        var completed = episodes.Where(item => watched(item.Id)).SelectMany(LibraryIdentity.EpisodeKeys).ToHashSet();
-        var files = (card.Level == "series" ? episodes : episodes.Where(item => (item.Season ?? -1) == card.Season)).ToArray();
-        var counted = files.GroupBy(item => string.Join("|", LibraryIdentity.EpisodeKeys(item).Order())).ToArray();
-        if (counted.Length == 0) return default;
-        var keys = files.SelectMany(LibraryIdentity.EpisodeKeys).Distinct().ToArray();
-        var known = counted.Select(group => group.Max(item => item.RuntimeMinutes ?? 0)).Where(minutes => minutes > 0).Order().ToArray();
-        double typical = known.Length > 0 ? known[known.Length / 2] : 0;
-        double total = 0, seen = 0;
-        foreach (var group in counted)
+        var shown = source.Where(item => LibraryIdentity.SameShow(item, card.Media) && !item.IsExtra && !item.IsVirtual).ToArray();
+        var completed = shown.Where(item => watched(item.Id)).SelectMany(LibraryIdentity.EpisodeKeys).ToHashSet();
+        var files = (card.Level == "series" ? shown : shown.Where(item => (item.Season ?? -1) == card.Season)).ToArray();
+        var episodes = files.Where(item => !item.IsBonus).SelectMany(LibraryIdentity.EpisodeKeys).Distinct().ToArray();
+        if (episodes.Length == 0) return default;
+        static double Share(MediaItem item) => item.RuntimeMinutes is > 0 ? item.RuntimeMinutes.Value / (double)LibraryIdentity.EpisodeKeys(item).Count() : 0;
+        double Typical(bool bonus) => files.Where(item => item.IsBonus == bonus).Select(Share).Where(minutes => minutes > 0).Order().ToArray() is { Length: > 0 } known ? known[known.Length / 2] : 0;
+        double typicalEpisode = Typical(false), typicalBonus = Typical(true);
+        double Length(MediaItem item) => Share(item) is > 0 and var share ? share
+            : (item.IsBonus ? typicalBonus : typicalEpisode) is > 0 and var typical ? typical : item.IsBonus ? typicalEpisode : typicalBonus;
+        // How far into a file its saved place is, when its length is known well enough to tell.
+        double Part(MediaItem item)
         {
-            var minutes = group.Max(item => item.RuntimeMinutes ?? 0);
-            var length = minutes > 0 ? minutes : typical > 0 ? typical : 1;
-            total += length;
-            if (group.Any(item => watched(item.Id)) || LibraryIdentity.EpisodeKeys(group.First()).All(completed.Contains)) { seen += length; continue; }
-            var at = group.Max(item => position(item.Id));
-            if (at >= 10000 && (minutes > 0 || typical > 0)) seen += Math.Min(length, at / 60000d);
+            var at = position(item.Id); var minutes = Length(item) * LibraryIdentity.EpisodeKeys(item).Count();
+            return at >= 10000 && minutes > 0 ? Math.Min(1, at / 60000d / minutes) : 0;
         }
-        return new(Math.Clamp(seen / total * 100, 0, 100), keys.Count(completed.Contains), keys.Length);
+        double total = 0, seen = 0;
+        foreach (var episode in files.SelectMany(item => LibraryIdentity.EpisodeKeys(item).Select(key => (Key: key, File: item))).GroupBy(entry => entry.Key))
+        {
+            var length = episode.Max(entry => Length(entry.File)) is > 0 and var known ? known : 1;
+            total += length;
+            seen += completed.Contains(episode.Key) ? length : length * episode.Max(entry => Part(entry.File));
+        }
+        var percent = Math.Clamp(seen / total * 100, 0, 100);
+        // A saved place past a length that was read short must not look finished.
+        if (!files.SelectMany(LibraryIdentity.EpisodeKeys).All(completed.Contains)) percent = Math.Min(percent, 99);
+        return new(percent, episodes.Count(completed.Contains), episodes.Length);
     }
 
     private static IEnumerable<string> Keys(MediaItem item) => item.Season is not null && item.Episode is not null && item.NumberingConflict is null

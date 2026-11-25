@@ -6,7 +6,7 @@ using System.Windows.Media.Imaging;
 namespace BlackPearl.Desktop;
 
 // How high a stone stands off the page, which sets the softness, drop and darkness of its shadow.
-public enum StoneDepth { None, Disc, Chip, Pebble, Pressed, Poster, Lifted, Slab, Popup, Dialog }
+public enum StoneDepth { None, Disc, Chip, Pebble, Pressed, Poster, Slab, Popup, Dialog }
 
 // The app's one material (see the pebble in App.xaml): a Border that stands off the page. Below itself it draws a soft
 // shadow, and along its top edge a thin highlight that fades down the sides, so its edge comes from light and shadow
@@ -101,7 +101,6 @@ public static class StoneShadow
         StoneDepth.Chip => new(10, 3, 0.26),
         StoneDepth.Pressed => new(6, 1, 0.3),
         StoneDepth.Poster => new(16, 7, 0.4),
-        StoneDepth.Lifted => new(24, 12, 0.46),
         StoneDepth.Slab => new(30, 10, 0.3),
         StoneDepth.Popup => new(16, 5, 0.42),
         StoneDepth.Dialog => new(40, 16, 0.5),
