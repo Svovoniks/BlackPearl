@@ -49,6 +49,11 @@ static class SharedLibraryFixture
         var episodes = SharedLibrary.Browse(items, new(ParentId: "ep", Season: 1));
         check(seasons.Entries.Single().Level == "season" && episodes.Entries.Single().Title.Contains("Pilot"), "guest can navigate series to seasons and episodes");
         check(SharedLibrary.Browse(items, new(Category: 2)).Entries.Single().Id == "ep", "guest category filtering returns shows");
+        MediaItem[] withClip = [new("film", "C:/private/Film/Film.mkv", "Film", "Anime", 1992),
+            new("clip", "C:/private/Film/Featurettes/Clip.mkv", "Clip", "Anime", IsBonus: true, ExtraOf: "film", EpisodeTitle: "Clip")];
+        check(SharedLibrary.Browse(withClip, new()).Entries.Select(x => x.Id).SequenceEqual(["film"])
+            && SharedLibrary.Browse(withClip, new(Category: 3)).Entries.Select(x => x.Id).SequenceEqual(["film"]),
+            "a film's clips stay on the film, not listed as titles of their own");
         var unicode = Enumerable.Range(0, 8).Select(i => new MediaItem("u" + i, "", new string('界', 180), "Movie", Overview: new string('界', 1000)));
         var message = new WireMessage("catalog-page", Data: Wire.Serialize(SharedLibrary.Browse(unicode, new())));
         check(System.Text.Encoding.UTF8.GetByteCount(Wire.Serialize(message)) < 65536, "Unicode catalog page stays within peer transport limit");
