@@ -241,7 +241,8 @@ PC → phone:
 `playable` entries are files the phone can watch or start on the PC: films, episodes, and Continue watching entries
 (which name the episode to resume even when their level is `series`). `positionMs` and `watched` are the PC's own
 resume point and watched mark, as its own cards show it: a show or a season is watched once every episode the
-library has is (from 0.3.156; earlier PCs always sent `false` for them), and a film also when another copy of it is.
+library has is (from 0.3.156; earlier PCs always sent `false` for them), and a film or an episode also when another copy
+of it is.
 A failure is an `error` with code `browse` and the `request`.
 
 BlackPearl's window starts the phone remote before it has read its library. After 0.3.144 a library request (`browse`,

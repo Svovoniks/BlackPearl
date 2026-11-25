@@ -174,12 +174,14 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var source = Items().ToArray();
         Dictionary<string, string> playback;
         LibraryBrowsePage page;
+        bool[] watched;
         try
         {
-            (playback, page) = await Task.Run(() =>
+            (playback, page, watched) = await Task.Run(() =>
             {
                 var settings = library.PlaybackSettings();
-                return (settings, SharedLibrary.Browse(source, browse, ArtworkToken, settings, PageSize));
+                var page = SharedLibrary.Browse(source, browse, ArtworkToken, settings, PageSize);
+                return (settings, page, CardsWatched(source, page.Entries, settings));
             });
         }
         catch (InvalidDataException ex)
@@ -188,29 +190,16 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             return;
         }
         if (current() != remote) return;
-        bool Watched(string id) => playback.GetValueOrDefault("watched:" + id) == "true";
         long Position(string id) => long.TryParse(playback.GetValueOrDefault("position:" + id), out var at) ? Math.Max(0, at) : 0;
         var byId = source.ToDictionary(x => x.Id);
-        // A card is watched as the PC's own card is (LibraryWatchProgress.IsWatched): a show or a season once every episode
-        // the library has is, a film also when another copy of it is. Continue watching names an episode not finished yet.
-        var shows = page.Entries.Any(entry => entry.Level is "series" or "season" or "episode")
-            ? source.Where(item => item.Series is not null).ToLookup(LibraryIdentity.ShowKey) : null;
-        var films = page.Entries.Any(entry => entry.Level == "movie") ? source.Where(item => item.Series is null).ToArray() : [];
-        bool CardWatched(SharedLibraryEntry entry)
-        {
-            if (entry.HomeSection == "continue" || byId.GetValueOrDefault(entry.Id) is not { } item) return Watched(entry.Id);
-            var members = item.Series is null ? films : shows?[LibraryIdentity.ShowKey(item)] ?? [];
-            return LibraryWatchProgress.IsWatched(members, new LibraryCard("", "", null, item, entry.Level, entry.Season, Versions: item.Series is null ? 2 : 1),
-                Watched, Position);
-        }
-        var entries = page.Entries.Select(entry =>
+        var entries = page.Entries.Select((entry, index) =>
         {
             var file = entry.Level is "movie" or "episode" || entry.HomeSection == "continue";
             // A show's or season's card stands on one of its episodes; it describes the show, not that episode.
             var overview = entry.Level is "series" or "season" && byId.GetValueOrDefault(entry.Id)?.Overview is { Length: > 0 } show ? show[..Math.Min(show.Length, 400)] : entry.Overview;
             return new Entry(entry.Id, entry.Title, entry.Caption, entry.Level, entry.Season, entry.Episode, overview, entry.Kind,
                 entry.RuntimeMinutes, entry.Year, entry.Episodes, entry.HomeSection, file ? Math.Max(entry.PositionMs, Position(entry.Id)) : 0,
-                CardWatched(entry), entry.Thumbnail, file);
+                watched[index], entry.Thumbnail, file);
         }).ToArray();
         // Each message is at most 64 KiB: summaries shorten first, then the page drops entries from its end.
         for (var limit = 400; ; limit /= 2)
@@ -219,6 +208,24 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             if (Encoding.UTF8.GetByteCount(Wire.Serialize(reply)) < 60000) { remote.SendMessage(session, reply); return; }
             entries = limit > 0 ? entries.Select(entry => entry with { Overview = entry.Overview[..Math.Min(entry.Overview.Length, limit)] }).ToArray() : entries[..^1];
         }
+    }
+
+    // Whether each card is watched, as the PC's own card is (LibraryWatchProgress.IsWatched): a show or a season once every
+    // episode the library has is, an episode or a film also when another copy of it is. Continue watching names an episode
+    // not finished yet, by its own mark. Off the dispatcher thread: only the shows and films on the page are gathered, in one
+    // pass over the library, so a film is compared with its own copies rather than with every film.
+    private static bool[] CardsWatched(MediaItem[] source, SharedLibraryEntry[] entries, IReadOnlyDictionary<string, string> playback)
+    {
+        bool Watched(string id) => playback.GetValueOrDefault("watched:" + id) == "true";
+        long Position(string id) => long.TryParse(playback.GetValueOrDefault("position:" + id), out var at) ? Math.Max(0, at) : 0;
+        static string Title(MediaItem item) => item.Series is null ? "film:" + LibraryIdentity.TitleKey(item) : "show:" + LibraryIdentity.ShowKey(item);
+        var byId = source.ToDictionary(item => item.Id);
+        var cards = entries.Select(entry => entry.HomeSection == "continue" ? null : byId.GetValueOrDefault(entry.Id)).ToArray();
+        var titles = cards.OfType<MediaItem>().Select(Title).ToHashSet();
+        if (titles.Count == 0) return entries.Select(entry => Watched(entry.Id)).ToArray();
+        var members = source.Where(item => titles.Contains(Title(item))).ToLookup(Title);
+        return entries.Select((entry, index) => cards[index] is not { } item ? Watched(entry.Id) : LibraryWatchProgress.IsWatched(members[Title(item)],
+            new LibraryCard("", "", null, item, entry.Level, entry.Season, Versions: members[Title(item)].Count()), Watched, Position)).ToArray();
     }
 
     private record Entry(string Id, string Title, string Caption, string Level, int? Season, int? Episode, string Overview, string Kind,

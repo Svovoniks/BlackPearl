@@ -115,6 +115,10 @@ static class PhoneLibraryChecks
             Check(await ShowWatched(21) == false, "a show with episodes left isn't marked watched for the phone");
             store.SetSettings([KeyValuePair.Create("watched:harbor-1", "true"), KeyValuePair.Create("watched:harbor-2", "true")]);
             Check(await ShowWatched(22) == true, "a show whose episodes are all watched is marked watched for the phone, as on the PC");
+            phone.Send(new { type = "browse", request = 23, parentId = "harbor-2" });
+            var seasons = (await phone.Next("page", 10000))?.GetProperty("entries").EnumerateArray().ToArray() ?? [];
+            Check(seasons.Length == 1 && seasons[0].GetProperty("level").GetString() == "season" && seasons[0].GetProperty("watched").GetBoolean(),
+                "a season whose episodes are all watched is marked watched for the phone");
             store.SetSettings([KeyValuePair.Create("watched:harbor-1", "false"), KeyValuePair.Create("watched:harbor-2", "false")]);
             // A queue named at absurd length still lists its videos: phones are sent the first 120 characters of a name.
             store.Setting("queues", Wire.Serialize(new[] { queued, new SavedQueue("long", new string('x', 70000), ["harbor-1"]) }));
