@@ -227,10 +227,14 @@
        <Rectangle IsHitTestVisible="False"><Rectangle.Fill><RadialGradientBrush Center="0.82,0.5" GradientOrigin="0.82,0.5" RadiusX="0.4" RadiusY="0.8" Opacity="0.22"><GradientStop Color="{DynamicResource AccentColor}" Offset="0"/><GradientStop Color="{DynamicResource AccentClear}" Offset="1"/></RadialGradientBrush></Rectangle.Fill></Rectangle>
        <Grid Margin="30,26,40,24"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="300"/></Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
-         <TextBlock Text="Can't decide?" FontFamily="{StaticResource DisplayFont}" FontSize="30" FontWeight="SemiBold"/>
-         <TextBlock x:Name="HomeMysteryIntro" Text="Draw a random title you haven't started. Narrow it down by type and length." Style="{StaticResource MutedText}" Margin="0,6,0,14" MaxWidth="380" HorizontalAlignment="Left"/>
-         <!-- Two choices on the app's thread selector (ThreadBar.cs): the type of title, then its length. -->
+         <TextBlock Text="Can't decide?" FontFamily="{StaticResource DisplayFont}" FontSize="30" FontWeight="SemiBold" Margin="0,0,0,14"/>
+         <!-- Choices on the app's thread selector (ThreadBar.cs): titles not started or ones watched, the type of title, then
+              its length. Someone else's library draws only from titles not started, so its first choice hides. -->
          <StackPanel x:Name="HomeMysteryFilters">
+          <local:ThreadBar x:Name="MysteryPoolBar" HorizontalAlignment="Left" Reach="5"><WrapPanel AutomationProperties.Name="Draw from">
+           <RadioButton x:Name="MysteryUnseen" GroupName="MysteryPool" Content="Not started" Tag="Unseen" IsChecked="True" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
+           <RadioButton x:Name="MysterySeen" GroupName="MysteryPool" Content="Watched" Tag="Seen" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}" ToolTip="Titles you've watched or started, to watch again"/>
+          </WrapPanel></local:ThreadBar>
           <local:ThreadBar HorizontalAlignment="Left" Reach="5"><WrapPanel AutomationProperties.Name="Type of title">
            <RadioButton x:Name="MysteryAnything" GroupName="MysteryKind" Content="Anything" Tag="" IsChecked="True" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
            <RadioButton GroupName="MysteryKind" Content="Movie" Tag="Movie" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>

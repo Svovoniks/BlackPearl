@@ -423,6 +423,8 @@ static class ScreenRender
             }
             home.ScrollToVerticalOffset(deck.TranslatePoint(new Point(0, 0), (UIElement)home.Content).Y - 24); await Capture($"{theme}-home-mystery");
             var filters = Descendants((DependencyObject)window.FindName("HomeMysteryFilters")).OfType<WrapPanel>().Select(row => row.Children.OfType<RadioButton>().ToList()).ToList();
+            // A draw from the titles watched, with any type and length.
+            filters[0][^1].IsChecked = true; await Task.Delay(900); await Capture($"{theme}-home-mystery-watched");
             foreach (var row in filters) row[^1].IsChecked = true;
             await Capture($"{theme}-home-mystery-chosen");
             await CaptureFocused($"{theme}-home-mystery-focus", filters[1][^1]);

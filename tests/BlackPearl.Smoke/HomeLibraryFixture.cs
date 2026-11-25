@@ -47,6 +47,12 @@ static class HomeLibraryFixture
         playback.Remove("position:a2"); playback["played:a3"] = "3000";
         var overview = LibraryHome.Overview(items, playback, 7);
         check(overview.Unseen.Select(title => title.Card.Media.Id).Order().SequenceEqual(["anime", "fresh", "new"]), "Home reports every unstarted title for filters and counts");
+        var seen = overview.Seen.ToDictionary(title => title.Card.Media.Series ?? title.Card.Media.Id);
+        check(seen.Keys.ToHashSet().SetEquals(["Finished show", "Started show", "film"]) && seen["Finished show"].Finished &&
+            !seen["Started show"].Finished && !seen["film"].Finished && seen["Started show"].Episodes == 3 && seen["film"].Minutes == 120,
+            "Home lists the started titles to rewatch, with their facts and whether they were watched to the end");
+        check(Enumerable.Range(0, 20).Select(seed => LibraryHome.Draw(overview.Seen, "Movie", MysteryLength.Any, seed)).All(title => title?.Card.Media.Id == "film") &&
+            LibraryHome.Draw(overview.Seen, "Anime", MysteryLength.Any, 1) is null, "a rewatch draw keeps to the watched titles and the filters");
         var mysteryIds = Enumerable.Range(0, 100).Select(seed => LibraryHome.Browse(items, playback, seed).Single(entry => entry.Section == "mystery").Card.Media.Id).ToHashSet();
         check(mysteryIds.Contains("anime") && mysteryIds.Contains("fresh") && mysteryIds.Contains("a1"), "mystery can pick movies, shows, and anime with one chance per title");
         var request = new LibraryBrowseRequest(Home: true, Seed: 7);

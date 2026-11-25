@@ -37,11 +37,13 @@ public partial class MainWindow
     private readonly Dictionary<string, int> homeRowSeeds = [];
     private LibraryCardView? homeHero, homeMystery, homeMysteryFallback;
     private LibraryCardView[] homeContinueAll = [], homeUnwatched = [];
-    private HomeTitle[] homeUnseen = [];
+    private HomeTitle[] homeUnseen = [], homeSeen = [];
     private Dictionary<string, HomeTitle> homeFacts = [];
     private bool homeStripExpanded;
     private string? mysteryKind;
     private MysteryLength mysteryLength;
+    // Draws from the titles already watched or started instead of the ones not started; only in your own library.
+    private bool mysteryRewatch;
     private int mysteryDraw = Random.Shared.Next();
     private HomeRowView[]? homeRows;
     private long homeGeneration;
@@ -56,7 +58,7 @@ public partial class MainWindow
         if (!libraryLoaded && items.Count == 0)
         {
             HomeStatus.Text = "Loading your library…";
-            homeUnseen = []; RenderHome([]); return;
+            homeUnseen = []; homeSeen = []; RenderHome([]); return;
         }
         var generation = ++homeGeneration;
         var source = items.ToArray(); var seed = homeSeed; var rowSeeds = new Dictionary<string, int>(homeRowSeeds);
@@ -80,8 +82,8 @@ public partial class MainWindow
             if (entry.Section == "continue" && entry.PositionMs < 10000) view.SetPlaybackLabel("Next episode");
             return view;
         }).ToArray();
-        homeUnseen = overview.Unseen;
-        homeFacts = overview.Unseen.GroupBy(title => LibraryCardView.Identity(title.Card)).ToDictionary(group => group.Key, group => group.First());
+        homeUnseen = overview.Unseen; homeSeen = overview.Seen;
+        homeFacts = overview.Unseen.Concat(overview.Seen).GroupBy(title => LibraryCardView.Identity(title.Card)).ToDictionary(group => group.Key, group => group.First());
         HomeStatus.Text = items.Count == 0 ? "Add a folder to find something to watch." : "";
         RenderHome(views);
     }
@@ -134,7 +136,7 @@ public partial class MainWindow
     {
         ++homeGeneration;
         homeShowsGuestLibrary = true;
-        homeUnseen = []; homeFacts = [];
+        homeUnseen = []; homeSeen = []; homeFacts = [];
         System.Windows.Automation.AutomationProperties.SetName(HomePage, "Home · " + HostLibraryName);
         HomeStatus.Text = GuestLibraryStatus.Text == HostLibraryName ? "" : GuestLibraryStatus.Text;
         RenderHome(OwnsLibrary && guestBrowse.Home ? guestLibraryCards : []);
@@ -234,9 +236,12 @@ public partial class MainWindow
         var remote = GuestLibrary ? guestDraw : null;
         // Until their first answer the filters keep their place and the card stays blank, so the deck does not jump.
         var waiting = remote is null && guestDrawPending is not null;
-        var filtered = GuestLibrary ? remote is { Unseen: > 0 } : homeUnseen.Length > 0;
+        var filtered = GuestLibrary ? remote is { Unseen: > 0 } : homeUnseen.Length + homeSeen.Length > 0;
         HomeMysteryFilters.Visibility = filtered || waiting ? Visibility.Visible : Visibility.Collapsed;
-        LibraryCardView? pick = waiting ? null : homeMysteryFallback; var note = "";
+        // Your own library can also draw something to watch again; someone else's app draws only titles not started.
+        var rewatch = mysteryRewatch && !GuestLibrary;
+        MysteryPoolBar.Visibility = GuestLibrary ? Visibility.Collapsed : Visibility.Visible;
+        LibraryCardView? pick = waiting ? null : homeMysteryFallback; var note = ""; var empty = "Try another type or length.";
         if (waiting) HomeMysteryDraw.IsEnabled = false;
         else if (remote is { Unseen: > 0 })
         {
@@ -246,11 +251,13 @@ public partial class MainWindow
         }
         else if (filtered)
         {
+            var pool = rewatch ? homeSeen : homeUnseen;
             var current = homeMystery is { HomeSection: "draw" } shown ? LibraryIdentity.TitleKey(shown.Card.Media) : null;
-            var title = LibraryHome.Pick(homeUnseen, mysteryKind, mysteryLength, mysteryDraw, current, redraw);
+            var title = LibraryHome.Pick(pool, mysteryKind, mysteryLength, mysteryDraw, current, redraw);
             pick = title is null ? null : homeMystery is { HomeSection: "draw" } same && same.Key == LibraryCardView.Identity(title.Card) ? same : new LibraryCardView(title.Card) { HomeSection = "draw" };
-            if (title is not null) { pick!.Update(title.Card); note = "Not started yet"; }
-            HomeMysteryDraw.IsEnabled = homeUnseen.Count(candidate => LibraryHome.Matches(candidate, mysteryKind, mysteryLength)) > 1;
+            if (title is not null) { pick!.Update(title.Card); note = !rewatch ? "Not started yet" : title.Finished ? "Watched" : "In progress"; }
+            HomeMysteryDraw.IsEnabled = pool.Count(candidate => LibraryHome.Matches(candidate, mysteryKind, mysteryLength)) > 1;
+            if (pool.Length == 0) empty = rewatch ? "You haven't watched anything yet." : "You've started everything. Try Watched.";
         }
         else HomeMysteryDraw.IsEnabled = pick is not null;
         var changed = !ReferenceEquals(homeMystery, pick);
@@ -258,7 +265,7 @@ public partial class MainWindow
         HomeMysteryPlay.DataContext = pick;
         HomeMysteryPlay.IsEnabled = pick is not null;
         var heading = pick?.DisplayTitle ?? (filtered ? "Nothing matches" : "");
-        var meta = pick is null ? filtered ? "Try another type or length." : "" :
+        var meta = pick is null ? filtered ? empty : "" :
             string.Join(" · ", new[] { pick.Card.Media.Kind, TitleFacts(pick), note }.Where(part => part.Length > 0));
         if (pick is not null) { pick.ShowIn(128, 190); _ = pick.LoadPosterAsync(); }
         void Reveal()
@@ -370,13 +377,14 @@ public partial class MainWindow
     private void MysteryFilterChanged(object sender, RoutedEventArgs e)
     {
         if (sender is not RadioButton { Tag: string tag } button || HomeMysteryCard is null) return;
-        if (button.GroupName == "MysteryKind") mysteryKind = tag.Length == 0 ? null : tag;
+        if (button.GroupName == "MysteryPool") mysteryRewatch = tag == "Seen";
+        else if (button.GroupName == "MysteryKind") mysteryKind = tag.Length == 0 ? null : tag;
         else mysteryLength = Enum.Parse<MysteryLength>(tag);
         RenderMystery(redraw: false, animate: true);
     }
     private void DrawMystery(object sender, RoutedEventArgs e)
     {
-        if (GuestLibrary ? guestDraw is not { Unseen: > 0 } : homeUnseen.Length == 0) { RefreshHomePicks(sender, e); return; }
+        if (GuestLibrary ? guestDraw is not { Unseen: > 0 } : homeUnseen.Length + homeSeen.Length == 0) { RefreshHomePicks(sender, e); return; }
         mysteryDraw = Random.Shared.Next(); RenderMystery(redraw: true, animate: true);
     }
     private void RefreshHomePicks(object sender, RoutedEventArgs e)
