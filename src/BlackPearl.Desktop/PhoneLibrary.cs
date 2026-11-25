@@ -191,6 +191,18 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         bool Watched(string id) => playback.GetValueOrDefault("watched:" + id) == "true";
         long Position(string id) => long.TryParse(playback.GetValueOrDefault("position:" + id), out var at) ? Math.Max(0, at) : 0;
         var byId = source.ToDictionary(x => x.Id);
+        // A card is watched as the PC's own card is (LibraryWatchProgress.IsWatched): a show or a season once every episode
+        // the library has is, a film also when another copy of it is. Continue watching names an episode not finished yet.
+        var shows = page.Entries.Any(entry => entry.Level is "series" or "season" or "episode")
+            ? source.Where(item => item.Series is not null).ToLookup(LibraryIdentity.ShowKey) : null;
+        var films = page.Entries.Any(entry => entry.Level == "movie") ? source.Where(item => item.Series is null).ToArray() : [];
+        bool CardWatched(SharedLibraryEntry entry)
+        {
+            if (entry.HomeSection == "continue" || byId.GetValueOrDefault(entry.Id) is not { } item) return Watched(entry.Id);
+            var members = item.Series is null ? films : shows?[LibraryIdentity.ShowKey(item)] ?? [];
+            return LibraryWatchProgress.IsWatched(members, new LibraryCard("", "", null, item, entry.Level, entry.Season, Versions: item.Series is null ? 2 : 1),
+                Watched, Position);
+        }
         var entries = page.Entries.Select(entry =>
         {
             var file = entry.Level is "movie" or "episode" || entry.HomeSection == "continue";
@@ -198,7 +210,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             var overview = entry.Level is "series" or "season" && byId.GetValueOrDefault(entry.Id)?.Overview is { Length: > 0 } show ? show[..Math.Min(show.Length, 400)] : entry.Overview;
             return new Entry(entry.Id, entry.Title, entry.Caption, entry.Level, entry.Season, entry.Episode, overview, entry.Kind,
                 entry.RuntimeMinutes, entry.Year, entry.Episodes, entry.HomeSection, file ? Math.Max(entry.PositionMs, Position(entry.Id)) : 0,
-                file && Watched(entry.Id), entry.Thumbnail, file);
+                CardWatched(entry), entry.Thumbnail, file);
         }).ToArray();
         // Each message is at most 64 KiB: summaries shorten first, then the page drops entries from its end.
         for (var limit = 400; ; limit /= 2)
