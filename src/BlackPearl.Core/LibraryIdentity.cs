@@ -74,6 +74,9 @@ public static class LibraryIdentity
         (item.LockedFields ?? []).Concat(item.LocalMetadataFields ?? []).Contains(field, StringComparer.OrdinalIgnoreCase);
     public static IEnumerable<int> EpisodeNumbers(MediaItem item) => item.Episode is { } start
         ? Enumerable.Range(start, Math.Clamp((item.EpisodeEnd ?? start) - start + 1, 1, 100)) : [];
-    public static int EpisodeCount(IEnumerable<MediaItem> items) => items.Where(x => !x.IsBonus).SelectMany(item => item.Season is null || item.NumberingConflict is not null
-        ? ["file:" + item.Id] : EpisodeNumbers(item).Select(n => $"{item.Season}:{n}").DefaultIfEmpty("file:" + item.Id)).Distinct().Count();
+    public static int EpisodeCount(IEnumerable<MediaItem> items) => items.Where(x => !x.IsBonus).SelectMany(EpisodeKeys).Distinct().Count();
+    // The episodes a file holds, as a show's episode count counts them: one per episode number in its season, or the file
+    // itself when its numbering is unknown or conflicting.
+    public static IEnumerable<string> EpisodeKeys(MediaItem item) => item.Season is null || item.NumberingConflict is not null
+        ? ["file:" + item.Id] : EpisodeNumbers(item).Select(n => $"{item.Season}:{n}").DefaultIfEmpty("file:" + item.Id);
 }

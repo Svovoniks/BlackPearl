@@ -48,7 +48,7 @@ public partial class MainWindow
 
     private void PhoneProgressSaved(MediaItem item, PhoneProgress progress, bool final)
     {
-        foreach (var card in libraryCards.Where(x => x.Card.Media.Id == item.Id)) UpdateCardPlayback(card);
+        foreach (var card in libraryCards.Where(x => x.Card.Media.Id == item.Id || ShowCardOf(x, item))) UpdateCardPlayback(card);
         // Home shows the title at the front of Continue watching as soon as the phone has played enough of it to count,
         // not only once the phone leaves it: a phone left paused never says it has. Once in front, the title's place
         // and time left change when the phone leaves the video. A video Home doesn't lead with even then (one watched

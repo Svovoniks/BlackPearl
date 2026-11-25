@@ -11,7 +11,7 @@ static class BorderAudit
 {
     public static List<string> Find(Visual root)
     {
-        var found = new List<string>(); var all = new List<FrameworkElement>(); var state = "";
+        var found = new List<string>(); var all = new List<FrameworkElement>();
         // Hidden (not collapsed) outlines keep their layout: hover rings wait that way until the pointer arrives.
         void Collect(DependencyObject node)
         {
@@ -22,18 +22,9 @@ static class BorderAudit
         void Check()
         {
             foreach (var element in all)
-                if (Outline(element) is { } stroke && Clipped(root, element) is { } finding) found.Add($"{Describe(element)} ({stroke}) {finding}{state}");
+                if (Outline(element) is { } stroke && Clipped(root, element) is { } finding) found.Add($"{Describe(element)} ({stroke}) {finding}");
         }
         Collect(root); Check();
-        // Hovered Home artwork rises 6px; check every card in its raised position too.
-        var lifts = all.Where(x => x.Style is { } style && ReferenceEquals(style, x.TryFindResource("HomeArtwork")) && x.RenderTransform is TranslateTransform { IsFrozen: false })
-            .Select(x => (TranslateTransform)x.RenderTransform).ToList();
-        if (lifts.Count > 0)
-        {
-            foreach (var lift in lifts) lift.Y = -6;
-            state = " while hovered"; Check();
-            foreach (var lift in lifts) lift.Y = 0;
-        }
         return found.Distinct().ToList();
     }
 

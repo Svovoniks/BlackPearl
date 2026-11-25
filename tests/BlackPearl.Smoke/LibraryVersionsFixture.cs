@@ -272,5 +272,8 @@ static class LibraryVersionsFixture
         var store = new LibraryStore(Path.Combine(directory, "film-copies-db"));
         store.Setting("version:" + key, "1080p BluRay x265");
         check(store.PlaybackSettings().GetValueOrDefault("version:" + key) == "1080p BluRay x265", "playback settings carry the versions chosen for titles");
+        store.Setting("position:a", "12000"); store.Setting("position:b'\"", "5");
+        var read = store.Settings(["position:a", "position:b'\"", "position:missing", "position:a"]);
+        check(read.Count == 2 && read["position:a"] == "12000" && read["position:b'\""] == "5", "settings read together return the keys that are set, quotes included");
     }
 }

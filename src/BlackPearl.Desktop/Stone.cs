@@ -6,7 +6,7 @@ using System.Windows.Media.Imaging;
 namespace BlackPearl.Desktop;
 
 // How high a stone stands off the page, which sets the softness, drop and darkness of its shadow.
-public enum StoneDepth { None, Disc, Chip, Pebble, Pressed, Poster, Lifted, Slab, Popup, Dialog }
+public enum StoneDepth { None, Disc, Chip, Pebble, Pressed, Poster, Slab, Popup, Dialog }
 
 // The app's one material (see the pebble in App.xaml): a Border that stands off the page. Below itself it draws a soft
 // shadow, and along its top edge a thin highlight that fades down the sides, so its edge comes from light and shadow
@@ -59,6 +59,11 @@ public class Stone : Border
     internal static Geometry? Loose(Geometry? clip, Size size) =>
         clip is not null && clip.Bounds.Width >= size.Width - 1 && clip.Bounds.Height >= size.Height - 1 ? null : clip;
 
+    // The shadow is drawn outside the stone, and anything drawn takes clicks, so a stone that takes input would catch
+    // presses meant for whatever lies under its shadow. Only the stone itself takes them.
+    protected override HitTestResult? HitTestCore(PointHitTestParameters hitTestParameters) =>
+        new Rect(RenderSize).Contains(hitTestParameters.HitPoint) ? base.HitTestCore(hitTestParameters) : null;
+
     private static readonly Dictionary<(int, bool), Pen> sheens = [];
     // A one-pixel line in the highlight colour at the top, fading out where the corners turn down into the sides.
     private static Pen SheenPen(double radius, bool light)
@@ -75,9 +80,14 @@ public class Stone : Border
 
 // The root of a template that holds a stone (the pebble's): like Stone, it is not clipped to its layout slot over a rounding
 // fraction, so the stone's shadow is not cut off at fractional display scalings.
+// It also takes clicks across its whole area. A template's stone and the light drawn over it take no input
+// (IsHitTestVisible="False"), and a panel with no fill takes none either, so a pebble took clicks only on its text or icon:
+// a press near a button's edge went through to the page behind it.
 public class StoneHost : Grid
 {
     protected override Geometry? GetLayoutClip(Size layoutSlotSize) => ClipToBounds ? base.GetLayoutClip(layoutSlotSize) : Stone.Loose(base.GetLayoutClip(layoutSlotSize), RenderSize);
+    protected override HitTestResult? HitTestCore(PointHitTestParameters hitTestParameters) =>
+        new Rect(RenderSize).Contains(hitTestParameters.HitPoint) ? new PointHitTestResult(this, hitTestParameters.HitPoint) : null;
 }
 
 // Shadow bitmaps for stones, blurred once per shape and kept. A shape wider (or taller) than its corners plus the blur
@@ -91,7 +101,6 @@ public static class StoneShadow
         StoneDepth.Chip => new(10, 3, 0.26),
         StoneDepth.Pressed => new(6, 1, 0.3),
         StoneDepth.Poster => new(16, 7, 0.4),
-        StoneDepth.Lifted => new(24, 12, 0.46),
         StoneDepth.Slab => new(30, 10, 0.3),
         StoneDepth.Popup => new(16, 5, 0.42),
         StoneDepth.Dialog => new(40, 16, 0.5),

@@ -25,6 +25,9 @@ public partial class MainWindow
         foreach (var card in libraryCards.Where(card => card.Card.Media.Id == item.Id || LibraryIdentity.SameShow(card.Card.Media, item) || LibraryIdentity.SameFilm(card.Card.Media, item)))
             UpdateCardPlayback(card);
     }
+    // A show's or season's card, whose progress moves as one of its episodes plays.
+    private static bool ShowCardOf(LibraryCardView card, MediaItem episode) => episode.Series is not null &&
+        (card.Card.Level == "series" || card.Card.Level == "season" && card.Card.Season == (episode.Season ?? -1)) && LibraryIdentity.SameShow(card.Card.Media, episode);
     private bool HasPlaybackQueue => queue.Count > 0 || room?.Snapshot?.Queue?.Length > 0;
     // A loaded queue continues only the video it started; other videos offer their next episode.
     private bool PlayingFromQueue(MediaItem? item) => item is not null && queuePosition >= 0 && queuePosition < queue.Count && queue[queuePosition].Id == item.Id;

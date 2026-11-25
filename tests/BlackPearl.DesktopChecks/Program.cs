@@ -563,6 +563,10 @@ static class Program
         check(Crumbs(true).Select(x => x.Label).SequenceEqual(["Shows", "Navigation Show", "Season 1", "Episode 1 · The Beginning"]), "episode details display the complete hierarchy from their category");
         window.UpdateLayout(); var clipped = BorderAudit.Find((System.Windows.Media.Visual)window.Content);
         check(clipped.Count == 0, "details breadcrumbs and disclosure outlines are not clipped" + string.Concat(clipped.Select(x => Environment.NewLine + "  " + x)));
+        // Pebble buttons once took clicks only on their text: a press near the edge of Play went through to the page.
+        var dead = ClickTargetAudit.Find((UIElement)window.Content);
+        check(dead.Count == 0 && window.FindName("DetailPlay") is FrameworkElement { IsVisible: true },
+            "details buttons take clicks right up to their edges" + string.Concat(dead.Select(x => Environment.NewLine + "  " + x)));
         ClickCrumb(Crumbs(true).Single(x => x.Level == "season"));
         await Wait(() => cards.Count == 1 && cards[0].Card.Media.Id == show.Id);
         check(((FrameworkElement)window.FindName("LibraryPage")).Visibility == Visibility.Visible && Crumbs().Last().Level == "season", "season breadcrumb returns from episode details to its grid");
@@ -1646,6 +1650,16 @@ static class Program
             showEpisodes.Where(item => item.Season != 1).All(item => store.Setting("watched:" + item.Id) != "true"),
             "season checkmark toggles only that season's episodes");
         var showCard = new LibraryCardView(new(episode.Series!, "", null, episode, "series")); cards.Add(showCard);
+        // Show and season cards light their artwork with how much has been watched, as film cards do. A card of its own, so
+        // the show card below still starts unwatched for its checkmark.
+        var showProbe = new LibraryCardView(new(episode.Series!, "", null, episode, "series"));
+        Call("UpdateCardPlayback", showProbe);
+        var localEpisodes = showEpisodes.Where(item => !item.IsVirtual && !item.IsExtra).ToArray();
+        check(seasonCard.ShowsPlaybackBar && seasonCard.Progress == 100 && seasonCard.PlaybackLabel == "Watched" &&
+            (localEpisodes.All(item => item.Season == 1)
+                ? showProbe.IsWatched && showProbe.Progress == 100 && showProbe.ShowsPlaybackBar
+                : showProbe.ShowsPlaybackBar && showProbe.Progress is > 0 and < 100 && showProbe.PlaybackLabel.Contains("% · ") && showProbe.PlaybackLabel.EndsWith(" episodes")),
+            $"show and season cards show how much has been watched (show: {showProbe.Progress:F0}%, \"{showProbe.PlaybackLabel}\")");
         watchedButton.DataContext = showCard; Call("ToggleCardWatched", watchedButton, new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
         check(showCard.IsWatched && showEpisodes.All(item => store.Setting("watched:" + item.Id) == "true"),
             "show checkmark marks every season watched");

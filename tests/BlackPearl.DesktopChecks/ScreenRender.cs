@@ -64,6 +64,7 @@ static class ScreenRender
             await using var file = File.Create(Path.Combine(output, name + ".png")); encoder.Save(file);
             Console.WriteLine("Saved " + name);
             foreach (var finding in BorderAudit.Find(root)) Console.WriteLine($"CLIPPED {name}: {finding}");
+            foreach (var finding in ClickTargetAudit.Find(root)) Console.WriteLine($"DEAD EDGE {name}: {finding}");
             // Audit the rest of long pages scrolled into view.
             var scrolled = Descendants(root).OfType<ScrollViewer>().Where(x => x.IsVisible && x.ScrollableHeight > 0 && x.VerticalOffset == 0).ToList();
             if (scrolled.Count > 0)
@@ -203,6 +204,65 @@ static class ScreenRender
             var strip = new RenderTargetBitmap(w, h * frames.Count, 96, 96, PixelFormats.Pbgra32); strip.Render(visual);
             var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(strip));
             await using (var file = File.Create(Path.Combine(output, "dark-category-glide.png"))) encoder.Save(file);
+        }
+        // Pointing at a card: its picture zooms inside the frame while the frame stays put. The first cards in view, hovered the way
+        // the card's IsMouseOver trigger does it, drawn every 30 ms as the zoom runs in and back out, at the window's own scaling
+        // and twice the size; the top row is the way in, the bottom row the way out. Then the window with one card held hovered.
+        async Task CaptureCardHover(string name)
+        {
+            var root = (FrameworkElement)window.Content;
+            bool Artwork(Stone stone) => stone.Style is { } style && new[] { "ArtworkFrame", "HomeArtwork" }.Any(key =>
+                stone.TryFindResource(key) is Style named && (ReferenceEquals(style, named) || ReferenceEquals(style.BasedOn, named)));
+            List<(Stone stone, FrameworkElement card, Rect box)> InView() => Descendants(root).OfType<Stone>().Where(stone => stone.IsVisible && Artwork(stone)).Select(stone =>
+            {
+                var card = (FrameworkElement)Descendants(root).OfType<Button>().First(button => button.IsAncestorOf(stone));
+                var at = card.TranslatePoint(new Point(0, 0), root);
+                return (stone, card, box: new Rect(at.X - 24, at.Y - 24, card.ActualWidth + 48, card.ActualHeight + 48));
+            }).Where(x => new Rect(0, 0, root.ActualWidth, root.ActualHeight).Contains(x.box)).Take(2).ToList();
+            var cards = InView();
+            // Home's rows start below the hero: scroll the first tile into view.
+            var page = Descendants(root).OfType<ScrollViewer>().FirstOrDefault(x => x.IsVisible && x.Name == "HomePage");
+            if (cards.Count == 0 && page is not null && Descendants(page).OfType<Stone>().FirstOrDefault(x => x.IsVisible && Artwork(x)) is { } first)
+            {
+                var top = first.TranslatePoint(new Point(0, 0), (UIElement)page.Content).Y;
+                page.ScrollToVerticalOffset(top - 60); await Settle(600); cards = InView();
+            }
+            if (cards.Count == 0) { Console.WriteLine($"HOVER {name}: no card in view"); return; }
+            var area = cards.Select(x => x.box).Aggregate(Rect.Union);
+            var frames = new List<List<BitmapSource>>();
+            foreach (var hovered in new[] { true, false })
+            {
+                var row = new List<BitmapSource>(); frames.Add(row);
+                foreach (var (stone, _, _) in cards) BlackPearl.Desktop.ArtworkZoom.SetHovered(stone, hovered);
+                for (var at = DateTime.UtcNow; DateTime.UtcNow - at < TimeSpan.FromMilliseconds(420);)
+                {
+                    await Dispatcher.Yield(DispatcherPriority.Render); window.UpdateLayout();
+                    var full = Picture(root); full.Render(root); var dpi = VisualTreeHelper.GetDpi(root).DpiScaleX;
+                    row.Add(new CroppedBitmap(full, new Int32Rect((int)(area.X * dpi), (int)(area.Y * dpi), (int)(area.Width * dpi), (int)(area.Height * dpi))));
+                    await Task.Delay(30);
+                }
+                await Settle(400);
+            }
+            var columns = Math.Min(frames.Max(r => r.Count), 8);
+            var visual = new DrawingVisual(); RenderOptions.SetBitmapScalingMode(visual, BitmapScalingMode.NearestNeighbor);
+            int fw = frames[0][0].PixelWidth, fh = frames[0][0].PixelHeight;
+            using (var draw = visual.RenderOpen())
+            {
+                draw.DrawRectangle(Brushes.Magenta, null, new Rect(0, 0, columns * (fw + 6), 2 * (fh + 6)));
+                for (var r = 0; r < 2; r++)
+                    for (var c = 0; c < columns; c++)
+                    {
+                        var index = Math.Min(frames[r].Count - 1, (int)Math.Round(c * (frames[r].Count - 1) / (double)(columns - 1)));
+                        draw.DrawImage(frames[r][index], new Rect(c * (fw + 6), r * (fh + 6), fw, fh));
+                    }
+            }
+            var strip = new RenderTargetBitmap(columns * (fw + 6), 2 * (fh + 6), 96, 96, PixelFormats.Pbgra32); strip.Render(visual);
+            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(strip));
+            await using (var file = File.Create(Path.Combine(output, name + "-hover-frames.png"))) encoder.Save(file);
+            BlackPearl.Desktop.ArtworkZoom.SetHovered(cards[0].stone, true);
+            await Capture(name + "-hover", 800);
+            foreach (var finding in ClickTargetAudit.Find(root)) Console.WriteLine($"DEAD EDGE {name}-hover: {finding}");
+            BlackPearl.Desktop.ArtworkZoom.SetHovered(cards[0].stone, false); page?.ScrollToHome(); await Settle(500);
         }
         // A dialog, opened the way the app opens it, drawn over the window once it has settled, then closed. Dialogs float in a
         // popup of their own, so their layer is drawn onto the window's picture. Opening may wait for an answer, so the picture is
@@ -352,7 +412,7 @@ static class ScreenRender
         {
             Set("light", theme == "light"); Call("ApplyTheme");
             await CaptureFileDetails(theme);
-            Call("ShowPage", "Home"); await Capture($"{theme}-home"); await CaptureHeroButtons(theme);
+            Call("ShowPage", "Home"); await Capture($"{theme}-home"); await CaptureCardHover($"{theme}-home"); await CaptureHeroButtons(theme);
             // Home scrolled to the mystery deck, with its filters as they open, then with the last choice on each thread.
             var home = (ScrollViewer)window.FindName("HomePage"); var deck = (FrameworkElement)window.FindName("HomeMysteryPanel");
             // The Unwatched row, newest first, and its See all link focused.
@@ -368,7 +428,7 @@ static class ScreenRender
             await CaptureFocused($"{theme}-home-mystery-focus", filters[1][^1]);
             foreach (var row in filters) row[0].IsChecked = true;
             home.ScrollToHome();
-            Call("NavigateLibrary", 0, null, null, null); await Capture($"{theme}-library");
+            Call("NavigateLibrary", 0, null, null, null); await Capture($"{theme}-library"); await CaptureCardHover($"{theme}-library");
             if (theme == "dark") { await CaptureFocused($"{theme}-library-focus", (FrameworkElement)window.FindName("AllLibraryNav")); await CaptureCountRoll(); await CaptureCategoryGlide(); }
             // The sidebar folded into its strip of icons.
             Call("SetRailCollapsed", true); await Capture($"{theme}-library-collapsed");
@@ -400,11 +460,22 @@ static class ScreenRender
                 var search = (TextBox)window.FindName("SearchBox"); search.Text = copies.ShownName; await Capture($"{theme}-search-versions", 2500); search.Text = "";
             }
             var store = (LibraryStore)Field("library")!; var wanted = store.Wanted();
+            // A show watched part-way: its card found by Search, and its seasons, light their artwork with how far it got.
+            var played = store.PlaybackSettings();
+            var partShow = items.Where(item => item.Series is not null && !item.IsVirtual).GroupBy(LibraryIdentity.ShowKey).Select(group => group.First())
+                .FirstOrDefault(item => LibraryWatchProgress.Progress(items, new LibraryCard(item.Series!, "", null, item, "series"),
+                    id => played.GetValueOrDefault("watched:" + id) == "true", id => long.TryParse(played.GetValueOrDefault("position:" + id), out var at) ? at : 0).Percent is > 0 and < 100);
+            if (partShow is not null)
+            {
+                Call("NavigateLibrary", 0, null, null, null); Call("OpenSearch", false);
+                var search = (TextBox)window.FindName("SearchBox"); search.Text = partShow.Series!; await Capture($"{theme}-search-show-progress", 2500); search.Text = "";
+                Call("NavigateLibrary", partShow.Kind == "Anime" ? 3 : 2, LibraryIdentity.ShowKey(partShow), partShow.Kind, null); await Capture($"{theme}-show-progress");
+            }
             if (wanted.Count > 0) { Call("NavigateLibrary", 5, null, null, null); await Capture($"{theme}-missing"); }
             if (wanted.FirstOrDefault(x => !x.IsMovie) is { } wantedShow) { Call("NavigateLibrary", wantedShow.Kind == "Anime" ? 3 : 2, wantedShow.Id, wantedShow.Kind, null); await Capture($"{theme}-wanted-show"); }
             if (wanted.FirstOrDefault(x => x.IsMovie) is { } wantedFilm && store.Get(wantedFilm.Id) is { } placeholder) { Call("Select", placeholder); await Capture($"{theme}-wanted-film"); }
             Call("NavigateLibrary", 0, null, null, null); Call("OpenSearch", false); await Capture($"{theme}-search");
-            foreach (var page in new[] { "Queues", "Rooms", "Folders", "Room" }) { Call("ShowPage", page); await Capture($"{theme}-{page.ToLowerInvariant()}"); }
+            foreach (var page in new[] { "Queues", "Rooms", "Folders", "Room" }) { Call("ShowPage", page); await Capture($"{theme}-{page.ToLowerInvariant()}"); if (page == "Queues") await CaptureCardHover($"{theme}-queues"); }
             // The empty player after a phone took its video over (PhonePlayback.cs), with a long title.
             typeof(MainWindow).GetField("watchingOnPhone", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, "Harbor Lights · S2 E7 · The Night the Lighthouse Went Dark");
             var subtitle = (TextBlock)window.FindName("RoomSubtitle"); var resting = subtitle.Text; subtitle.Text = "Continuing on your phone";

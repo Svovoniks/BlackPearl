@@ -83,19 +83,16 @@
    <!-- Home -->
    <ScrollViewer x:Name="HomePage" Visibility="Collapsed" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
     <ScrollViewer.Resources>
-     <!-- A plain clickable surface: hover lifts the artwork and outlines it in the accent colour. -->
+     <!-- A plain clickable surface, all of it: its transparent fill takes clicks between the artwork and the text too. -->
      <Style x:Key="HomeTile" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,14,0"/><Setter Property="MinHeight" Value="0"/>
       <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Top"/>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/></ControlTemplate></Setter.Value></Setter>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}"><ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/></Border></ControlTemplate></Setter.Value></Setter>
      </Style>
      <Style x:Key="HomeArtwork" TargetType="local:Stone">
       <Setter Property="Depth" Value="Poster"/><Setter Property="Background" Value="{DynamicResource Elevated}"/><Setter Property="CornerRadius" Value="12"/><Setter Property="local:RoundedClip.Radius" Value="12"/>
-      <!-- Each frame declares its own TranslateTransform: a transform shared through a style setter is frozen and cannot animate. -->
-      <Style.Triggers><DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True"><Setter Property="Depth" Value="Lifted"/>
-       <DataTrigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="-6" Duration="0:0:0.22"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></DataTrigger.EnterActions>
-       <DataTrigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="0" Duration="0:0:0.3"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation></Storyboard></BeginStoryboard></DataTrigger.ExitActions>
-      </DataTrigger></Style.Triggers>
+      <!-- Pointing at the tile zooms its picture a little inside the frame, which stays where it is (ArtworkZoom). -->
+      <Style.Triggers><DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True"><Setter Property="local:ArtworkZoom.Hovered" Value="True"/></DataTrigger></Style.Triggers>
      </Style>
      <Style x:Key="CardBack" TargetType="Border">
       <Setter Property="Width" Value="128"/><Setter Property="Height" Value="190"/><Setter Property="CornerRadius" Value="11"/><Setter Property="BorderThickness" Value="1"/>
@@ -116,7 +113,7 @@
      <DataTemplate x:Key="HomeTilePoster">
       <Button Click="OpenHomeCard" Loaded="HomeItemLoaded" Style="{StaticResource HomeTile}" Width="140" ToolTip="{Binding DisplayTitle}" AutomationProperties.Name="{Binding DisplayTitle}">
        <StackPanel>
-        <local:Stone Height="210" Style="{StaticResource HomeArtwork}"><Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+        <local:Stone Height="210" Style="{StaticResource HomeArtwork}">
          <Grid><TextBlock Text="{Binding DisplayTitle}" Margin="12" FontSize="15" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource Muted}"/><Image Source="{Binding Poster, NotifyOnTargetUpdated=True}" TargetUpdated="HomeArtworkUpdated" Stretch="UniformToFill" Loaded="HomeArtworkLoaded"/></Grid>
         </local:Stone>
         <TextBlock Text="{Binding DisplayTitle}" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="2,9,2,1"/>
@@ -139,11 +136,11 @@
          <TextBlock Text="{Binding Label}" FontSize="19" FontWeight="SemiBold" VerticalAlignment="Bottom"/>
          <TextBlock Text="{Binding CountText}" Foreground="{DynamicResource Muted}" FontSize="12" Margin="10,0,0,3" VerticalAlignment="Bottom"/>
         </DockPanel>
-        <!-- Room above for artwork that lifts when pointed at, and below for its shadow, which the scroller would cut off. -->
+        <!-- Room around the artwork for its shadow, which the scroller would cut off. -->
         <local:HorizontalScroller Padding="0,10,0,26" ArrowCenter="115">
          <StackPanel Orientation="Horizontal">
           <Button Click="OpenHomeCard" DataContext="{Binding Spotlight}" DataContextChanged="HomeSpotlightChanged" Loaded="HomeItemLoaded" Style="{StaticResource HomeTile}" Width="400" Height="210" VerticalAlignment="Top" VerticalContentAlignment="Stretch" Margin="0,0,16,0" ToolTip="{Binding DisplayTitle}" AutomationProperties.Name="{Binding DisplayTitle}">
-           <local:Stone Style="{StaticResource HomeArtwork}" CornerRadius="12" local:RoundedClip.Radius="12"><Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+           <local:Stone Style="{StaticResource HomeArtwork}" CornerRadius="12" local:RoundedClip.Radius="12">
             <Grid>
              <Image Source="{Binding Poster, Converter={StaticResource DetailBackdrop}}" Stretch="UniformToFill" RenderOptions.BitmapScalingMode="LowQuality"/>
              <Image Source="{Binding Poster, NotifyOnTargetUpdated=True}" TargetUpdated="HomeArtworkUpdated" Stretch="UniformToFill" Width="250" HorizontalAlignment="Right" Loaded="HomeArtworkLoaded"/>
@@ -218,7 +215,7 @@
        <TextBlock Text="Unwatched" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Bottom"/>
        <TextBlock x:Name="HomeUnwatchedCount" Foreground="{DynamicResource Muted}" FontSize="12" Margin="10,0,0,4" VerticalAlignment="Bottom"/>
       </DockPanel>
-      <!-- Room above for artwork that lifts when pointed at, and below for its shadow, which the scroller would cut off. -->
+      <!-- Room around the artwork for its shadow, which the scroller would cut off. -->
       <local:HorizontalScroller Padding="0,10,0,26" ArrowCenter="115">
        <ItemsControl x:Name="HomeUnwatched" ItemTemplate="{StaticResource HomeTilePoster}" AutomationProperties.Name="Unwatched"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel></ItemsControl>
       </local:HorizontalScroller>
@@ -257,7 +254,7 @@
           <Grid Width="128" Height="190" VerticalAlignment="Top" RenderTransformOrigin="0.5,1"><Grid.RenderTransform><TransformGroup><RotateTransform x:Name="MysteryLeftTilt" Angle="-11"/><TranslateTransform x:Name="MysteryLeftShift" X="-78" Y="8"/></TransformGroup></Grid.RenderTransform><Image Source="{x:Static local:SoftShadow.Card}" Margin="-30" IsHitTestVisible="False"/><Border Style="{StaticResource CardBack}"><Grid><Border CornerRadius="10" Background="{DynamicResource CardStripes}"/><TextBlock Text="?" FontSize="46" FontWeight="Bold" Foreground="{DynamicResource Accent}" Opacity="0.55" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid></Border></Grid>
           <Grid Width="128" Height="190" VerticalAlignment="Top" RenderTransformOrigin="0.5,1"><Grid.RenderTransform><TransformGroup><RotateTransform x:Name="MysteryRightTilt" Angle="11"/><TranslateTransform x:Name="MysteryRightShift" X="78" Y="8"/></TransformGroup></Grid.RenderTransform><Image Source="{x:Static local:SoftShadow.Card}" Margin="-30" IsHitTestVisible="False"/><Border Style="{StaticResource CardBack}"><Grid><Border CornerRadius="10" Background="{DynamicResource CardStripes}"/><TextBlock Text="?" FontSize="46" FontWeight="Bold" Foreground="{DynamicResource Accent}" Opacity="0.55" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid></Border></Grid>
           <Button x:Name="HomeMysteryCard" Click="OpenHomeCard" Style="{StaticResource HomeTile}" Width="128" Height="190" Margin="0" VerticalContentAlignment="Stretch" VerticalAlignment="Top" AutomationProperties.Name="{Binding DisplayTitle, StringFormat=Mystery pick: {0}}">
-           <local:Stone Style="{StaticResource HomeArtwork}" CornerRadius="11" local:RoundedClip.Radius="11"><Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+           <local:Stone Style="{StaticResource HomeArtwork}" CornerRadius="11" local:RoundedClip.Radius="11">
             <Grid><TextBlock Text="{Binding DisplayTitle}" Margin="12" FontSize="15" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource Muted}"/><Image Source="{Binding Poster, NotifyOnTargetUpdated=True}" TargetUpdated="HomeArtworkUpdated" Stretch="UniformToFill" Loaded="HomeArtworkLoaded"/></Grid>
            </local:Stone>
           </Button>
@@ -446,7 +443,7 @@
           <Image x:Name="CardArtwork" Source="{Binding Poster, NotifyOnTargetUpdated=True}" ImageFailed="CardArtworkFailed" Loaded="CardArtworkLoaded" TargetUpdated="CardArtworkUpdated"><Image.Style><Style TargetType="Image"><Setter Property="Stretch" Value="UniformToFill"/><Style.Triggers><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsEpisode}" Value="True"/><Condition Binding="{Binding PosterFills}" Value="False"/></MultiDataTrigger.Conditions><Setter Property="Stretch" Value="Uniform"/></MultiDataTrigger><DataTrigger Binding="{Binding IsMusic}" Value="True"><Setter Property="Stretch" Value="Uniform"/></DataTrigger><DataTrigger Binding="{Binding DimArtwork}" Value="True"><Setter Property="Opacity" Value="0.55"/></DataTrigger><DataTrigger Binding="{Binding HasNoFiles}" Value="True"><Setter Property="Opacity" Value="0.4"/></DataTrigger></Style.Triggers></Style></Image.Style></Image>
           <Rectangle RadiusX="12" RadiusY="12" Stroke="{DynamicResource Muted}" StrokeThickness="1.5" StrokeDashArray="4 3" Margin="1" IsHitTestVisible="False"><Rectangle.Style><Style TargetType="Rectangle"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding HasNoFiles}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Rectangle.Style></Rectangle>
           <local:Stone HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10" Padding="9,3" CornerRadius="9" Depth="Disc" AlwaysDark="True" IsHitTestVisible="False"><Border.Style><Style TargetType="local:Stone"><Setter Property="Visibility" Value="Collapsed"/><Setter Property="Background" Value="{DynamicResource Danger}"/><Style.Triggers><DataTrigger Binding="{Binding HasEpisodeStatus}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger><DataTrigger Binding="{Binding IsUpcoming}" Value="True"><Setter Property="Background" Value="{DynamicResource Accent}"/></DataTrigger></Style.Triggers></Style></Border.Style><TextBlock Text="{Binding EpisodeStatus}" FontSize="11" FontWeight="SemiBold"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Foreground" Value="#FFFFFF"/><Style.Triggers><DataTrigger Binding="{Binding IsUpcoming}" Value="True"><Setter Property="Foreground" Value="{DynamicResource AccentInk}"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock></local:Stone>
-          <Border VerticalAlignment="Bottom" Padding="10,22,10,9" IsHitTestVisible="False"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000" Offset="0"/><GradientStop Color="#E0000000" Offset="0.55"/></LinearGradientBrush></Border.Background><Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsMovie}" Value="True"/><Condition Binding="{Binding HasPlaybackProgress}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger></Style.Triggers></Style></Border.Style><Grid><local:ProgressLip Progress="{Binding Progress, Mode=OneWay}" Fill="{DynamicResource Accent}" Height="NaN" VerticalAlignment="Stretch" Margin="-10,-22,-10,-9"/><TextBlock Text="{Binding PlaybackLabel}" Foreground="#F4F4F7" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,8"/></Grid></Border>
+          <Border VerticalAlignment="Bottom" Padding="10,22,10,9" IsHitTestVisible="False"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000" Offset="0"/><GradientStop Color="#E0000000" Offset="0.55"/></LinearGradientBrush></Border.Background><Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding ShowsPlaybackBar}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Border.Style><Grid><local:ProgressLip Progress="{Binding Progress, Mode=OneWay}" Fill="{DynamicResource Accent}" Height="NaN" VerticalAlignment="Stretch" Margin="-10,-22,-10,-9"/><TextBlock Text="{Binding PlaybackLabel}" Foreground="#F4F4F7" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="0,0,0,8"/></Grid></Border>
            <!-- An episode's progress lights the bottom of its still. -->
            <local:ProgressLip Progress="{Binding Progress, Mode=OneWay}" Fill="{DynamicResource Accent}"><local:ProgressLip.Style><Style TargetType="local:ProgressLip"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding IsEpisode}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></local:ProgressLip.Style></local:ProgressLip>
            <!-- A selected card: dimmed artwork with an accent edge and a check. -->
