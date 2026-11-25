@@ -1,6 +1,8 @@
 namespace BlackPearl.Core;
 
-public record LibraryBrowseRequest(string Query = "", int Category = 0, string? ParentId = null, int? Season = null, int Page = 0, bool Home = false, int Seed = 0);
+// Unwatched lists every unstarted title, newest first, as Home's Unwatched row begins it.
+public record LibraryBrowseRequest(string Query = "", int Category = 0, string? ParentId = null, int? Season = null, int Page = 0, bool Home = false, int Seed = 0,
+    bool Unwatched = false);
 public record SharedLibraryEntry(string Id, string Title, string Caption, string Level, int? Season, string Overview,
     string? Thumbnail = null, string Kind = "Movie", int? Episode = null, int? RuntimeMinutes = null,
     string? HomeSection = null, long PositionMs = 0, int? Year = null, int Episodes = 0);
@@ -75,7 +77,7 @@ public static class SharedLibrary
         var items = all.Where(x => x.Available && !x.IsVirtual && !x.IsExtra).ToArray();
         var parent = request.ParentId is null ? null : items.FirstOrDefault(x => x.Id == request.ParentId);
         if (request.ParentId is not null && parent is null) throw new InvalidDataException("This title is no longer available. Return to all titles.");
-        var location = request.Home ? "Home" : parent is null ? "All titles" : parent.DisplayTitle + (request.Season is null ? "" : $" · Season {request.Season}");
+        var location = request.Home ? "Home" : request.Unwatched ? "Unwatched" : parent is null ? "All titles" : parent.DisplayTitle + (request.Season is null ? "" : $" · Season {request.Season}");
         var publicItems = items.Select(x => new MediaItem(x.Id, "", x.Title, x.Kind, x.Year, x.Series, x.Season, x.Episode,
             Overview: x.Overview, EpisodeTitle: x.EpisodeTitle, EpisodeOverview: x.EpisodeOverview,
             ShowId: LibraryIdentity.ShowKey(x), EpisodeEnd: x.EpisodeEnd, Poster: x.Poster,
@@ -85,8 +87,8 @@ public static class SharedLibrary
         // All lists videos; music has its own category. An album opened from it keeps browsing within it.
         var visible = publicItems.Where(x => request.Category switch { 1 => x.Kind == "Movie", 2 => x.Kind == "Show", 3 => x.Kind == "Anime",
             LibraryCatalog.Music => x.IsMusic, _ => parent is not null || !x.IsMusic });
-        var overview = request.Home ? LibraryHome.Overview(all, playback, request.Seed) : null;
-        var home = overview?.Entries;
+        var overview = request.Home || request.Unwatched ? LibraryHome.Overview(all, playback, request.Seed) : null;
+        var home = request.Unwatched ? overview!.Unseen.Select(title => new HomeLibraryCard(title.Card, "unwatched")).ToList() : overview?.Entries;
         // A series' episode count describes it on Home, as in the host's own.
         var episodes = overview?.Unseen.ToDictionary<HomeTitle, LibraryCard, int>(title => title.Card, title => title.Episodes, ReferenceEqualityComparer.Instance);
         var cards = home?.Select(entry => entry.Card).ToList() ?? LibraryCatalog.Search(visible, request.Query, parent is null ? null : LibraryIdentity.ShowKey(publicItems.First(x => x.Id == parent.Id)), parent?.Kind, request.Season);

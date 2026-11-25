@@ -383,7 +383,7 @@ public sealed partial class LibraryStore
     public Dictionary<string, string> PlaybackSettings()
     {
         using var db = Open(); using var command = db.CreateCommand();
-        command.CommandText = "SELECT key, value FROM settings WHERE key LIKE 'watched:%' OR key LIKE 'position:%' OR key LIKE 'played:%' OR key LIKE 'version:%'";
+        command.CommandText = "SELECT key, value FROM settings WHERE key LIKE 'watched:%' OR key LIKE 'position:%' OR key LIKE 'played:%' OR key LIKE 'version:%' OR key LIKE 'added:%'";
         using var rows = command.ExecuteReader(); var result = new Dictionary<string, string>();
         while (rows.Read()) result[rows.GetString(0)] = rows.GetString(1);
         return result;
@@ -638,10 +638,11 @@ public sealed partial class LibraryStore
             command.Parameters.AddWithValue("$id", id);
             if (command.ExecuteNonQuery() == 0) continue;
             removed++;
-            command.CommandText = "DELETE FROM settings WHERE key=$position OR key=$watched OR key=$played";
+            command.CommandText = "DELETE FROM settings WHERE key=$position OR key=$watched OR key=$played OR key=$added";
             command.Parameters.AddWithValue("$position", "position:" + id);
             command.Parameters.AddWithValue("$watched", "watched:" + id);
             command.Parameters.AddWithValue("$played", "played:" + id);
+            command.Parameters.AddWithValue("$added", LibraryAdded.Prefix + id);
             command.ExecuteNonQuery();
         }
         transaction.Commit(); CleanHierarchy();

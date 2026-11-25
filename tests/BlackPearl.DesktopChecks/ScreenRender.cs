@@ -415,6 +415,12 @@ static class ScreenRender
             Call("ShowPage", "Home"); await Capture($"{theme}-home"); await CaptureCardHover($"{theme}-home"); await CaptureHeroButtons(theme);
             // Home scrolled to the mystery deck, with its filters as they open, then with the last choice on each thread.
             var home = (ScrollViewer)window.FindName("HomePage"); var deck = (FrameworkElement)window.FindName("HomeMysteryPanel");
+            // The Unwatched row, newest first, and its See all link focused.
+            if (window.FindName("HomeUnwatchedSection") is FrameworkElement { IsVisible: true } unwatched)
+            {
+                home.ScrollToVerticalOffset(unwatched.TranslatePoint(new Point(0, 0), (UIElement)home.Content).Y - 24); await Capture($"{theme}-home-unwatched");
+                await CaptureFocused($"{theme}-home-unwatched-focus", (FrameworkElement)window.FindName("HomeUnwatchedAll"));
+            }
             home.ScrollToVerticalOffset(deck.TranslatePoint(new Point(0, 0), (UIElement)home.Content).Y - 24); await Capture($"{theme}-home-mystery");
             var filters = Descendants((DependencyObject)window.FindName("HomeMysteryFilters")).OfType<WrapPanel>().Select(row => row.Children.OfType<RadioButton>().ToList()).ToList();
             foreach (var row in filters) row[^1].IsChecked = true;

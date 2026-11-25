@@ -68,7 +68,7 @@ static class PhoneLibraryChecks
             var plays = 0;
             var library = new PhoneLibrary(store, () => remote, action => dispatcher.BeginInvoke(action), CancellationToken.None)
             {
-                Items = () => items, WasWatched = _ => false, SetWatched = (_, _) => { },
+                Items = () => items, WasWatched = _ => false, SetWatched = (_, _) => { }, MarkWatched = (_, _, _, _) => { },
                 Play = (_, _) => { plays++; return Task.FromResult(true); },
             };
             library.Attach(remote);
@@ -165,7 +165,7 @@ static class PhoneLibraryChecks
         var dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
         PhoneLibrary Library() => new(store, () => remote, action => dispatcher.BeginInvoke(action), CancellationToken.None)
         {
-            Items = () => items, WasWatched = _ => false, SetWatched = (_, _) => { }, Play = (_, _) => Task.FromResult(true), Ready = ready.Task,
+            Items = () => items, WasWatched = _ => false, SetWatched = (_, _) => { }, MarkWatched = (_, _, _, _) => { }, Play = (_, _) => Task.FromResult(true), Ready = ready.Task,
         };
         var first = Library();
         first.ReadyWait = TimeSpan.FromSeconds(1);

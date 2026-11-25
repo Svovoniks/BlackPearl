@@ -236,6 +236,8 @@ public partial class MainWindow : Window
                 await housekeeping;
                 if (closing) return;
                 BackfillRuntimes();
+                await RecordAddedDates();
+                if (closing) return;
                 if (await Task.Run(() => library.ExpireTmdbContent(force: true)) && !closing) await RefreshLibrary();
             });
             // Background housekeeping: a failure only means stale entries stay until the next launch.
@@ -590,6 +592,15 @@ public partial class MainWindow : Window
             var brush = new LinearGradientBrush(Parse(light ? plate.LightTop : plate.DarkTop), Parse(light ? plate.LightBottom : plate.DarkBottom), 90);
             brush.Freeze(); resources[plate.Key] = brush;
         }
+    }
+    // Dates the videos new to the library, and once the ones from before dates were kept, for Home's Unwatched row
+    // (LibraryAdded). Off the UI thread: it reads the files' dates.
+    private async Task RecordAddedDates()
+    {
+        var source = items.ToArray();
+        try { if (await Task.Run(() => LibraryAdded.Record(library, source, lifetime.Token)) > 0 && !closing) RefreshHome(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or IOException) { PlaybackDiagnostics.Record("added-dates-failed", new { error = ex.GetType().Name }); }
     }
     private bool runtimeBackfillRunning, runtimeBackfillAgain;
     // Reads video lengths and picture sizes from file headers in the background. Lengths replace provider runtimes, and Home's
@@ -1040,6 +1051,7 @@ public partial class MainWindow : Window
             Interlocked.Exchange(ref pendingScanStatus, null);
             var candidates = wanted.Values.Where(x => x.Candidate is not null).Select(x => x.Id).ToHashSet();
             RefreshLibraryFromItems(scannedItems);
+            _ = RecordAddedDates();
             AnnounceArrivals(candidates);
             ScanStatus.Text = $"Scan complete · {items.Count} files indexed.";
             // A watcher scan that changed nothing has nothing new to identify.

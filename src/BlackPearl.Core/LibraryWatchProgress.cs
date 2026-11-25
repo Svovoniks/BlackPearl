@@ -13,6 +13,22 @@ public static class LibraryWatchProgress
             long.TryParse(settings.GetValueOrDefault("position:" + item.Id), out var position) && position >= 10000);
     }
 
+    // The videos that marking item watched or unwatched changes, item first: a show's or season's episodes; for a film or
+    // episode just its file, except that clearing it also clears the other copies that cover it, which would otherwise
+    // keep the title marked.
+    public static string[] Marked(IEnumerable<MediaItem> source, MediaItem item, string level, int? season, bool watched)
+    {
+        var affected = !watched && level is "movie" or "video" && item.Series is null ? LibraryCatalog.Versions(source, item)
+            : level is "series" or "season"
+            ? source.Where(candidate => !candidate.IsExtra && !candidate.IsVirtual && LibraryIdentity.SameShow(candidate, item) &&
+                (level == "series" || (candidate.Season ?? -1) == season)).ToArray()
+            : !watched && item.Series is not null && item.Season is not null && item.Episode is not null && item.NumberingConflict is null
+            ? source.Where(candidate => LibraryIdentity.SameShow(candidate, item) && candidate.Season == item.Season && candidate.NumberingConflict is null &&
+                LibraryIdentity.EpisodeNumbers(candidate).Intersect(LibraryIdentity.EpisodeNumbers(item)).Any()).ToArray()
+            : [item];
+        return affected.Prepend(item).Select(entry => entry.Id).Distinct().ToArray();
+    }
+
     // A film card with several copies is watched when its copy is, or when another copy is and its own copy isn't part-way:
     // the copy it leads with is the one chosen or played last, as Home's Continue watching row picks it.
     public static bool IsWatched(IEnumerable<MediaItem> source, LibraryCard card, Func<string, bool> watched, Func<string, long>? position = null)

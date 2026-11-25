@@ -195,6 +195,8 @@ internal sealed class PhoneHostProcess(LibraryStore library)
             Items = () => items,
             WasWatched = id => library.Setting("watched:" + id) == "true",
             SetWatched = (item, watched) => library.Setting("watched:" + item.Id, watched ? "true" : "false"),
+            MarkWatched = (item, level, season, watched) => library.SetSettings(LibraryWatchProgress.Marked(items, item, level, season, watched)
+                .Select(id => KeyValuePair.Create("watched:" + id, watched ? "true" : "false"))),
             Play = PlayOnPc,
         };
         phoneLibrary.Attach(link);

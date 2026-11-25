@@ -122,15 +122,7 @@ public partial class MainWindow
     private void MarkWatched(MediaItem item, string level, int? season, bool watched, bool refresh = true)
     {
         // Clearing a logical episode or a film also clears watched versions that cover it.
-        var affected = !watched && level is "movie" or "video" && item.Series is null ? LibraryCatalog.Versions(items, item)
-            : level is "series" or "season"
-            ? items.Where(candidate => !candidate.IsExtra && !candidate.IsVirtual && LibraryIdentity.SameShow(candidate, item) &&
-                (level == "series" || (candidate.Season ?? -1) == season)).ToArray()
-            : !watched && item.Series is not null && item.Season is not null && item.Episode is not null && item.NumberingConflict is null
-            ? items.Where(candidate => LibraryIdentity.SameShow(candidate, item) && candidate.Season == item.Season && candidate.NumberingConflict is null &&
-                LibraryIdentity.EpisodeNumbers(candidate).Intersect(LibraryIdentity.EpisodeNumbers(item)).Any()).ToArray()
-            : [item];
-        var marked = affected.Append(item).Select(entry => entry.Id).Distinct().ToArray();
+        var marked = LibraryWatchProgress.Marked(items, item, level, season, watched);
         library.SetSettings(marked.Select(id => KeyValuePair.Create("watched:" + id, watched ? "true" : "false")));
         foreach (var id in marked) watchedState[id] = watched;
         foreach (var card in libraryCards.Where(card => card.Card.Media.Id == item.Id || LibraryIdentity.SameShow(card.Card.Media, item) || LibraryIdentity.SameFilm(card.Card.Media, item)))

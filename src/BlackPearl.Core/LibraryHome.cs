@@ -1,15 +1,17 @@
 namespace BlackPearl.Core;
 
 public record HomeLibraryCard(LibraryCard Card, string Section, long PositionMs = 0);
-// An unstarted title with the facts Home uses to describe it and filter mystery draws.
-public record HomeTitle(LibraryCard Card, int Episodes, int? Minutes);
+// An unstarted title with the facts Home uses to describe it and filter mystery draws. AddedAt: when its newest file
+// arrived (LibraryAdded), 0 when unknown.
+public record HomeTitle(LibraryCard Card, int Episodes, int? Minutes, long AddedAt = 0);
+// Unseen lists the unstarted titles newest first, as the Unwatched row does.
 public record HomeOverview(List<HomeLibraryCard> Entries, HomeTitle[] Unseen);
 public enum MysteryLength { Any, Short, Evening, LongNight }
 
 public static class LibraryHome
 {
     public static readonly string[] Kinds = ["Anime", "Show", "Movie"];
-    public const int ContinueLimit = 20, SuggestionsPerKind = 7;
+    public const int ContinueLimit = 20, SuggestionsPerKind = 7, UnwatchedLimit = 30;
     public static List<HomeLibraryCard> Browse(IEnumerable<MediaItem> source, IReadOnlyDictionary<string, string>? playback = null, int seed = 0) =>
         Overview(source, playback, seed).Entries;
     // Row seeds let one category reshuffle its suggestions without moving the others.
@@ -36,7 +38,8 @@ public static class LibraryHome
             if (!started)
             {
                 unseen.Add(new(title, title.Level == "series" ? files.Length : 0,
-                    files.Select(item => item.RuntimeMinutes).FirstOrDefault(minutes => minutes > 0)));
+                    files.Select(item => item.RuntimeMinutes).FirstOrDefault(minutes => minutes > 0),
+                    files.Select(item => LibraryAdded.At(playback, item.Id) ?? 0).DefaultIfEmpty().Max()));
                 continue;
             }
             // A film continues with a copy left part-way, the one played last; with none, a watched copy means it's done.
@@ -69,7 +72,12 @@ public static class LibraryHome
                 .Select(card => new HomeLibraryCard(card, "suggestions")));
         }
         if (titles.Count > 0) result.Add(new(titles.MinBy(card => Rank(card, "mystery", seed), StringComparer.Ordinal)!, "mystery"));
-        return new(result, unseen.ToArray());
+        // Unwatched: every unstarted title, newest first; a show is as new as its newest file. Titles with no known date
+        // follow, by their stable identity, so metadata arriving in the background doesn't reorder them. It comes last, so
+        // apps that don't know it find the other sections where they were.
+        var newest = unseen.OrderByDescending(title => title.AddedAt).ThenBy(title => LibraryIdentity.TitleKey(title.Card.Media), StringComparer.Ordinal).ToArray();
+        result.AddRange(newest.Take(UnwatchedLimit).Select(title => new HomeLibraryCard(title.Card, "unwatched")));
+        return new(result, newest);
     }
     public static bool Matches(HomeTitle title, string? kind, MysteryLength length)
     {
