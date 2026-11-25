@@ -83,7 +83,9 @@ public static class SharedLibrary
             ShowId: LibraryIdentity.ShowKey(x), EpisodeEnd: x.EpisodeEnd, Poster: x.Poster,
             SeriesPoster: x.SeriesPoster, SeasonPoster: x.SeasonPoster, EpisodePoster: x.EpisodePoster,
             GeneratedEpisodePoster: x.GeneratedEpisodePoster, PosterSource: x.PosterSource, RuntimeMinutes: x.RuntimeMinutes,
-            Artist: x.Artist, DurationSeconds: x.DurationSeconds)).ToArray();
+            Artist: x.Artist, DurationSeconds: x.DurationSeconds,
+            // A film's clips (its Featurettes folder) belong on the film's page; without these they'd list as titles of their own.
+            ExtraOf: x.ExtraOf, IsBonus: x.IsBonus, BonusKind: x.BonusKind)).ToArray();
         // All lists videos; music has its own category. An album opened from it keeps browsing within it.
         var visible = publicItems.Where(x => request.Category switch { 1 => x.Kind == "Movie", 2 => x.Kind == "Show", 3 => x.Kind == "Anime",
             LibraryCatalog.Music => x.IsMusic, _ => parent is not null || !x.IsMusic });
