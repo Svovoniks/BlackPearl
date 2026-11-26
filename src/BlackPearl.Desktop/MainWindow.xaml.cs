@@ -167,8 +167,9 @@ public partial class MainWindow : Window
         displaySpecialsWithinSeasons = MetadataOptions.Load(library).DisplaySpecialsWithinSeasons;
         foreach (var path in savedExclusions) exclusions.Add(path);
         InitializeFolderSettings();
+        // Saved queues that can't be read start empty, and are replaced at the next change: the log says they were lost.
         try { savedQueues.AddRange(Wire.Read<List<SavedQueue>>(library.Setting("queues") ?? "[]")); }
-        catch (System.Text.Json.JsonException) { }
+        catch (System.Text.Json.JsonException ex) { PlaybackDiagnostics.Failed("queue-saved-unreadable", ex, new { which = "queues" }, message: true); }
         if (savedQueues.Count == 0 && library.Setting("queues") is null)
         {
             string[] legacyIds = [];
@@ -212,7 +213,7 @@ public partial class MainWindow : Window
                 items = loaded;
                 var byId = loaded.ToDictionary(item => item.Id);
                 try { foreach (var id in Wire.Read<string[]>(savedQueue).Take(10000)) if (byId.TryGetValue(id, out var queued)) queue.Add(queued); }
-                catch (System.Text.Json.JsonException) { }
+                catch (System.Text.Json.JsonException ex) { PlaybackDiagnostics.Failed("queue-saved-unreadable", ex, new { which = "playing" }, message: true); }
                 // An opened video plays on its own, outside the saved queue.
                 if (!openedFile && int.TryParse(savedCursor, out var cursor)) queuePosition = Math.Clamp(cursor, -1, queue.Count - 1);
                 libraryLoaded = true;
@@ -1326,8 +1327,10 @@ public partial class MainWindow : Window
         catch { await Disconnect(); throw; }
         RememberCurrentRoom(); ShowPage("Room");
         // Someone may already be playing something there; wait for the room's state before deciding to replace it.
+        // Without it, the video starts without knowing whether someone else was already playing.
         try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(8), lifetime.Token); }
-        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException) { }
+        catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException)
+        { PlaybackDiagnostics.Failed("room-controls-not-ready", ex, new { stage = "host-video", current = room == client }); }
         if (room != client || !ConfirmTakeOver()) return;
         queuePosition = -1;
         await StartHostedVideo(item);

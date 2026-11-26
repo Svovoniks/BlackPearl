@@ -71,6 +71,8 @@ internal sealed class PhoneLanListener : IDisposable
         // Set once the connection has ended, so its unproven timer doesn't then report it.
         public volatile bool Done;
         public string Reason = "closed";
+        // Why a connection that wasn't ended on purpose broke off: the error and its code, such as WebSocketException/ConnectionClosedPrematurely.
+        public string? Error;
         // Where it comes from, for the cap on unproven connections from one address.
         public IPAddress? From;
         // The session id handed to this connection's phone, and the phone that has proved itself on it.
@@ -315,14 +317,16 @@ internal sealed class PhoneLanListener : IDisposable
         }
         catch (Exception ex) when (ex is JsonException or FormatException)
         { connection.Reason = "bad-request"; Refused("bad-request", shortId); }
-        catch (Exception ex) when (ex is WebSocketException or IOException or OperationCanceledException or SocketException or ObjectDisposedException) { }
+        // The phone went away, or the network did. A connection this PC ended has its reason already and needs no error.
+        catch (Exception ex) when (ex is WebSocketException or IOException or OperationCanceledException or SocketException or ObjectDisposedException)
+        { if (connection.Reason == "closed" && !lifetime.IsCancellationRequested) connection.Error = PlaybackDiagnostics.Describe(ex); }
         finally
         {
             connection.Done = true;
             try { lifetime.Cancel(); } catch (ObjectDisposedException) { }
             lock (gate) { if (connections.TryGetValue(connection.Id, out var current) && current == connection) connections.Remove(connection.Id); }
             if (socket is not null)
-                PlaybackDiagnostics.Record("remote-lan", new { state = "closed", connection = shortId, reason = connection.Reason, proven = connection.Proven, ms = Environment.TickCount64 - connection.OpenedAt });
+                PlaybackDiagnostics.Record("remote-lan", new { state = "closed", connection = shortId, reason = connection.Reason, error = connection.Error, proven = connection.Proven, ms = Environment.TickCount64 - connection.OpenedAt });
             socket?.Abort();
             connection.Client.Dispose();
             connection.Lifetime.Dispose();

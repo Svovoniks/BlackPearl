@@ -65,6 +65,7 @@ public static partial class VideoFileDetails
         FileStream file;
         try { file = SubtitleText.Open(path); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return Reading.Unopened; }
+        var container = "header";
         try
         {
             using (file)
@@ -72,17 +73,25 @@ public static partial class VideoFileDetails
                 var head = new byte[12];
                 var read = file.ReadAtLeast(head, head.Length, false);
                 file.Position = 0;
-                if (read >= 4 && BinaryPrimitives.ReadUInt32BigEndian(head) == 0x1a45dfa3) ReadMatroska(file, details, ct);
-                else if (read >= 8 && Encoding.ASCII.GetString(head, 4, 4) is "ftyp" or "moov" or "mdat" or "free" or "wide" or "skip" or "pnot") ReadMp4(file, details, ct);
-                else if (read >= 12 && Encoding.ASCII.GetString(head, 0, 4) == "RIFF" && Encoding.ASCII.GetString(head, 8, 4) == "AVI ") ReadAvi(file, details, ct);
-                else { file.Dispose(); ReadOther(path, details); }
+                if (read >= 4 && BinaryPrimitives.ReadUInt32BigEndian(head) == 0x1a45dfa3) { container = "matroska"; ReadMatroska(file, details, ct); }
+                else if (read >= 8 && Encoding.ASCII.GetString(head, 4, 4) is "ftyp" or "moov" or "mdat" or "free" or "wide" or "skip" or "pnot") { container = "mp4"; ReadMp4(file, details, ct); }
+                else if (read >= 12 && Encoding.ASCII.GetString(head, 0, 4) == "RIFF" && Encoding.ASCII.GetString(head, 8, 4) == "AVI ") { container = "avi"; ReadAvi(file, details, ct); }
+                else { container = "other"; file.Dispose(); ReadOther(path, details); }
             }
             return Reading.Complete;
         }
         catch (OperationCanceledException) { throw; }
         // A damaged file keeps what was read before the damage. TagLib throws plain exceptions, KeyNotFoundException and
         // NullReferenceException on damaged Matroska, Ogg and Windows Media files, so any failure counts as a partial read.
-        catch (Exception ex) when (ex is not OutOfMemoryException) { return Reading.Partial; }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { ParseFailed(container, ex); return Reading.Partial; }
+    }
+    // Which container and what kind of error, never the file. A library walk (LibraryPictures) reads every file, so the
+    // log keeps the first few failures of a run and then every hundredth.
+    private static int parseFailures;
+    private static void ParseFailed(string container, Exception error)
+    {
+        var count = Interlocked.Increment(ref parseFailures);
+        if (count <= 10 || count % 100 == 0) PlaybackDiagnostics.Failed("file-details-parse-failed", error, new { container, count });
     }
 
     /// <summary>

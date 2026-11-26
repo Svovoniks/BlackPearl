@@ -88,8 +88,11 @@ internal sealed class PhoneMediaServer : IDisposable
                 Fail(id, "busy", "The PC is busy. Ask again.");
             }
         }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException) { }
+        // A request the phone sent that can't be read gets no answer; the phone's own wait for it ends the read there.
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
+        { if (Interlocked.Increment(ref unreadable) is var count and (1 or 10 or 100 or 1000)) PlaybackDiagnostics.Failed("phone-request-unreadable", ex, new { session = session.LogId, count }); }
     }
+    private int unreadable;
 
     private async Task<(PhoneResource Resource, byte[] Bytes)?> Read(Request request)
     {

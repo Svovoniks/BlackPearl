@@ -20,6 +20,17 @@ static class DiagnosticLogFixture
             check(files.SelectMany(ReadLines).All(line => { using var json = JsonDocument.Parse(line); return json.RootElement.GetProperty("kind").GetString() == "fixture"; }),
                 "rotation retains complete structured records");
         }
+        // The latest entries also stay in memory, for crash reports: the newest 256, oldest first.
+        await using (var log = new DiagnosticLog(Path.Combine(root, "recent")))
+        {
+            check(log.Recent().Length == 0, "a new diagnostics log has no recent entries");
+            for (var index = 0; index < 300; index++) log.Record("fixture", new { index });
+            var recent = log.Recent().Select(line => { using var json = JsonDocument.Parse(line); return json.RootElement.GetProperty("data").GetProperty("index").GetInt32(); }).ToArray();
+            check(recent.Length == DiagnosticLog.RecentCapacity && recent[0] == 300 - DiagnosticLog.RecentCapacity && recent[^1] == 299 && recent.SequenceEqual(recent.Order()),
+                "the diagnostics log keeps its latest 256 entries in memory, oldest first");
+        }
+        check(PlaybackDiagnostics.Describe(new HttpRequestException(HttpRequestError.NameResolutionError, "No such host is known. (example.org:443)", new System.Net.Sockets.SocketException(11001)))
+            == "HttpRequestException/NameResolutionError<-SocketException/HostNotFound", "a failure is described by its error codes, without its message");
         var blocked = Path.Combine(root, "not-a-directory"); File.WriteAllText(blocked, "fixture");
         await using (var log = new DiagnosticLog(blocked))
         {

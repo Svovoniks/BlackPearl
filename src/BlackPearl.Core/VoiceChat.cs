@@ -79,6 +79,9 @@ public sealed class VoiceCapture
     public bool Speaking => Environment.TickCount64 - Volatile.Read(ref lastSpeech) < 250;
     // Whether speech was heard just now, sent or not: the settings meter shows it while nothing is transmitted.
     public bool HearsSpeech => Environment.TickCount64 - Volatile.Read(ref lastHeard) < 250;
+    // Frames sent since voice opened, for the summary recorded on leaving voice.
+    public int Sent => Volatile.Read(ref sent);
+    private int sent;
     public VoiceCapture()
     {
         encoder = OpusCodecFactory.CreateEncoder(VoicePacket.SampleRate, 1, OpusApplication.OPUS_APPLICATION_VOIP);
@@ -214,6 +217,7 @@ public sealed class VoiceCapture
         var length = encoder.Encode(samples, VoicePacket.FrameSamples, encoded, encoded.Length);
         if (length <= 0) return;
         var size = VoicePacket.Write(packet, 0, sequence++, flags, encoded.AsSpan(0, length));
+        sent++;
         Frame?.Invoke(packet.AsSpan(0, size));
     }
 }
@@ -248,6 +252,8 @@ public sealed class VoiceJitterBuffer
     public int Concealed { get; private set; }
     public int Dropped { get; private set; }
     public int Late { get; private set; }
+    // Frames that arrived and were kept, counted once each.
+    public int Received { get; private set; }
     public bool Playing { get { lock (packets) return playing; } }
     public void Push(ushort sequence, byte flags, ReadOnlySpan<byte> payload) => Push(sequence, flags, payload, Environment.TickCount64);
     internal void Push(ushort sequence, byte flags, ReadOnlySpan<byte> payload, long now)
@@ -287,7 +293,7 @@ public sealed class VoiceJitterBuffer
             var index = sequence % Capacity;
             if (present[index]) return;
             var into = (short)(sequence - spurtFirst);
-            present[index] = true; packets[index] = payload.ToArray(); endings[index] = (flags & VoicePacket.EndOfSpeech) != 0; buffered++;
+            present[index] = true; packets[index] = payload.ToArray(); endings[index] = (flags & VoicePacket.EndOfSpeech) != 0; buffered++; Received++;
             if (into >= 0 && into <= VoiceCapture.PrerollFrames && now - firstArrival <= OpeningMs && buffered > TargetFrames + 8) roomy = true;
             if ((short)(sequence - newest) > 0) newest = sequence;
             if (!playing && (buffered >= TargetFrames || endings[index])) { playing = true; ended = false; missing = 0; }
@@ -420,8 +426,20 @@ public sealed class VoiceMixer : IVoiceSink
     // Each person's own level, 0 to 2 (200%), on top of the overall voice volume.
     public void SetGain(int slot, float gain) { lock (speakers) gains[slot] = Math.Clamp(gain, 0, 2); }
     public float Gain(int slot) { lock (speakers) return gains.GetValueOrDefault(slot, 1f); }
-    public void Clear() { lock (speakers) { speakers.Clear(); offset = mixed.Length; } }
-    public void Forget(int slot) { lock (speakers) speakers.Remove(slot); }
+    public void Clear() { lock (speakers) { foreach (var speaker in speakers.Values) Retire(speaker); speakers.Clear(); offset = mixed.Length; } }
+    public void Forget(int slot) { lock (speakers) if (speakers.Remove(slot, out var speaker)) Retire(speaker); }
+    // What everyone was heard with since voice opened, also people since forgotten, for the summary recorded on leaving
+    // voice: how many spoke (someone heard again after a minute's quiet counts again), and how many of their frames
+    // arrived, were concealed, were dropped to catch up, came too late or were corrupt.
+    public record struct Reception(int Speakers, int Received, int Concealed, int Dropped, int Late, int Invalid)
+    {
+        public static Reception operator +(Reception a, Reception b) => new(a.Speakers + b.Speakers, a.Received + b.Received,
+            a.Concealed + b.Concealed, a.Dropped + b.Dropped, a.Late + b.Late, a.Invalid + b.Invalid);
+    }
+    private Reception retired;
+    private static Reception Of(Speaker speaker) => new(1, speaker.Buffer.Received, speaker.Buffer.Concealed, speaker.Buffer.Dropped, speaker.Buffer.Late, speaker.Buffer.Invalid);
+    private void Retire(Speaker speaker) => retired += Of(speaker);
+    public Reception Totals() { lock (speakers) return speakers.Values.Aggregate(retired, (total, speaker) => total + Of(speaker)); }
     public bool IsSpeaking(int slot) { lock (speakers) return speakers.TryGetValue(slot, out var s) && Environment.TickCount64 - s.LastSpeech < 300; }
     // Arrival jitter and concealment for one speaker, for diagnostics.
     public (double JitterMs, int TargetFrames, int Concealed, int Dropped, int Late)? Stats(int slot)
@@ -455,7 +473,7 @@ public sealed class VoiceMixer : IVoiceSink
             if (!speaker.Buffer.Pull(decoded))
             {
                 // Speakers that have been silent for a minute release their decoder.
-                if (now - speaker.LastPacket > 60000 && !speaker.Buffer.Playing) speakers.Remove(slot);
+                if (now - speaker.LastPacket > 60000 && !speaker.Buffer.Playing) { speakers.Remove(slot); Retire(speaker); }
                 continue;
             }
             var gain = Volume * gains.GetValueOrDefault(slot, 1f);

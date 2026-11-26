@@ -182,6 +182,8 @@ public partial class MainWindow
             var waitable = client.Identity?.Host != true && !client.DirectControlsReady.IsCompletedSuccessfully && client.Identity?.Room is not null;
             var cancelling = waitable && voiceWaitingRoom == client.Identity!.Room;
             voiceWaitingRoom = waitable && !cancelling ? client.Identity!.Room : null;
+            PlaybackDiagnostics.Record("voice-join-deferred", new { reason = !client.IsConnected ? "not-connected" : waitable ? (client.IsPeerRecovering ? "reconnecting" : "connecting") : "unavailable",
+                waiting = waitable && !cancelling, cancelled = cancelling });
             VoiceToast(cancelling ? "You won't join voice once you're connected." : VoiceUnavailableReason(client) + (waitable ? " You'll join automatically." : ""), 4);
             RefreshVoice(); return;
         }
@@ -200,6 +202,7 @@ public partial class MainWindow
         try { await audio.StartAsync(); }
         catch (Exception ex) when (ex is COMException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
+            PlaybackDiagnostics.Failed("voice-join-failed", ex, new { stage = "devices", ms = session.Started.ElapsedMilliseconds }, message: true);
             if (voice == session)
             {
                 voice = null; voiceJoining = false; Volatile.Write(ref voiceRoom, null);
@@ -241,9 +244,12 @@ public partial class MainWindow
         var audio = session.Audio;
         VoiceToast(audio.Problem ?? (voicePreferences.PushToTalk ? "You joined voice. Hold V to talk." : "You joined voice. Press V to mute or unmute."), audio.Problem is null ? 3 : 7);
     }
-    private async Task LeaveVoiceAsync()
+    private async Task LeaveVoiceAsync(string why = "left")
     {
         if (voice is not { } session) return;
+        var heard = session.Mixer.Totals();
+        PlaybackDiagnostics.Record("voice-left", new { why, joining = voiceJoining, ms = session.Started.ElapsedMilliseconds, sent = session.Capture.Sent,
+            speakers = heard.Speakers, received = heard.Received, concealed = heard.Concealed, dropped = heard.Dropped, late = heard.Late, invalid = heard.Invalid });
         voice = null; pushToTalkHeld = false; voiceJoining = false;
         if (voiceSettingsSave.IsEnabled) SaveVoiceSliders();
         Volatile.Write(ref voiceRoom, null);
@@ -500,6 +506,7 @@ public partial class MainWindow
             // People who left the room are announced by the room itself.
             var departed = previous.Except(joined).Where(id => id != me && snapshot.People.Any(p => p.Id == id)).ToArray();
             if (voice is { } session && (arrived.Length > 0 || departed.Length > 0)) session.Mixer.Cue(arrived.Length > 0 ? VoiceCues.Join : VoiceCues.Leave);
+            if (arrived.Length > 0 || departed.Length > 0) PlaybackDiagnostics.Record("voice-roster", new { joined = arrived.Length, left = departed.Length, inVoice = joined.Count, me = voice is not null });
         }
         if (snapshot.Voice is not null) voiceRoster = joined;
         FinishJoining();
@@ -524,7 +531,7 @@ public partial class MainWindow
         if (reconnecting) { Volatile.Write(ref voiceRoom, null); return; }
         voiceClosingRoom = room;
         voiceAutoJoinedRoom = voiceWaitingRoom = null;
-        await LeaveVoiceAsync();
+        await LeaveVoiceAsync("room-closed");
     }
 
     // Settings › Voice chat
@@ -551,7 +558,7 @@ public partial class MainWindow
             }
             finally { loadingPreferences = false; }
         }
-        catch (COMException) { VoiceTestStatus.Text = "Windows audio devices are unavailable."; }
+        catch (COMException ex) { PlaybackDiagnostics.Failed("voice-devices-unavailable", ex, new { stage = "list" }, message: true); VoiceTestStatus.Text = "Windows audio devices are unavailable."; }
     }
     // Until the device list loads, the saved choice is listed by itself so it is shown and kept, not replaced by the default.
     private static VoiceAudio.Device[] VoiceChoices(VoiceAudio.Device[] devices, string? saved, string missing) =>
@@ -623,7 +630,7 @@ public partial class MainWindow
         var test = voiceTest = new VoiceAudio(voiceTestCapture, null, settings);
         test.Changed += () => Dispatcher.BeginInvoke(UpdateVoiceTest);
         try { await test.StartAsync(); }
-        catch (COMException) { VoiceTestStatus.Text = "Windows audio devices are unavailable."; }
+        catch (COMException ex) { PlaybackDiagnostics.Failed("voice-devices-unavailable", ex, new { stage = "test" }, message: true); VoiceTestStatus.Text = "Windows audio devices are unavailable."; }
     }
     private async Task StopVoiceTest()
     {

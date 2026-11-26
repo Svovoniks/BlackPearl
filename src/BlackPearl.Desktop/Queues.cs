@@ -55,6 +55,12 @@ public partial class MainWindow
         if (index >= 0) savedQueues[index] = savedQueues[index] with { MediaIds = queue.Select(x => x.Id).ToArray() };
         SaveQueues(); RefreshQueuePickers();
     }
+    // A change to this app's own queues, by this app or (queueEditor) by a guest in a room: counts only, never names.
+    private string queueEditor = "local";
+    private void RecordQueueChange(string action, SavedQueue? saved, int videos = 0) =>
+        PlaybackDiagnostics.Record("queue-change", new { action, source = queueEditor, entries = saved?.MediaIds.Length ?? 0, videos, queues = savedQueues.Count,
+            active = saved is not null && saved.Id == activeQueueId });
+    private void RecordQueueRefused(string action, string reason) => PlaybackDiagnostics.Record("queue-change-refused", new { action, reason, source = queueEditor });
     private void SaveQueues()
     {
         library.Setting("queues", Wire.Serialize(savedQueues));
@@ -237,6 +243,7 @@ public partial class MainWindow
         library.Setting("lastQueue", saved.Id);
         foreach (var item in ResolveQueue(saved)) queue.Add(item);
         SaveQueues(); RefreshQueuePickers(); PublishQueue();
+        RecordQueueChange("play", saved, queue.Count);
     }
     // Switching to a queue keeps the current video playing. When the queue contains it, the queue
     // continues from that point; otherwise Next starts the queue from its first video.
@@ -261,6 +268,7 @@ public partial class MainWindow
         if (episodes.Length == 0) episodes = [playing];
         var saved = new SavedQueue(Guid.NewGuid().ToString("N"), playing.IsMusic ? playing.Series : $"{playing.Series} · Season {playing.Season}", episodes.Select(item => item.Id).ToArray());
         savedQueues.Add(saved); SwitchToQueue(saved);
+        RecordQueueChange("create-season", saved);
         SetStatus($"Created {saved.Name}.");
     }
     private void SelectNoQueue()
@@ -268,6 +276,7 @@ public partial class MainWindow
         SaveActiveQueueEdits();
         activeQueueId = null; queue.Clear(); queuePosition = -1; queueModeRequested = false;
         SaveQueues(); RefreshQueuePickers(); PublishQueue(); RefreshEpisodeEndAction();
+        RecordQueueChange("stop", null);
     }
     // A new queue opens with Add videos ready, since an empty queue has nothing else to do.
     private void CreateQueue(object sender, RoutedEventArgs e)
@@ -277,6 +286,7 @@ public partial class MainWindow
         if (ShowingHostQueues) { SendQueueCreate(name, []); return; }
         var saved = new SavedQueue(Guid.NewGuid().ToString("N"), name, []);
         savedQueues.Add(saved); SaveQueues(); RefreshQueuePickers();
+        RecordQueueChange("create", saved);
         if (currentPage != "Queues") ShowPage("Queues");
         OpenQueue(saved.Id);
         if (QueueEditable) AddQueueVideos(sender, e);
@@ -287,12 +297,14 @@ public partial class MainWindow
         if (name is null || savedQueues.IndexOf(saved) is not (var index and >= 0)) return;
         savedQueues[index] = saved with { Name = name };
         SaveQueues(); RefreshQueuePickers();
+        RecordQueueChange("rename", savedQueues[index]);
     }
     private void DeleteQueue(SavedQueue saved)
     {
         if (!CanEditSavedQueues() || !savedQueues.Remove(saved)) return;
         if (activeQueueId == saved.Id) SelectNoQueue();
         SaveQueues(); RefreshQueuePickers();
+        RecordQueueChange("delete", saved);
         SetStatus($"Deleted {saved.Name}.");
     }
     private void QueueMoreClick(object sender, RoutedEventArgs e)
@@ -495,6 +507,7 @@ public partial class MainWindow
             PublishQueue();
         }
         SaveQueues(); RefreshQueuePickers();
+        RecordQueueChange(order.Length < saved.MediaIds.Length ? "remove" : "reorder", updated, saved.MediaIds.Length - order.Length);
     }
     private void RemoveSavedItem(object sender, RoutedEventArgs e)
     {
@@ -591,13 +604,14 @@ public partial class MainWindow
         if (ShowingHostQueues) { var requested = source.ToArray(); SendQueueAdd(saved, requested); return 0; }
         if (!CanEditSavedQueues()) return 0;
         var added = source.Where(x => x.Available && File.Exists(x.Path)).ToArray();
-        if (added.Length == 0) { SetStatus("No available videos to add."); return 0; }
+        if (added.Length == 0) { RecordQueueRefused("add", "unavailable"); SetStatus("No available videos to add."); return 0; }
         var index = savedQueues.FindIndex(x => x.Id == saved.Id);
         if (index < 0) return 0;
         saved = savedQueues[index];
         savedQueues[index] = saved with { MediaIds = saved.MediaIds.Concat(added.Select(x => x.Id)).ToArray() };
         if (activeQueueId == saved.Id) { foreach (var item in added) queue.Add(item); PublishQueue(); }
         SaveQueues(); RefreshQueuePickers(); SetStatus($"Added {VideoCount(added.Length)} to {saved.Name}.");
+        RecordQueueChange("add", savedQueues[index], added.Length);
         return added.Length;
     }
     // Each saved queue, then New queue…; the divider shows only when there are queues above it.
