@@ -19,17 +19,19 @@ static class LibraryIngestionFixture
         var recording = Path.Combine(root, "Recording 2024.ts"); var timestamped = Path.Combine(root, "Broadcast 2023.ts"); var cut = Path.Combine(root, "Cut Recording 2022.ts");
         await File.WriteAllBytesAsync(cut, Stream(188, 100));
         var source = Path.Combine(project, "src", "app_model.ts"); var listedSource = Path.Combine(project, "src", "android.ts");
-        var known = Path.Combine(root, "Known Film 2020.ts"); var declaration = Path.Combine(packages, "index.d.ts"); var packaged = Path.Combine(packages, "sample.mp4");
+        var declaration = Path.Combine(packages, "index.d.ts"); var packaged = Path.Combine(packages, "sample.mp4");
+        // A download's start stays zeros until its first piece arrives, and finishing it renames nothing.
+        var downloading = Path.Combine(root, "Downloading 2025.ts"); var empty = Path.Combine(root, "Starting 2025.ts");
         await File.WriteAllBytesAsync(recording, Stream(188, 0)); await File.WriteAllBytesAsync(timestamped, Stream(192, 4));
-        await File.WriteAllBytesAsync(source, code); await File.WriteAllBytesAsync(listedSource, code); await File.WriteAllBytesAsync(known, code);
+        await File.WriteAllBytesAsync(source, code); await File.WriteAllBytesAsync(listedSource, code);
         await File.WriteAllBytesAsync(declaration, code); await File.WriteAllBytesAsync(packaged, [0]);
+        await File.WriteAllBytesAsync(downloading, new byte[4096]); await File.WriteAllBytesAsync(empty, []);
         await File.WriteAllBytesAsync(Path.Combine(root, "Example Film 2021.mkv"), [0]);
         var store = new LibraryStore(Path.Combine(directory, "db"));
-        // What an earlier version listed: TypeScript files as films, one of them watched, and a transport stream already read.
-        store.Save(new("old-source", listedSource, "android", "Movie", FileSize: code.Length));
+        // What an earlier version listed: TypeScript files as films, one of them watched. Reading their picture found none.
+        store.Save(new("old-source", listedSource, "android", "Movie", FileSize: code.Length, FileVideoWidth: 0, FileVideoHeight: 0));
         store.Setting("position:old-source", "1000");
         store.Save(new("old-package", declaration, "index d", "Movie", FileSize: code.Length));
-        store.Save(new("old-known", known, "Known Film", "Movie", 2020, FileSize: code.Length, FileVideoHeight: 1080));
         await store.ScanAsync([new(root, "Mixed")]);
         var paths = store.All().Select(x => x.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         check(paths.Contains(recording) && paths.Contains(timestamped) && paths.Contains(cut) && paths.Contains(Path.Combine(root, "Example Film 2021.mkv")),
@@ -38,9 +40,24 @@ static class LibraryIngestionFixture
         check(!paths.Contains(declaration) && !paths.Contains(packaged), "nothing inside a node_modules folder is listed");
         check(store.All().All(x => x.Id is not ("old-source" or "old-package")) && store.Setting("position:old-source") is null,
             "TypeScript files listed by an earlier version leave the library with their progress");
-        check(paths.Contains(known), "a .ts file already read as a video, and unchanged, is not read again");
+        check(paths.Contains(downloading) && paths.Contains(empty) && store.ByPath(downloading)?.FileWriteTime is null,
+            "a .ts download whose start is still empty is listed, and read again on the next scan");
+        // A file found to be a transport stream isn't read again until it changes: this one now holds text but kept its
+        // size and write time, while the other changed.
+        var recordedAt = File.GetLastWriteTimeUtc(recording);
+        await File.WriteAllBytesAsync(recording, new byte[Stream(188, 0).Length].Select(_ => (byte)'x').ToArray()); File.SetLastWriteTimeUtc(recording, recordedAt);
+        var replaced = code.Concat(new byte[Stream(192, 4).Length - code.Length]).ToArray(); await File.WriteAllBytesAsync(timestamped, replaced);
+        File.SetLastWriteTimeUtc(timestamped, File.GetLastWriteTimeUtc(timestamped).AddMinutes(1));
+        await File.WriteAllBytesAsync(downloading, Stream(188, 0));
+        await store.ScanAsync([new(root, "Mixed")]);
+        paths = store.All().Select(x => x.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        check(paths.Contains(recording) && store.ByPath(recording)?.FileWriteTime == recordedAt.Ticks, "an unchanged .ts file already found to be a transport stream is not read again");
+        check(!paths.Contains(timestamped), "a .ts file is read again once it changes");
+        check(paths.Contains(downloading) && store.ByPath(downloading)?.FileWriteTime is not null, "a finished .ts download is found to be a transport stream");
         check(!FileNames.AffectsLibrary(Path.Combine(packages, "other.ts"), false) && !FileNames.AffectsLibrary(Path.Combine(packages, "other.ts"), true) &&
             FileNames.AffectsLibrary(Path.Combine(root, "New Recording.ts"), false), "changes inside node_modules don't start a library scan");
+        check(!FileNames.AffectsLibrary(source, false) && FileNames.AffectsLibrary(cut, false) && FileNames.AffectsLibrary(downloading, false) && FileNames.AffectsLibrary(source, true),
+            "saving TypeScript source doesn't start a library scan, while a transport stream still does");
     }
     public static async Task Run(string directory, Action<bool, string> check)
     {

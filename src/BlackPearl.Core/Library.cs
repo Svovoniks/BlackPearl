@@ -807,6 +807,8 @@ public sealed partial class LibraryStore
                     // A folder inside this one that doesn't list this kind of file keeps it out.
                     if (roots.Any(r => r.Path.Length > folder.Path.Length && IsWithin(path, r.Path)) && ListedBy(roots, path, mixedMusic) is null) continue;
                     MediaItem parsed;
+                    // For a ".ts" file: the write time it was last found to be a transport stream at, if it was.
+                    (long? At, bool Set) streamChecked = (null, false);
                     if (music)
                     {
                         // Tags are read again only when a track's file changed, or a cover appeared beside a track without one.
@@ -823,11 +825,17 @@ public sealed partial class LibraryStore
                     // Samples and film trailers stay out; a show's extras folder joins the show as bonus clips.
                     else
                     {
-                        // A ".ts" file is read to tell a transport stream from TypeScript, unless it was already read as a
-                        // video and hasn't changed since. One listed before this check leaves the library.
-                        if (FileNames.IsTransportStreamName(path) && ByPath(path) is var listed && !(listed is { FileVideoHeight: > 0 } && listed.FileSize == file.Length) &&
-                            !FileNames.IsTransportStream(path))
-                        { if (listed is not null) notVideos.Add(listed.Id); continue; }
+                        // A ".ts" file is read to tell a transport stream from TypeScript, unless it was found to be one and
+                        // hasn't changed since: its record then keeps the write time it had. One listed before this check
+                        // leaves the library.
+                        if (FileNames.IsTransportStreamName(path))
+                        {
+                            var writeTime = file.LastWriteTimeUtc.Ticks; var listed = ByPath(path);
+                            var stream = listed is not null && listed.FileSize == file.Length && listed.FileWriteTime == writeTime ? true : FileNames.ReadTransportStream(path);
+                            if (stream == false) { if (listed is not null) notVideos.Add(listed.Id); continue; }
+                            // One that can't be told yet is listed, and read again on the next scan.
+                            streamChecked = (stream == true ? writeTime : null, true);
+                        }
                         // One file that can't be read must not stop the scan.
                         try { parsed = FileNames.Parse(path, folder.Kind, folder.Path) with { FileSize = file.Length }; }
                         catch (Exception ex) when (ex is ArgumentException or IndexOutOfRangeException or FormatException or OverflowException or InvalidOperationException or RegexMatchTimeoutException)
@@ -844,6 +852,7 @@ public sealed partial class LibraryStore
                         var previous = ByIds([parsed.Id]).FirstOrDefault() ?? ByPath(parsed.Path);
                         item = music ? previous is null ? parsed : MusicFiles.Merge(parsed, previous)
                             : previous is null ? MergeScanned(parsed, null) : MergeScanned(parsed with { Id = previous.Id }, forgetOldReadings && !previous.IsVirtual && CanRepairGrouping(previous) ? ForgetOldReading(parsed, previous) : previous) with { FileSize = parsed.FileSize };
+                        if (streamChecked.Set) item = item with { FileWriteTime = streamChecked.At };
                         // A replaced file has its length read again, and the old file's length isn't shown for it meanwhile.
                         if (previous is not null && !music && previous.FileSize != parsed.FileSize && previous.FileRuntimeMinutes is not null)
                             item = item with { FileRuntimeMinutes = null, RuntimeMinutes = previous.FileRuntimeMinutes > 0 && previous.RuntimeMinutes == previous.FileRuntimeMinutes &&
@@ -1011,15 +1020,18 @@ public static partial class FileNames
     public static bool IsTransportStreamName(string path) => System.IO.Path.GetExtension(path).Equals(".ts", StringComparison.OrdinalIgnoreCase);
     // A transport stream repeats its sync byte, 0x47, at the start of every 188-byte packet, or every 192 bytes when each
     // packet has a timestamp. A recording can begin partway through a packet, so four packets in a row anywhere in the
-    // first one count. TypeScript source is text and never has them. A file that can't be read now, such as one still
-    // being written, counts as a video, as every ".ts" file did before.
-    public static bool IsTransportStream(string path)
+    // first one count. TypeScript source is text and never has them.
+    // Null when it can't be told yet: a file that can't be read now, or one whose start is still empty or zeros, as a
+    // download's is until its first piece arrives. Such a file counts as a video, as every ".ts" file did before; finishing
+    // a download renames nothing, so the folder watcher would not bring it back.
+    public static bool? ReadTransportStream(string path)
     {
         try
         {
             using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
             var head = new byte[192 * 5];
             var read = file.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            if (head.AsSpan(0, read).IndexOfAnyExcept((byte)0) < 0) return null;
             bool Packets(int size)
             {
                 for (var start = 0; start < size; start++)
@@ -1028,8 +1040,9 @@ public static partial class FileNames
             }
             return Packets(188) || Packets(192);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
     }
+    public static bool IsTransportStream(string path) => ReadTransportStream(path) != false;
     // Sidecar, artwork and partial-download files never change the catalog, so watcher events for them are ignored.
     private static readonly HashSet<string> IgnoredChanges = new(StringComparer.OrdinalIgnoreCase)
     { ".nfo", ".tmp", ".part", ".crdownload", ".download", ".partial", ".!qb", ".!ut", ".aria2", ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup",
@@ -1040,6 +1053,8 @@ public static partial class FileNames
         var extension = System.IO.Path.GetExtension(path);
         if (InPackageFolder(path)) return false;
         if (MusicFiles.Extensions.Contains(extension)) return music;
+        // Saving TypeScript source often renames a temporary file onto it.
+        if (!deleted && IsTransportStreamName(path)) return ReadTransportStream(path) != false;
         if (Extensions.Contains(extension)) return true;
         // A deleted folder can no longer be checked, so only skip names that look like a known non-video file.
         if (deleted) return !IgnoredChanges.Contains(extension);
