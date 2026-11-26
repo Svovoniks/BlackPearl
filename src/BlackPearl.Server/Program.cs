@@ -13,6 +13,15 @@ using BlackPearl.Core;
 // Anyone holding its invitation enters, every member connects to every other, and one member at a time holds the
 // streaming role, which keeps the room's playback state. Video, voice and controls never pass through here.
 // Apps from before that speak protocol 1, with a host who admits guests; ServeHosted still serves them.
+var serverVersion = typeof(RoomProtocol).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+int[] roomProtocols = [1, RoomProtocol.Version];
+// The updater (deploy/blackpearl-update.sh) asks a downloaded build what it is before it switches to it, which also
+// shows that the build starts on this machine.
+if (args.Contains("--describe"))
+{
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { version = serverVersion, protocols = roomProtocols, remote = PhoneRemoteProtocol.Version }));
+    return;
+}
 var builder = WebApplication.CreateBuilder(args);
 // Errors go to Sentry when the server sets BLACKPEARL_SENTRY_DSN; without it nothing is sent. CrashReportPrivacy (Core)
 // decides what reports leave out: addresses, request details beyond the path, breadcrumbs, and paths and ids in error text.
@@ -20,7 +29,7 @@ if (builder.Configuration[AppEnvironment.Prefix + "SENTRY_DSN"] is { Length: > 0
     builder.WebHost.UseSentry(options =>
     {
         options.Dsn = sentryDsn;
-        options.Release = "blackpearl-server@" + typeof(RoomProtocol).Assembly.GetName().Version?.ToString(3);
+        options.Release = "blackpearl-server@" + serverVersion;
         options.Environment = builder.Configuration[AppEnvironment.Prefix + "SENTRY_ENVIRONMENT"] ?? "production";
         CrashReportPrivacy.Apply(options);
         options.MaxRequestBodySize = Sentry.Extensibility.RequestSize.None;
@@ -77,7 +86,35 @@ _ = Task.Run(async () =>
     try { while (await timer.WaitForNextTickAsync(app.Lifetime.ApplicationStopping)) SweepRooms(Wire.Now); }
     catch (OperationCanceledException) { }
 });
-var persistentRooms = new PersistentRooms(Config("DATA") ?? Path.Combine(AppContext.BaseDirectory, "data"));
+var dataDirectory = Config("DATA") ?? Path.Combine(AppContext.BaseDirectory, "data");
+var persistentRooms = new PersistentRooms(dataDirectory);
+// Sockets that have connected to /room and not yet ended: the people a restart would disconnect from their rooms.
+// Phone remote links are left out, since a PC with the remote turned on keeps one open all the time.
+var roomConnections = 0;
+// status.json tells the updater which version runs and whether anyone is in a room. It is written every 10 seconds,
+// so a stale one means the service has stopped.
+var statusPath = Path.Combine(dataDirectory, "status.json");
+void WriteStatus()
+{
+    try
+    {
+        Directory.CreateDirectory(dataDirectory);
+        var temporary = statusPath + ".tmp";
+        File.WriteAllText(temporary, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            version = serverVersion, protocols = roomProtocols, roomConnections = Volatile.Read(ref roomConnections), written = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+        }));
+        File.Move(temporary, statusPath, true);
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { app.Logger.LogWarning("Could not write {Path}: {Error}", statusPath, ex.Message); }
+}
+WriteStatus();
+_ = Task.Run(async () =>
+{
+    using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Setting(Config("STATUS_SECONDS"), 10)));
+    try { while (await timer.WaitForNextTickAsync(app.Lifetime.ApplicationStopping)) WriteStatus(); }
+    catch (OperationCanceledException) { }
+});
 foreach (var saved in persistentRooms.All())
 {
     var restored = new Room(saved.Code, true) { Name = saved.Name, OwnerHash = saved.HostKeyHash, SharedControls = saved.SharedControls };
@@ -113,7 +150,7 @@ bool forceRelay = Config("FORCE_RELAY") == "true";
 var remoteLinks = new RemoteLinks(IceServers, forceRelay);
 // protocol is the newest the service speaks, which newer apps require; protocols lists every one it still serves.
 // remote is the phone remote protocol (PHONE-REMOTE.md) this service introduces phones and PCs with.
-app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = RoomProtocol.Version, protocols = new[] { 1, RoomProtocol.Version }, persistentRooms = true, remote = PhoneRemoteProtocol.Version,
+app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = RoomProtocol.Version, protocols = roomProtocols, persistentRooms = true, remote = PhoneRemoteProtocol.Version,
     relayConfigured = cloudflare?.HasRelay == true || !string.IsNullOrEmpty(Config("TURN")),
     stunConfigured = cloudflare is not null || !string.IsNullOrEmpty(Config("STUN")) }));
 // Who is in each room right now, for people who hold its invitation. The app shows it before they enter.
@@ -265,6 +302,7 @@ app.Map("/room", async context =>
     lifetime.CancelAfter(TimeSpan.FromHours(6));
     // Whoever this connection is once it has entered a room, and how it leaves.
     Connection? connection = null; Action? leave = null;
+    Interlocked.Increment(ref roomConnections);
     try
     {
         using var handshake = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); handshake.CancelAfter(TimeSpan.FromSeconds(10));
@@ -382,6 +420,7 @@ app.Map("/room", async context =>
     catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or IOException) { }
     finally
     {
+        Interlocked.Decrement(ref roomConnections);
         leave?.Invoke();
         lifetime.Cancel(); socket.Abort();
     }

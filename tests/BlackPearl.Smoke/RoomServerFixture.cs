@@ -16,7 +16,19 @@ static class RoomServerFixture
         var start = new ProcessStartInfo(sdk) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         start.Environment["BLACKPEARL_DATA"] = Path.Combine(directory, "server");
         start.Environment["BLACKPEARL_EMPTY_ROOM_SECONDS"] = "1"; start.Environment["BLACKPEARL_SWEEP_SECONDS"] = "1";
-        start.Environment["BLACKPEARL_PERSISTENT_ROOMS_PER_HOUR"] = "2";
+        start.Environment["BLACKPEARL_PERSISTENT_ROOMS_PER_HOUR"] = "2"; start.Environment["BLACKPEARL_STATUS_SECONDS"] = "1";
+        // The updater (deploy/blackpearl-update.sh) asks a downloaded build what it is before switching to it.
+        var describe = new ProcessStartInfo(sdk) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+        describe.ArgumentList.Add(serverDll); describe.ArgumentList.Add("--describe");
+        using (var described = Process.Start(describe)!)
+        {
+            var output = await described.StandardOutput.ReadToEndAsync();
+            var exited = described.WaitForExit(30000);
+            using var json = System.Text.Json.JsonDocument.Parse(output);
+            check(exited && described.ExitCode == 0 && json.RootElement.GetProperty("version").GetString() == typeof(RoomProtocol).Assembly.GetName().Version!.ToString(3) &&
+                json.RootElement.GetProperty("protocols").EnumerateArray().Select(x => x.GetInt32()).SequenceEqual([1, RoomProtocol.Version]),
+                "--describe reports the build's version and room protocols and exits without serving");
+        }
         start.ArgumentList.Add(serverDll); start.ArgumentList.Add("--urls"); start.ArgumentList.Add(url);
         using var server = Process.Start(start)!;
         var stdout = server.StandardOutput.ReadToEndAsync(); var stderr = server.StandardError.ReadToEndAsync();
@@ -55,6 +67,27 @@ static class RoomServerFixture
             await Task.Delay(3500);
             var (waiting, joined) = await Open(Enter("Second", Wire.Read<Welcome>(liveWelcome.Data!).Room));
             check(joined.Type == "welcome", "server keeps temporary rooms that still have members");
+            // status.json tells the updater whether a restart would disconnect anyone from a room.
+            async Task<int?> RoomConnections(int expected)
+            {
+                int? seen = null;
+                for (var i = 0; i < 50 && seen != expected; i++)
+                {
+                    await Task.Delay(200);
+                    try
+                    {
+                        using var status = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(directory, "server", "status.json")));
+                        seen = status.RootElement.GetProperty("roomConnections").GetInt32();
+                    }
+                    catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException) { }
+                }
+                return seen;
+            }
+            check(await RoomConnections(2) == 2, "status.json counts the people connected to rooms");
+            var (visitor, visited) = await Open(Enter("Third", Wire.Read<Welcome>(liveWelcome.Data!).Room));
+            check(visited.Type == "welcome" && await RoomConnections(3) == 3, "status.json counts someone who enters");
+            await Close(visitor);
+            check(await RoomConnections(2) == 2, "status.json stops counting someone who leaves");
 
             for (var i = 0; i < 300; i++) await SocketMessages.SendAsync(live, new("ping", Number: i), default);
             var pongs = 0;
