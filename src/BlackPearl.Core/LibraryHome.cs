@@ -69,6 +69,9 @@ public static class LibraryHome
                 bool Counts(MediaItem item) => !regular || Regular(item);
                 if (members.Where(item => item.Available && Counts(item) && playback.ContainsKey(LibraryWatchProgress.RewatchPrefix + item.Id))
                     .MaxBy(item => Played(item.Id)) is not { } again) continue;
+                // Only while the rewatch is the show's latest viewing: one replayed before the rest of the show was watched
+                // for the first time is over.
+                if (Played(again.Id) < members.Where(Counts).Max(item => Played(item.Id))) continue;
                 var end = (again.Season ?? int.MaxValue, again.EpisodeEnd ?? again.Episode ?? int.MaxValue);
                 next = Resume(again.Id) >= 10000 ? again : files.Where(Counts)
                     .OrderBy(item => item.Season ?? int.MaxValue).ThenBy(item => item.Episode ?? int.MaxValue).ThenBy(item => item.Id)

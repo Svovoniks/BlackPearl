@@ -99,9 +99,14 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         {
             await Task.Delay(StreamGrace);
             if (drops.GetValueOrDefault(phoneId) != drop || current() is not { } remote || remote.Connected.Any(s => s.PhoneId == phoneId)) return;
-            if (streams.TryRemove(KeyValuePair.Create(phoneId, waiting))) waiting.Dispose();
+            if (!streams.TryRemove(KeyValuePair.Create(phoneId, waiting))) return;
+            expired[phoneId] = (waiting.Item.Id, waiting.Rewatch);
+            waiting.Dispose();
         });
     }
+    // The video of each phone's stream that ended with its link, and whether it was a rewatch: a phone back after a long
+    // drop asks for the same video again, which goes on with the same viewing.
+    private readonly ConcurrentDictionary<string, (string Id, bool Rewatch)> expired = new();
     private static readonly TimeSpan StreamGrace = TimeSpan.FromMinutes(2);
 
     public void CloseStreams()
@@ -360,8 +365,12 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         if (ffmpeg is not null && (wanted == StreamQuality.OriginalId || wanted == "auto" && home)) _ = Probe(ffmpeg, item, TimeSpan.Zero);
         long? takenAt = Flag(message, "takeOver") && TakeOver is { } takeOver ? await takeOver(item) : null;
         if (streams.TryRemove(session.PhoneId, out var previous)) previous.Dispose();
-        var startedWatched = !item.IsMusic && WasWatched(item.Id);
-        var resume = takenAt ?? (item.IsMusic ? 0 : LibraryWatchProgress.Resume(library.Setting, item.Id, startedWatched));
+        // A phone asks for the video it is watching again to get past a stall, at another quality, or back after a long
+        // drop: that goes on with the same viewing, a rewatch or not as it began. Any other video starts a viewing, a
+        // rewatch when it was watched before.
+        var (lastId, lastRewatch) = previous is not null ? (previous.Item.Id, previous.Rewatch) : expired.TryRemove(session.PhoneId, out var gone) ? gone : default;
+        var startedWatched = lastId == item.Id ? lastRewatch : !item.IsMusic && WasWatched(item.Id);
+        var resume = takenAt ?? (item.IsMusic ? 0 : LibraryWatchProgress.Resume(library.Setting, item.Id, WasWatched(item.Id)));
         var file = new FileMediaSource(item.Path, item.QueueTitle, item.Id);
         var qualities = new List<string> { StreamQuality.OriginalId };
         PhoneStream stream = new(item, file);

@@ -87,6 +87,16 @@ static class HomeLibraryFixture
         check(Again().Length == 0, "a film rewatched to the end leaves continue watching");
         again = [.. again, Episode("r4", "Again show", 2, 2)];
         check(Again() is [{ Card.Media.Id: "r4", PositionMs: 0 }], "a new episode of a show being rewatched comes first, as for any show not finished");
+        // A replay before the rest of the show was watched for the first time: finishing the show ends it.
+        MediaItem[] early = [Episode("e1", "Early show", 1, 1), Episode("e2", "Early show", 1, 2), Episode("e3", "Early show", 1, 3)];
+        var earlyPlayback = new Dictionary<string, string> { ["watched:e1"] = "true", ["watched:e2"] = "true", ["watched:e3"] = "true",
+            ["played:e1"] = "100", ["rewatch:e1"] = "0", ["played:e2"] = "200", ["played:e3"] = "300" };
+        HomeLibraryCard[] Early() => LibraryHome.Browse(early, earlyPlayback, 7).Where(entry => entry.Section == "continue").ToArray();
+        check(Early().Length == 0, "a show finished after one of its episodes was replayed stays out of continue watching");
+        earlyPlayback["rewatch:e1"] = "400000";
+        check(Early().Length == 0, "a replay left part-way before the show was finished is over once it is");
+        earlyPlayback["played:e1"] = "400";
+        check(Early() is [{ Card.Media.Id: "e1", PositionMs: 400000 }], "the same replay, played again after the show was finished, is a rewatch");
         check(LibraryWatchProgress.Resume(rewatch.GetValueOrDefault, "r2", watched: true) == 0 && LibraryWatchProgress.Resume(rewatch.GetValueOrDefault, "r2", watched: false) == 500000,
             "a watched video picks up at its rewatch, not at a place left from before it was marked");
         var mysteryIds = Enumerable.Range(0, 100).Select(seed => LibraryHome.Browse(items, playback, seed).Single(entry => entry.Section == "mystery").Card.Media.Id).ToHashSet();

@@ -112,7 +112,13 @@ static class PhoneHostFixture
             foreach (var (at, ended, final) in new[] { (6000000L, false, false), (6300000L, true, false), (6300000L, true, true) })
                 firstWatch &= await Reported(at, ended, final) && store.Setting("rewatch:" + id) is null && store.Setting("watched:" + id) == "true";
             check(firstWatch, "what a phone reports over the stream of a video it has just watched for the first time starts no rewatch");
-            // Watching it again starts a stream of a watched video: the phone's place is the rewatch's, and it stays watched.
+            // The phone asks for the same video again to get past a stall: the same viewing goes on, still no rewatch.
+            link.Send(new { type = "watch", request = 19, id, quality = "original", network = "home" });
+            check(await link.Next("stream", 20000) is not null && await Reported(6100000, false, false) && store.Setting("rewatch:" + id) is null,
+                "asking again for the video a phone has just watched for the first time goes on with that viewing, not a rewatch");
+            // Its player closes; watching it again later starts a stream of a watched video: the phone's place is the
+            // rewatch's, and it stays watched.
+            link.Send(new { type = "stream-stop" });
             link.Send(new { type = "watch", request = 20, id, quality = "original", network = "home" });
             check(await link.Next("stream", 20000) is not null, "a phone starts watching a watched video again");
             link.Send(new { type = "progress", id, positionMs = 120000, durationMs = 6300000 });
