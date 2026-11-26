@@ -266,6 +266,28 @@ static class MetadataFixesFixture
             var stopped = false; try { await MetadataHttp.GetImage(http, "https://static.tvmaze.com/loop", default); } catch (IOException) { stopped = true; }
             check(stopped && handler.Requests.Count == 6, "artwork redirect loops stop after five hops");
         }
+        // TVmaze answers a lookup by IMDb or TheTVDB id with 301 Moved Permanently to the show itself.
+        using (var handler = new Handler(request => request.RequestUri!.AbsolutePath == "/lookup/shows" ? Redirect("https://api.tvmaze.com/shows/82", HttpStatusCode.MovedPermanently) :
+            request.RequestUri.AbsolutePath == "/shows/82" ? Json("{\"id\":82,\"name\":\"Example Show\",\"premiered\":\"2020-01-01\",\"type\":\"Scripted\",\"url\":\"https://www.tvmaze.com/shows/82\",\"summary\":\"Plot\"}") : Json("[]")))
+        using (var http = new HttpClient(handler))
+        {
+            var result = await AutomaticArtwork.ResolveAsync(http, null, new("lookup-show", "episode.mkv", "Example Show", "Show", 2020, Series: "Example Show", Season: 1, Episode: 1,
+                ProviderIds: new() { ["imdb"] = "tt0944947" }), new(Providers: ["tvmaze"]), directory, default);
+            check(result?.Id == 82 && handler.Requests.Take(2).Select(x => x.AbsolutePath).SequenceEqual(["/lookup/shows", "/shows/82"]),
+                "a TVmaze lookup by IMDb id follows its redirect to the show");
+        }
+        foreach (var location in new[] { "http://api.tvmaze.com/shows/82", "https://static.tvmaze.com/shows/82", "https://api.tvmaze.com:8443/shows/82", "https://user:secret@api.tvmaze.com/shows/82" })
+        {
+            using var handler = new Handler(_ => Redirect(location)); using var http = new HttpClient(handler); var rejected = false;
+            try { await MetadataHttp.GetBytes(http, "https://api.tvmaze.com/lookup/shows?imdb=tt0944947", default); } catch (IOException) { rejected = true; }
+            check(rejected && handler.Requests.Count == 1, "a metadata redirect off the requested HTTPS host is rejected before another request: " + location);
+        }
+        using (var handler = new Handler(_ => Redirect("/loop")))
+        using (var http = new HttpClient(handler))
+        {
+            var stopped = false; try { await MetadataHttp.GetBytes(http, "https://api.tvmaze.com/loop", default); } catch (IOException) { stopped = true; }
+            check(stopped && handler.Requests.Count == 6, "metadata redirect loops stop after five hops");
+        }
         var library = new LibraryStore(Path.Combine(directory, "images-db")); new MetadataOptions(Providers: ["tvmaze"]).Save(library);
         foreach (var number in new[] { 1, 2 }) library.Save(new("ep" + number, "ep" + number + ".mkv", "Example Show", "Show", Series: "Example Show", Season: 1, Episode: number,
             MetadataProvider: "tvmaze", MetadataId: 1, ProviderIds: new() { ["tvmaze"] = "1" }, Matched: true));
@@ -374,7 +396,7 @@ static class MetadataFixesFixture
     private static string Pages(params object[] pages) => JsonSerializer.Serialize(new { query = new { pages } });
     private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value, System.Text.Encoding.UTF8, "application/json") };
     private static HttpResponseMessage Limited() { var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests); response.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.Zero); return response; }
-    private static HttpResponseMessage Redirect(string target) { var response = new HttpResponseMessage(HttpStatusCode.Found); response.Headers.Location = new(target, UriKind.RelativeOrAbsolute); return response; }
+    private static HttpResponseMessage Redirect(string target, HttpStatusCode status = HttpStatusCode.Found) { var response = new HttpResponseMessage(status); response.Headers.Location = new(target, UriKind.RelativeOrAbsolute); return response; }
     private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> handle) : HttpMessageHandler
     {
         public List<Uri> Requests { get; } = [];

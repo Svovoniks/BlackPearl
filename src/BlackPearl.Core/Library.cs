@@ -774,8 +774,8 @@ public sealed partial class LibraryStore
         set => Setting(MixedMusicSetting, value ? "true" : "false");
     }
     // Music folders list audio files, Mixed folders list videos and, when chosen, audio files, and other folders list videos.
-    private static bool Lists(LibraryFolder folder, string path, bool mixedMusic) =>
-        MusicFiles.IsAudio(path) ? folder.Kind == MusicFiles.Kind || mixedMusic && folder.Kind == "Mixed" : folder.Kind != MusicFiles.Kind;
+    private static bool Lists(LibraryFolder folder, string path, bool mixedMusic) => !FileNames.InPackageFolder(path) && (
+        MusicFiles.IsAudio(path) ? folder.Kind == MusicFiles.Kind || mixedMusic && folder.Kind == "Mixed" : folder.Kind != MusicFiles.Kind);
     // The innermost folder holding a file decides whether it is listed, so a folder inside another can list other files.
     private static LibraryFolder? ListedBy(LibraryFolder[] roots, string path, bool mixedMusic) =>
         roots.Where(f => IsWithin(path, f.Path)).MaxBy(f => f.Path.Length) is { } root && Lists(root, path, mixedMusic) ? root : null;
@@ -791,6 +791,8 @@ public sealed partial class LibraryStore
             var seen = new HashSet<string>();
             // Files new to the library this scan; one may be a known video that moved.
             var found = new List<MediaItem>();
+            // Records of files that turned out not to be videos.
+            var notVideos = new List<string>();
             foreach (var folder in roots)
             {
                 if (!Directory.Exists(folder.Path)) continue;
@@ -821,6 +823,11 @@ public sealed partial class LibraryStore
                     // Samples and film trailers stay out; a show's extras folder joins the show as bonus clips.
                     else
                     {
+                        // A ".ts" file is read to tell a transport stream from TypeScript, unless it was already read as a
+                        // video and hasn't changed since. One listed before this check leaves the library.
+                        if (FileNames.IsTransportStreamName(path) && ByPath(path) is var listed && !(listed is { FileVideoHeight: > 0 } && listed.FileSize == file.Length) &&
+                            !FileNames.IsTransportStream(path))
+                        { if (listed is not null) notVideos.Add(listed.Id); continue; }
                         // One file that can't be read must not stop the scan.
                         try { parsed = FileNames.Parse(path, folder.Kind, folder.Path) with { FileSize = file.Length }; }
                         catch (Exception ex) when (ex is ArgumentException or IndexOutOfRangeException or FormatException or OverflowException or InvalidOperationException or RegexMatchTimeoutException)
@@ -864,6 +871,7 @@ public sealed partial class LibraryStore
                     var missing = stored with { IsExtra = extra, Available = extra && File.Exists(stored.Path) };
                     if (missing != stored) { Save(missing); changes++; }
                 }
+            if (notVideos.Count > 0) lock (writeGate) changes += RemoveUnavailable(notVideos);
             changes += DropReplacedReleases(roots);
             AttachLooseReleases();
             MergeDuplicateShows();
@@ -996,6 +1004,32 @@ public sealed partial class LibraryStore
 public static partial class FileNames
 {
     public static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".mpeg", ".mpg", ".ts", ".m2ts", ".wmv", ".flv", ".ogv" };
+    // A code project's packages folder holds thousands of TypeScript files, which share ".ts" with transport streams,
+    // and no videos of anyone's. A library folder that holds a project, such as the Desktop, lists none of it.
+    public static bool InPackageFolder(string path) =>
+        path.Replace('/', '\\').Contains(@"\node_modules\", StringComparison.OrdinalIgnoreCase);
+    public static bool IsTransportStreamName(string path) => System.IO.Path.GetExtension(path).Equals(".ts", StringComparison.OrdinalIgnoreCase);
+    // A transport stream repeats its sync byte, 0x47, at the start of every 188-byte packet, or every 192 bytes when each
+    // packet has a timestamp. A recording can begin partway through a packet, so four packets in a row anywhere in the
+    // first one count. TypeScript source is text and never has them. A file that can't be read now, such as one still
+    // being written, counts as a video, as every ".ts" file did before.
+    public static bool IsTransportStream(string path)
+    {
+        try
+        {
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
+            var head = new byte[192 * 5];
+            var read = file.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            bool Packets(int size)
+            {
+                for (var start = 0; start < size; start++)
+                    if (start + size * 3 < read && head[start] == 0x47 && head[start + size] == 0x47 && head[start + size * 2] == 0x47 && head[start + size * 3] == 0x47) return true;
+                return false;
+            }
+            return Packets(188) || Packets(192);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
+    }
     // Sidecar, artwork and partial-download files never change the catalog, so watcher events for them are ignored.
     private static readonly HashSet<string> IgnoredChanges = new(StringComparer.OrdinalIgnoreCase)
     { ".nfo", ".tmp", ".part", ".crdownload", ".download", ".partial", ".!qb", ".!ut", ".aria2", ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup",
@@ -1004,6 +1038,7 @@ public static partial class FileNames
     public static bool AffectsLibrary(string path, bool deleted, bool music = false)
     {
         var extension = System.IO.Path.GetExtension(path);
+        if (InPackageFolder(path)) return false;
         if (MusicFiles.Extensions.Contains(extension)) return music;
         if (Extensions.Contains(extension)) return true;
         // A deleted folder can no longer be checked, so only skip names that look like a known non-video file.

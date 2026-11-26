@@ -3,9 +3,49 @@ using System.Net;
 
 static class LibraryIngestionFixture
 {
+    // A library folder such as the Desktop can hold a code project: TypeScript shares ".ts" with transport streams, and the
+    // project's node_modules folder holds thousands of such files.
+    private static async Task CodeFiles(string directory, Action<bool, string> check)
+    {
+        var root = Path.Combine(directory, "Desktop"); var project = Path.Combine(root, "App"); var packages = Path.Combine(project, "node_modules", "pkg");
+        Directory.CreateDirectory(Path.Combine(project, "src")); Directory.CreateDirectory(packages);
+        static byte[] Stream(int packet, int prefix)
+        {
+            var bytes = new byte[packet * 6];
+            for (var offset = prefix; offset < bytes.Length; offset += packet) bytes[offset] = 0x47;
+            return bytes;
+        }
+        var code = System.Text.Encoding.UTF8.GetBytes("export const settings = { theme: 'dark' };\n" + new string('/', 300));
+        var recording = Path.Combine(root, "Recording 2024.ts"); var timestamped = Path.Combine(root, "Broadcast 2023.ts"); var cut = Path.Combine(root, "Cut Recording 2022.ts");
+        await File.WriteAllBytesAsync(cut, Stream(188, 100));
+        var source = Path.Combine(project, "src", "app_model.ts"); var listedSource = Path.Combine(project, "src", "android.ts");
+        var known = Path.Combine(root, "Known Film 2020.ts"); var declaration = Path.Combine(packages, "index.d.ts"); var packaged = Path.Combine(packages, "sample.mp4");
+        await File.WriteAllBytesAsync(recording, Stream(188, 0)); await File.WriteAllBytesAsync(timestamped, Stream(192, 4));
+        await File.WriteAllBytesAsync(source, code); await File.WriteAllBytesAsync(listedSource, code); await File.WriteAllBytesAsync(known, code);
+        await File.WriteAllBytesAsync(declaration, code); await File.WriteAllBytesAsync(packaged, [0]);
+        await File.WriteAllBytesAsync(Path.Combine(root, "Example Film 2021.mkv"), [0]);
+        var store = new LibraryStore(Path.Combine(directory, "db"));
+        // What an earlier version listed: TypeScript files as films, one of them watched, and a transport stream already read.
+        store.Save(new("old-source", listedSource, "android", "Movie", FileSize: code.Length));
+        store.Setting("position:old-source", "1000");
+        store.Save(new("old-package", declaration, "index d", "Movie", FileSize: code.Length));
+        store.Save(new("old-known", known, "Known Film", "Movie", 2020, FileSize: code.Length, FileVideoHeight: 1080));
+        await store.ScanAsync([new(root, "Mixed")]);
+        var paths = store.All().Select(x => x.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        check(paths.Contains(recording) && paths.Contains(timestamped) && paths.Contains(cut) && paths.Contains(Path.Combine(root, "Example Film 2021.mkv")),
+            "transport streams with 188- and 192-byte packets, or starting partway through a packet, are listed beside other videos");
+        check(!paths.Contains(source) && !paths.Contains(listedSource), "TypeScript files named .ts are not listed as videos");
+        check(!paths.Contains(declaration) && !paths.Contains(packaged), "nothing inside a node_modules folder is listed");
+        check(store.All().All(x => x.Id is not ("old-source" or "old-package")) && store.Setting("position:old-source") is null,
+            "TypeScript files listed by an earlier version leave the library with their progress");
+        check(paths.Contains(known), "a .ts file already read as a video, and unchanged, is not read again");
+        check(!FileNames.AffectsLibrary(Path.Combine(packages, "other.ts"), false) && !FileNames.AffectsLibrary(Path.Combine(packages, "other.ts"), true) &&
+            FileNames.AffectsLibrary(Path.Combine(root, "New Recording.ts"), false), "changes inside node_modules don't start a library scan");
+    }
     public static async Task Run(string directory, Action<bool, string> check)
     {
         Directory.CreateDirectory(directory);
+        await CodeFiles(Path.Combine(directory, "code-files"), check);
         var gto = FileNames.Parse(Path.Combine(directory, "[Kanjouteki] GTO - Great Teacher Onizuka - E01v2 [1080p AI Upscale][x265].mkv"));
         check(gto.Series == "GTO - Great Teacher Onizuka" && gto.Episode == 1 && gto.Kind == "Anime", "versioned E01v2 release groups into its anime show");
         var outlaw = FileNames.Parse(Path.Combine(directory, "Outlaw Star - 01 (BDRip 1440x1080p x265 HEVC AC3, FLACx2 2.0x3)(Dual Audio)[sxales].mkv"));

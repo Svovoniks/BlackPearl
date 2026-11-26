@@ -33,6 +33,8 @@ internal static class MetadataHttp
     }
     internal static bool ArtworkHost(Uri uri) => uri.Scheme == "https" && string.IsNullOrEmpty(uri.UserInfo) &&
         (uri.Host.EndsWith(".tvmaze.com", StringComparison.OrdinalIgnoreCase) || uri.Host == "upload.wikimedia.org" || uri.Host == "image.tmdb.org");
+    private static bool SameHost(Uri origin, Uri target) => target.Scheme == "https" && string.IsNullOrEmpty(target.UserInfo) &&
+        string.Equals(target.Host, origin.Host, StringComparison.OrdinalIgnoreCase) && target.Port == origin.Port;
     public static async Task<byte[]> GetBytes(HttpClient http, string url, CancellationToken ct, bool image = false)
     {
         var originalUrl = url; var redirects = 0;
@@ -68,12 +70,16 @@ internal static class MetadataHttp
                     Location = response.Headers.Location is { } location ? MetadataDiagnostics.Request(new Uri(uri, location).AbsoluteUri) : null,
                     RetryDelayMs = delay.TotalMilliseconds, WillRetry = attempt < 2 && (response.StatusCode == HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500) });
                 if (response.StatusCode == HttpStatusCode.TooManyRequests) gate?.Backoff(delay, adapt: true);
-                if (image && (int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
+                // Redirects are followed here rather than by the handler, so each hop is checked first. TVmaze answers
+                // every lookup by IMDb or TheTVDB id with a redirect to the show. Metadata redirects stay on the
+                // requested host, since the client's headers can carry a provider's key.
+                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
                 {
-                    if (response.Headers.Location is null || ++redirects > 5) throw new IOException("Artwork redirect is missing or exceeds five hops.");
+                    var kind = image ? "Artwork" : "Metadata";
+                    if (response.Headers.Location is null || ++redirects > 5) throw new IOException(kind + " redirect is missing or exceeds five hops.");
                     var target = new Uri(uri, response.Headers.Location);
-                    if (!ArtworkHost(target)) throw new IOException("Unsupported artwork redirect host or scheme.");
-                    MetadataDiagnostics.Record("metadata-artwork-redirect", new { From = MetadataDiagnostics.Request(url), To = MetadataDiagnostics.Request(target.AbsoluteUri), Hop = redirects });
+                    if (image ? !ArtworkHost(target) : !SameHost(new Uri(originalUrl), target)) throw new IOException($"Unsupported {kind.ToLowerInvariant()} redirect host or scheme.");
+                    MetadataDiagnostics.Record(image ? "metadata-artwork-redirect" : "metadata-redirect", new { From = MetadataDiagnostics.Request(url), To = MetadataDiagnostics.Request(target.AbsoluteUri), Hop = redirects });
                     url = target.AbsoluteUri; attempt--; continue;
                 }
                 if (attempt >= 2 || response.StatusCode != HttpStatusCode.TooManyRequests && (int)response.StatusCode < 500)
