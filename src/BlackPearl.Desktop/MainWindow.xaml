@@ -244,6 +244,8 @@
              <Style TargetType="ComboBoxItem">
               <Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="Cursor" Value="Hand"/><Setter Property="FocusVisualStyle" Value="{x:Null}"/>
               <Setter Property="FontFamily" Value="{StaticResource DisplayFont}"/><Setter Property="FontSize" Value="16"/>
+              <!-- Picking the choice a blank already shows raises no selection change, but it is still a choice made by hand. -->
+              <EventSetter Event="PreviewMouseLeftButtonUp" Handler="MysteryChoicePicked"/><EventSetter Event="PreviewKeyDown" Handler="MysteryChoiceKey"/>
               <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem">
                <Border x:Name="Row" Background="Transparent" CornerRadius="7" Padding="10,6" Margin="0,1">
                 <DockPanel><TextBlock x:Name="Check" DockPanel.Dock="Right" Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="12" Foreground="{DynamicResource Accent}" Margin="18,0,0,0" VerticalAlignment="Center" Visibility="Hidden"/><ContentPresenter VerticalAlignment="Center"/></DockPanel>

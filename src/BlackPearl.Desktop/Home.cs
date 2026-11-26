@@ -403,6 +403,17 @@ public partial class MainWindow
         else mysteryLength = Enum.Parse<MysteryLength>(tag);
         RenderMystery(redraw: false, animate: true);
     }
+    // A click or Enter on the choice a blank already shows: no selection change follows, but the choices are now yours.
+    private void MysteryChoicePicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ComboBoxItem { IsSelected: true } || mysteryFiltersChosen || HomeMysteryCard is null) return;
+        mysteryFiltersChosen = true;
+        RenderMystery(redraw: false);
+    }
+    private void MysteryChoiceKey(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Enter) MysteryChoicePicked(sender, e);
+    }
     // Sets the blanks to a random choice that has a title to draw, other than the one avoided while there is another.
     private bool ShuffleMysteryFilters(string? avoid = null)
     {

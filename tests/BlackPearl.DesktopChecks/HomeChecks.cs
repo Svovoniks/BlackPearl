@@ -92,7 +92,19 @@ static class HomeChecks
             Check(draws.Select(draw => draw.Filters).Distinct().Count() > 1 && !Field<bool>("mysteryFiltersChosen") && Control<Button>("HomeMysteryRandom").Visibility == Visibility.Collapsed &&
                 (Control<ComboBox>("MysteryKindChoice").SelectedItem as ComboBoxItem)?.Tag as string == (Field<string?>("mysteryKind") ?? ""),
                 $"Draw another picks new random choices for the blanks and shows them ({draws.Select(draw => draw.Filters).Distinct().Count()} different in 12 draws)");
+            // Picking the choice a blank already shows makes the choices yours, though no selection change follows.
+            // The menu's choices hear clicks and Enter (this window is not shown, so its menus never open here).
+            var kindBlank = Control<ComboBox>("MysteryKindChoice");
+            var picks = kindBlank.ItemContainerStyle.Setters.OfType<EventSetter>().Select(setter => setter.Event).ToArray();
+            var shownChoice = (ComboBoxItem)kindBlank.SelectedItem;
+            Call("MysteryChoicePicked", shownChoice, new RoutedEventArgs());
+            Check(picks.Contains(UIElement.PreviewMouseLeftButtonUpEvent) && picks.Contains(UIElement.PreviewKeyDownEvent) &&
+                Field<bool>("mysteryFiltersChosen") && kindBlank.SelectedItem == shownChoice && Control<Button>("HomeMysteryRandom").Visibility == Visibility.Visible,
+                "picking the choice a blank already shows keeps the choices and shows Random again");
+            Call("RandomMysteryAgain", null, new RoutedEventArgs());
             // A blank picked by hand keeps every choice through Draw another, and Random again lets them go random again.
+            // The blanks first show other choices, so each pick below is a change.
+            Call("ApplyMysteryFilters", true, "Anime", MysteryLength.LongNight);
             Choose("MysteryPoolChoice", "Unseen"); Choose("MysteryLengthChoice", "Any"); Choose("MysteryKindChoice", "Movie");
             var handPicked = Filters();
             Call("DrawMystery", null, new RoutedEventArgs());
