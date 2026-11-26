@@ -166,7 +166,8 @@ public sealed class PhoneRemoteOptions
     public bool CanStart { get; init; } = true;
     // How long a PC replaced by another copy of its library waits before taking the phone remote back.
     public TimeSpan ReplacedWait { get; init; } = TimeSpan.FromMinutes(1);
-    // What this PC offers beyond the remote, sent in welcome: "library" (browse), "watch" (play on the phone).
+    // What this PC offers beyond the remote, sent in welcome: "library" (browse), "watch" (play on the phone). Every PC
+    // also lists "ping" (PHONE-REMOTE.md, "Checking the link").
     public IReadOnlyList<string> Features { get; init; } = [];
     // Also listen on the home network for phones the room server can't introduce (PhoneRemoteLan.cs). Null: only the
     // room server.
@@ -766,16 +767,26 @@ public sealed class PhoneRemoteHost : IDisposable
                 var (source, position, playing) = Clock?.Read() ?? (null, 0, false);
                 Send(session, Wire.Serialize(new { type = "clock", request, source, positionMs = Math.Max(0, position - PlaybackClock.PictureLagMs), playing }));
                 break;
-            case { Length: > 0 and <= 40 } type when session.Greeted && session.PhoneId != "pair" && type is not ("hello" or "pair" or "command" or "clock"):
+            // Answered here at once, on the native thread, so a busy dispatcher never makes a live link look lost. Only
+            // the phone judges the link by them: a locked phone's pings stop while it sleeps, and its link must stay
+            // for the lock screen's controls.
+            case "ping" when session.Greeted:
+                Send(session, Wire.Serialize(new { type = "pong", number = message.TryGetProperty("number", out var n) && n.TryGetInt64(out var ping) ? ping : 0 }));
+                break;
+            case { Length: > 0 and <= 40 } type when session.Greeted && session.PhoneId != "pair" && type is not ("hello" or "pair" or "command" or "clock" or "ping"):
                 Request?.Invoke(session, type, message.Clone());
                 break;
         }
     }
 
 
-    internal static string Welcome(PhoneRemoteOptions options, string pcId, object? lan) => lan is null
-        ? Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId, canStart = options.CanStart, features = options.Features })
-        : Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId, canStart = options.CanStart, features = options.Features, lan });
+    internal static string Welcome(PhoneRemoteOptions options, string pcId, object? lan)
+    {
+        string[] features = [.. options.Features, "ping"];
+        return lan is null
+            ? Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId, canStart = options.CanStart, features })
+            : Wire.Serialize(new { type = "welcome", protocol = PhoneRemoteProtocol.Version, app = options.AppVersion, pc = options.PcName, pcId, canStart = options.CanStart, features, lan });
+    }
     private void SendState(PhoneRemoteSession session)
     {
         if (CurrentState?.Invoke() is { } state) Send(session, Wire.Serialize(state));

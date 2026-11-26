@@ -203,7 +203,7 @@ static class PhoneRemoteFixture
             check(tail.Bytes.AsSpan().SequenceEqual(video.AsSpan(599990)) && (await phone.Read("file/test", 600000, 100)).Bytes.Length == 0, "a read past the end of the video is cut short, and one at its end is empty");
             check((await phone.Read("file/other", 0, 100)).Error == "gone" && (await phone.Read("stream/busy/0", 0, 100)).Error == "busy", "a resource the PC doesn't offer is refused, and one still being prepared asks the phone to try again");
             var welcomed = await phone.Welcome;
-            check(welcomed.GetProperty("features").EnumerateArray().Select(f => f.GetString()).SequenceEqual(["library", "watch"]), "the PC's welcome lists the library and watch features");
+            check(welcomed.GetProperty("features").EnumerateArray().Select(f => f.GetString()).SequenceEqual(["library", "watch", "ping"]), "the PC's welcome lists the library and watch features, and that it answers pings");
             phone.Send(new { type = "browse", request = 7, home = true });
             using (var waitRequest = new CancellationTokenSource(5000))
             {
@@ -213,6 +213,9 @@ static class PhoneRemoteFixture
             }
             phone.Send(new { type = "pair", name = "again" });
             check(await phone.Next("error") is { } refused && refused.GetProperty("code").GetString() == "pairing" && store.Saved.Count == 1, "a paired phone can't pair again on its link");
+            // A phone checks its link with pings (PHONE-REMOTE.md, "Checking the link").
+            phone.Send(new { type = "ping", number = 12 });
+            check(await phone.Next("pong") is { } pong && pong.GetProperty("number").GetInt64() == 12, "the PC answers a phone's ping with its number");
             // The pairing link closing counted too; this counts only the paired phone's.
             Interlocked.Exchange(ref disconnected, 0);
             host.Forget(phoneId);
@@ -254,8 +257,7 @@ static class PhoneRemoteFixture
             Has("remote-session-state", r => Field(r, "session") == greeted[0] && Field(r, "state") == "connected" && Field(r, "path") == "direct" && Field(r, "local").Contains("host:", StringComparison.Ordinal)) &&
             Has("remote-session-closed", r => Field(r, "session") == greeted[0] && Field(r, "reason") == "removed" && Field(r, "greeted") == "True"),
             "the log follows a phone's session from offer to close: connected directly, greeted, and closed because the phone was removed");
-        check(Has("remote-session-paired", _ => true) && Has("remote-session-refused", r => Field(r, "reason") == "already-paired"), "the log records pairing, and a paired phone's refused second pairing");
-        check(Has("phone-read-failed", r => Field(r, "resource") == "file" && Field(r, "error") == "UnauthorizedAccessException"), "a read the PC can't answer is logged with the kind of resource asked for");
+        check(Has("remote-session-paired", _ => true) && Has("remote-session-refused", r => Field(r, "reason") == "already-paired"), "the log records pairing, and a paired phone's refused second pairing");        check(Has("phone-read-failed", r => Field(r, "resource") == "file" && Field(r, "error") == "UnauthorizedAccessException"), "a read the PC can't answer is logged with the kind of resource asked for");
         check(!new[] { hostKey, secret, code, phoneId, pcId }.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)), "the phone remote's log holds no keys, secrets, codes or whole ids");
     }
 
