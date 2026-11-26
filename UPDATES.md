@@ -397,7 +397,9 @@ Push a version tag such as `v0.2.1` to publish a GitHub Release. Tags must use
 The workflow uploads `BlackPearl-Setup-VERSION-win-x64.exe`, the file list
 `BlackPearl-files-VERSION-win-x64.txt` (SHA-256, size and path of every installed
 file), update installers `BlackPearl-Update-FROM-to-VERSION-win-x64.exe` from
-each of the 20 previous stable releases, and `SHA256SUMS.txt` covering all of
+each of the 20 previous stable releases, the room service build
+`BlackPearl-Server-VERSION-linux-x64.tar.gz` that room servers update themselves
+from (deploy/README.md, "Automatic updates"), and `SHA256SUMS.txt` covering all of
 them. Only tagged builds publish releases. Do not replace an existing release
 with different bytes; publish a new version instead.
 

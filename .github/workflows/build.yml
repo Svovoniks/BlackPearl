@@ -167,6 +167,17 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:BLACKPEARL_DESKTOP_SENTRY_DSN)) { Write-Host "::warning::BLACKPEARL_DESKTOP_SENTRY_DSN is not set; this build sends no crash reports." }
           dotnet publish src/BlackPearl.Desktop -c Release -r win-x64 --self-contained true -o artifacts/BlackPearl -p:Version=$env:APP_VERSION -p:VlcWindowsX86Enabled=false -p:VlcWindowsArm64Enabled=false -p:PublishReadyToRun=true
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # The room service build that servers running deploy/blackpearl-update.sh install. It needs the ASP.NET Core
+      # runtime on the server, as deploy/README.md describes.
+      - name: Publish room service
+        shell: pwsh
+        run: |
+          dotnet publish src/BlackPearl.Server -c Release -r linux-x64 --self-contained false -o artifacts/server -p:Version=$env:APP_VERSION
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $described = dotnet artifacts/server/BlackPearl.Server.dll --describe | ConvertFrom-Json
+          if ($LASTEXITCODE -or $described.version -cne $env:APP_VERSION) { throw "The room service build reports version '$($described.version)', expected $env:APP_VERSION." }
+          tar -czf "artifacts/BlackPearl-Server-$env:APP_VERSION-linux-x64.tar.gz" -C artifacts/server .
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build installers
         shell: pwsh
         env:
@@ -188,6 +199,7 @@ jobs:
             artifacts/BlackPearl-Setup-*-win-x64.exe
             artifacts/BlackPearl-Update-*-win-x64.exe
             artifacts/BlackPearl-files-*-win-x64.txt
+            artifacts/BlackPearl-Server-*-linux-x64.tar.gz
           if-no-files-found: error
           retention-days: 14
           # Installers are already compressed.
@@ -260,7 +272,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          $files = @("artifacts/BlackPearl-Setup-$env:APP_VERSION-win-x64.exe", "artifacts/BlackPearl-files-$env:APP_VERSION-win-x64.txt") +
+          $files = @("artifacts/BlackPearl-Setup-$env:APP_VERSION-win-x64.exe", "artifacts/BlackPearl-files-$env:APP_VERSION-win-x64.txt", "artifacts/BlackPearl-Server-$env:APP_VERSION-linux-x64.tar.gz") +
             @(Get-ChildItem "artifacts/BlackPearl-Update-*-to-$env:APP_VERSION-win-x64.exe" | ForEach-Object { $_.FullName })
           $files | ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } | Set-Content artifacts/SHA256SUMS.txt
           gh release create $env:GITHUB_REF_NAME @files artifacts/SHA256SUMS.txt --verify-tag --draft --title "BlackPearl $env:APP_VERSION" --generate-notes

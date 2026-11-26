@@ -75,11 +75,16 @@ try {
     $sumPath = Join-Path $testRoot 'SHA256SUMS.txt'
     [IO.File]::WriteAllText($sumPath, "$hash  $fileName`n")
     $fileList = [pscustomobject]@{ name='BlackPearl-files-0.3.18-win-x64.txt'; size=10; digest="sha256:$('a' * 64)"; browser_download_url='https://github.com/Svovoniks/BlackPearl/releases/download/v0.3.18/BlackPearl-files-0.3.18-win-x64.txt' }
-    $release = [pscustomobject]@{ tag_name='v0.3.18'; draft=$false; prerelease=$false; assets=@($asset, [pscustomobject]@{name='SHA256SUMS.txt';browser_download_url='https://github.com/Svovoniks/BlackPearl/releases/download/v0.3.18/SHA256SUMS.txt'}, $fileList) }
-    $null = Assert-ReleaseMetadata $release '0.3.18'
+    $serverBuild = [pscustomobject]@{ name='BlackPearl-Server-0.3.18-linux-x64.tar.gz'; size=10; digest="sha256:$('b' * 64)"; browser_download_url='https://github.com/Svovoniks/BlackPearl/releases/download/v0.3.18/BlackPearl-Server-0.3.18-linux-x64.tar.gz' }
+    $release = [pscustomobject]@{ tag_name='v0.3.18'; draft=$false; prerelease=$false; assets=@($asset, [pscustomobject]@{name='SHA256SUMS.txt';browser_download_url='https://github.com/Svovoniks/BlackPearl/releases/download/v0.3.18/SHA256SUMS.txt'}, $fileList, $serverBuild) }
+    $verified = Assert-ReleaseMetadata $release '0.3.18'
+    Check ($verified.Updates -contains $serverBuild) 'the room service build is checked against SHA256SUMS.txt with the other assets'
     $release.assets = @($release.assets | Where-Object { $_ -ne $fileList })
     Expect-Rejected { Assert-ReleaseMetadata $release '0.3.18' } 'a release without its file list cannot be reported as shipped'
     $release.assets = @($release.assets) + $fileList
+    $release.assets = @($release.assets | Where-Object { $_ -ne $serverBuild })
+    Expect-Rejected { Assert-ReleaseMetadata $release '0.3.18' } 'a release without its room service build cannot be reported as shipped'
+    $release.assets = @($release.assets) + $serverBuild
     Check ((Assert-InstallerBytes $filePath $sumPath $asset) -eq $hash) 'correct installer matches both public digests'
     $release.draft=$true
     Expect-Rejected { Assert-ReleaseMetadata $release '0.3.18' } 'draft cannot be reported as shipped'
