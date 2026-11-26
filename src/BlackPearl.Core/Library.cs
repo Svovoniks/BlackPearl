@@ -774,8 +774,8 @@ public sealed partial class LibraryStore
         set => Setting(MixedMusicSetting, value ? "true" : "false");
     }
     // Music folders list audio files, Mixed folders list videos and, when chosen, audio files, and other folders list videos.
-    private static bool Lists(LibraryFolder folder, string path, bool mixedMusic) =>
-        MusicFiles.IsAudio(path) ? folder.Kind == MusicFiles.Kind || mixedMusic && folder.Kind == "Mixed" : folder.Kind != MusicFiles.Kind;
+    private static bool Lists(LibraryFolder folder, string path, bool mixedMusic) => !FileNames.InPackageFolder(path) && (
+        MusicFiles.IsAudio(path) ? folder.Kind == MusicFiles.Kind || mixedMusic && folder.Kind == "Mixed" : folder.Kind != MusicFiles.Kind);
     // The innermost folder holding a file decides whether it is listed, so a folder inside another can list other files.
     private static LibraryFolder? ListedBy(LibraryFolder[] roots, string path, bool mixedMusic) =>
         roots.Where(f => IsWithin(path, f.Path)).MaxBy(f => f.Path.Length) is { } root && Lists(root, path, mixedMusic) ? root : null;
@@ -791,6 +791,8 @@ public sealed partial class LibraryStore
             var seen = new HashSet<string>();
             // Files new to the library this scan; one may be a known video that moved.
             var found = new List<MediaItem>();
+            // Records of files that turned out not to be videos.
+            var notVideos = new List<string>();
             foreach (var folder in roots)
             {
                 if (!Directory.Exists(folder.Path)) continue;
@@ -805,6 +807,8 @@ public sealed partial class LibraryStore
                     // A folder inside this one that doesn't list this kind of file keeps it out.
                     if (roots.Any(r => r.Path.Length > folder.Path.Length && IsWithin(path, r.Path)) && ListedBy(roots, path, mixedMusic) is null) continue;
                     MediaItem parsed;
+                    // For a ".ts" file: the write time it was last found to be a transport stream at, if it was.
+                    (long? At, bool Set) streamChecked = (null, false);
                     if (music)
                     {
                         // Tags are read again only when a track's file changed, or a cover appeared beside a track without one.
@@ -821,6 +825,17 @@ public sealed partial class LibraryStore
                     // Samples and film trailers stay out; a show's extras folder joins the show as bonus clips.
                     else
                     {
+                        // A ".ts" file is read to tell a transport stream from TypeScript, unless it was found to be one and
+                        // hasn't changed since: its record then keeps the write time it had. One listed before this check
+                        // leaves the library.
+                        if (FileNames.IsTransportStreamName(path))
+                        {
+                            var writeTime = file.LastWriteTimeUtc.Ticks; var listed = ByPath(path);
+                            var stream = listed is not null && listed.FileSize == file.Length && listed.FileWriteTime == writeTime ? true : FileNames.ReadTransportStream(path);
+                            if (stream == false) { if (listed is not null) notVideos.Add(listed.Id); continue; }
+                            // One that can't be told yet is listed, and read again on the next scan.
+                            streamChecked = (stream == true ? writeTime : null, true);
+                        }
                         // One file that can't be read must not stop the scan.
                         try { parsed = FileNames.Parse(path, folder.Kind, folder.Path) with { FileSize = file.Length }; }
                         catch (Exception ex) when (ex is ArgumentException or IndexOutOfRangeException or FormatException or OverflowException or InvalidOperationException or RegexMatchTimeoutException)
@@ -837,6 +852,7 @@ public sealed partial class LibraryStore
                         var previous = ByIds([parsed.Id]).FirstOrDefault() ?? ByPath(parsed.Path);
                         item = music ? previous is null ? parsed : MusicFiles.Merge(parsed, previous)
                             : previous is null ? MergeScanned(parsed, null) : MergeScanned(parsed with { Id = previous.Id }, forgetOldReadings && !previous.IsVirtual && CanRepairGrouping(previous) ? ForgetOldReading(parsed, previous) : previous) with { FileSize = parsed.FileSize };
+                        if (streamChecked.Set) item = item with { FileWriteTime = streamChecked.At };
                         // A replaced file has its length read again, and the old file's length isn't shown for it meanwhile.
                         if (previous is not null && !music && previous.FileSize != parsed.FileSize && previous.FileRuntimeMinutes is not null)
                             item = item with { FileRuntimeMinutes = null, RuntimeMinutes = previous.FileRuntimeMinutes > 0 && previous.RuntimeMinutes == previous.FileRuntimeMinutes &&
@@ -864,6 +880,7 @@ public sealed partial class LibraryStore
                     var missing = stored with { IsExtra = extra, Available = extra && File.Exists(stored.Path) };
                     if (missing != stored) { Save(missing); changes++; }
                 }
+            if (notVideos.Count > 0) lock (writeGate) changes += RemoveUnavailable(notVideos);
             changes += DropReplacedReleases(roots);
             AttachLooseReleases();
             MergeDuplicateShows();
@@ -996,6 +1013,36 @@ public sealed partial class LibraryStore
 public static partial class FileNames
 {
     public static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase) { ".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".mpeg", ".mpg", ".ts", ".m2ts", ".wmv", ".flv", ".ogv" };
+    // A code project's packages folder holds thousands of TypeScript files, which share ".ts" with transport streams,
+    // and no videos of anyone's. A library folder that holds a project, such as the Desktop, lists none of it.
+    public static bool InPackageFolder(string path) =>
+        path.Replace('/', '\\').Contains(@"\node_modules\", StringComparison.OrdinalIgnoreCase);
+    public static bool IsTransportStreamName(string path) => System.IO.Path.GetExtension(path).Equals(".ts", StringComparison.OrdinalIgnoreCase);
+    // A transport stream repeats its sync byte, 0x47, at the start of every 188-byte packet, or every 192 bytes when each
+    // packet has a timestamp. A recording can begin partway through a packet, so four packets in a row anywhere in the
+    // first one count. TypeScript source is text and never has them.
+    // Null when it can't be told yet: a file that can't be read now, or one whose start is still empty or zeros, as a
+    // download's is until its first piece arrives. Such a file counts as a video, as every ".ts" file did before; finishing
+    // a download renames nothing, so the folder watcher would not bring it back.
+    public static bool? ReadTransportStream(string path)
+    {
+        try
+        {
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
+            var head = new byte[192 * 5];
+            var read = file.ReadAtLeast(head, head.Length, throwOnEndOfStream: false);
+            if (head.AsSpan(0, read).IndexOfAnyExcept((byte)0) < 0) return null;
+            bool Packets(int size)
+            {
+                for (var start = 0; start < size; start++)
+                    if (start + size * 3 < read && head[start] == 0x47 && head[start + size] == 0x47 && head[start + size * 2] == 0x47 && head[start + size * 3] == 0x47) return true;
+                return false;
+            }
+            return Packets(188) || Packets(192);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+    public static bool IsTransportStream(string path) => ReadTransportStream(path) != false;
     // Sidecar, artwork and partial-download files never change the catalog, so watcher events for them are ignored.
     private static readonly HashSet<string> IgnoredChanges = new(StringComparer.OrdinalIgnoreCase)
     { ".nfo", ".tmp", ".part", ".crdownload", ".download", ".partial", ".!qb", ".!ut", ".aria2", ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup",
@@ -1004,7 +1051,10 @@ public static partial class FileNames
     public static bool AffectsLibrary(string path, bool deleted, bool music = false)
     {
         var extension = System.IO.Path.GetExtension(path);
+        if (InPackageFolder(path)) return false;
         if (MusicFiles.Extensions.Contains(extension)) return music;
+        // Saving TypeScript source often renames a temporary file onto it.
+        if (!deleted && IsTransportStreamName(path)) return ReadTransportStream(path) != false;
         if (Extensions.Contains(extension)) return true;
         // A deleted folder can no longer be checked, so only skip names that look like a known non-video file.
         if (deleted) return !IgnoredChanges.Contains(extension);
