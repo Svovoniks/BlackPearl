@@ -66,6 +66,24 @@ if (args.FirstOrDefault() == "--phone-remote")
     Console.WriteLine($"{checks} phone remote checks passed."); return;
 }
 
+// The room service's log on its own: --server-logs [server dll]. --server-log-volume [server dll] counts the journal lines
+// a typical session writes, on this build or an older one. BLACKPEARL_LOG_SESSION_SECONDS sets how long that session
+// watches a video (25 s).
+if (args.FirstOrDefault() == "--server-logs")
+{
+    var checks = 0;
+    await ServerLogFixture.Run(File.Exists(".tools/dotnet/dotnet.exe") ? Path.GetFullPath(".tools/dotnet/dotnet.exe") : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet",
+        Path.GetFullPath(args.ElementAtOrDefault(1) ?? "src/BlackPearl.Server/bin/Release/net10.0/BlackPearl.Server.dll"), Path.GetFullPath(Path.Combine("artifacts", "server-log-" + Guid.NewGuid().ToString("N"))), (condition, name) =>
+        { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); checks++; });
+    Console.WriteLine($"{checks} server log checks passed."); return;
+}
+
+if (args.FirstOrDefault() == "--server-log-volume")
+{
+    await ServerLogFixture.Volume(File.Exists(".tools/dotnet/dotnet.exe") ? Path.GetFullPath(".tools/dotnet/dotnet.exe") : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet",
+        Path.GetFullPath(args.ElementAtOrDefault(1) ?? "src/BlackPearl.Server/bin/Release/net10.0/BlackPearl.Server.dll"), Path.GetFullPath(Path.Combine("artifacts", "server-log-volume-" + Guid.NewGuid().ToString("N"))));
+    return;
+}
 if (args.FirstOrDefault() == "--hostless-rooms")
 {
     var checks = 0;
