@@ -79,7 +79,8 @@ static class ScratchLibrary
     // the user's keys would take the user's phones from their own app every minute (PhoneRemoteOptions.ReplacedWait),
     // and put them out of their rooms ("You entered this room from another BlackPearl window"). So the copy forgets
     // them: it makes its own phone key when its phone remote starts, has no paired phones (pair one with the copy to try
-    // phone features), and enters saved rooms as a new person, not as the user or the room's creator.
+    // phone features), and enters saved rooms as a new person, not as the user or the room's creator. That person stays
+    // in the room's member list under the copy's display name, like anyone who has entered it.
     static readonly string[] IdentitySettings = ["phoneRemoteHostKey", "phoneRemotePhones"];
 
     static string[] ForgetIdentity(SqliteConnection db, SqliteTransaction transaction)
@@ -90,6 +91,14 @@ static class ScratchLibrary
             using var delete = db.CreateCommand(); delete.Transaction = transaction;
             delete.CommandText = "DELETE FROM settings WHERE key = $key"; delete.Parameters.AddWithValue("$key", key);
             if (delete.ExecuteNonQuery() > 0) forgotten.Add(key == "phoneRemoteHostKey" ? "its own phone key" : "no paired phones");
+        }
+        // A room's creator keeps their key in the saved room (below); everyone else's key for a room they joined is its own
+        // setting, room:<server>:<CODE>:guestKey (RoomClient.RoomSetting), which RoomClient enters with when it has no other.
+        using (var guests = db.CreateCommand())
+        {
+            guests.Transaction = transaction;
+            guests.CommandText = "DELETE FROM settings WHERE key LIKE 'room:%' AND key LIKE '%:guestKey'";
+            if (guests.ExecuteNonQuery() is var count and > 0) forgotten.Add($"no guest keys ({count} joined rooms)");
         }
         using var read = db.CreateCommand(); read.Transaction = transaction;
         read.CommandText = "SELECT value FROM settings WHERE key = 'rooms'";
