@@ -102,6 +102,12 @@ static class HomeChecks
             Call("RandomMysteryAgain", null, new RoutedEventArgs());
             Check(!Field<bool>("mysteryFiltersChosen") && Control<Button>("HomeMysteryRandom").Visibility == Visibility.Collapsed && Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" },
                 "Random again hides itself and draws at random again");
+            // Random choices a refresh leaves with nothing to draw, as when their one title was just started, pick again.
+            Call("ApplyMysteryFilters", false, "Anime", MysteryLength.Short);
+            Call("RefreshHome"); await Until(() => (Field<string?>("mysteryKind"), Field<MysteryLength>("mysteryLength")) != ("Anime", MysteryLength.Short));
+            Check(!Field<bool>("mysteryFiltersChosen") && Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } &&
+                (Field<bool>("mysteryRewatch") ? Field<HomeTitle[]>("homeSeen") : Field<HomeTitle[]>("homeUnseen")).Any(title => LibraryHome.Matches(title, Field<string?>("mysteryKind"), Field<MysteryLength>("mysteryLength"))),
+                "random choices left with nothing to draw pick again when Home refreshes");
             Choose("MysteryPoolChoice", "Unseen"); Choose("MysteryKindChoice", ""); Choose("MysteryLengthChoice", "Any");
             Call("RefreshHome"); await Until(() => Continuing().Length == 2);
             Check(Control<ComboBox>("MysteryKindChoice").SelectedIndex == 0 && Control<ComboBox>("MysteryLengthChoice").SelectedIndex == 0 && Control<ComboBox>("MysteryPoolChoice").SelectedIndex == 0,
@@ -268,9 +274,14 @@ static class HomeChecks
             }
             Sent("catalog-draw");
             typeof(RoomClient).GetField("hostFeatures", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(client, 3);
-            // A Watched choice left from your own library doesn't apply to someone else's: their app draws titles not started.
-            Choose("MysteryPoolChoice", "Seen");
+            // Random choices from your own library don't follow you into someone else's: until you pick, their app draws any
+            // type and length from its titles not started.
+            Call("ApplyMysteryFilters", true, "Anime", MysteryLength.LongNight);
+            typeof(MainWindow).GetField("mysteryFiltersChosen", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(window, false);
             Call("RenderGuestHome");
+            Check(Control<ComboBox>("MysteryKindChoice").SelectionBoxItem as string == "anything" && Control<ComboBox>("MysteryLengthChoice").SelectionBoxItem as string == "of any length" &&
+                !Field<bool>("mysteryFiltersChosen") && !Field<bool>("mysteryFiltersShuffled") && Control<Button>("HomeMysteryRandom").Visibility == Visibility.Collapsed,
+                "in someone else's library, random choices give way to any type and length");
             Check(Control<FrameworkElement>("HomeMysteryFilters").Visibility == Visibility.Visible && Control<FrameworkElement>("MysteryPoolBar").Visibility == Visibility.Collapsed && Field<LibraryCardView?>("homeMystery") is null &&
                 Control<Button>("HomeMysteryCard").Visibility == Visibility.Hidden && Control<TextBlock>("HomeMysteryTitle").Text == "" &&
                 !Control<Button>("HomeMysteryPlay").IsEnabled && !Control<Button>("HomeMysteryDraw").IsEnabled,

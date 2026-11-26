@@ -44,9 +44,11 @@ public partial class MainWindow
     private MysteryLength mysteryLength;
     // Draws from the titles already watched or started instead of the ones not started; only in your own library.
     private bool mysteryRewatch;
-    // The draw's blanks are random until you pick one yourself: they start at a random choice once a launch, the first time
-    // your library has something to draw, and Draw another picks new ones. Picked by hand, they keep what they show until
-    // Random again. Someone else's library keeps what they show: their app draws, so this one can't tell what matches.
+    // The draw's blanks are random until you pick one yourself: they start at a random choice the first time your library
+    // has something to draw, pick again when a refresh leaves them nothing to draw (the one match was started), and Draw
+    // another picks new ones. Picked by hand, they keep what they show until Random again. Someone else's app does the
+    // drawing in their library, so this one can't tell what matches there: until you pick, it draws any type and length,
+    // and your own library's blanks go random again when you are back.
     private bool mysteryFiltersShuffled, mysteryFiltersChosen, applyingMysteryFilters;
     private int mysteryDraw = Random.Shared.Next();
     private HomeRowView[]? homeRows;
@@ -87,7 +89,9 @@ public partial class MainWindow
             return view;
         }).ToArray();
         homeUnseen = overview.Unseen; homeSeen = overview.Seen;
-        if (!mysteryFiltersShuffled && !mysteryFiltersChosen) mysteryFiltersShuffled = ShuffleMysteryFilters();
+        if (!mysteryFiltersChosen && (!mysteryFiltersShuffled ||
+            !(mysteryRewatch ? homeSeen : homeUnseen).Any(title => LibraryHome.Matches(title, mysteryKind, mysteryLength))))
+            mysteryFiltersShuffled = ShuffleMysteryFilters();
         homeFacts = overview.Unseen.Concat(overview.Seen).GroupBy(title => LibraryCardView.Identity(title.Card)).ToDictionary(group => group.Key, group => group.First());
         HomeStatus.Text = items.Count == 0 ? "Add a folder to find something to watch." : "";
         RenderHome(views);
@@ -236,6 +240,11 @@ public partial class MainWindow
     private Action? mysteryReveal;
     private void RenderMystery(bool redraw, bool animate = false)
     {
+        if (GuestLibrary && !mysteryFiltersChosen && (mysteryRewatch || mysteryKind is not null || mysteryLength != MysteryLength.Any))
+        {
+            ApplyMysteryFilters(false, null, MysteryLength.Any);
+            mysteryFiltersShuffled = false;
+        }
         RequestGuestDraw(animate);
         // In someone else's library their app draws from their unstarted titles; apps from before that send one fixed pick.
         var remote = GuestLibrary ? guestDraw : null;
@@ -398,7 +407,12 @@ public partial class MainWindow
     private bool ShuffleMysteryFilters(string? avoid = null)
     {
         if (LibraryHome.RandomFilters(homeUnseen, homeSeen, Random.Shared, avoid) is not { } choice) return false;
-        var (rewatch, kind, length) = choice;
+        ApplyMysteryFilters(choice.Rewatch, choice.Kind, choice.Length);
+        return true;
+    }
+    // Sets the blanks and the draw's filters, as the app's own choice rather than yours.
+    private void ApplyMysteryFilters(bool rewatch, string? kind, MysteryLength length)
+    {
         mysteryRewatch = rewatch; mysteryKind = kind; mysteryLength = length;
         static void Show(ComboBox blank, string tag) =>
             blank.SelectedItem = blank.Items.OfType<ComboBoxItem>().First(choice => (string)choice.Tag == tag);
@@ -410,7 +424,6 @@ public partial class MainWindow
             Show(MysteryLengthChoice, length.ToString());
         }
         finally { applyingMysteryFilters = false; }
-        return true;
     }
     private string? DrawnMysteryKey => homeMystery is { HomeSection: "draw" } shown ? LibraryIdentity.TitleKey(shown.Card.Media) : null;
     private void RandomMysteryAgain(object sender, RoutedEventArgs e)
