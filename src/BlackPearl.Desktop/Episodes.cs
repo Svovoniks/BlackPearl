@@ -71,7 +71,7 @@ public partial class MainWindow
             RefreshEpisodeEndAction();
             if (EpisodeEndButton.Visibility != Visibility.Visible || !EpisodeEndButton.IsEnabled || playingItem is not { } item) return;
             var next = FollowingEpisode(item, candidate => File.Exists(candidate.Path));
-            library.Setting("position:" + item.Id, "0"); SetWatched(item, true);
+            FinishRewatch(item); library.Setting("position:" + item.Id, "0"); SetWatched(item, true);
             if (next is null) { SetStatus(item.Series is null ? "Movie marked as watched." : "Episode marked as watched."); return; }
             await PlayFollowingEpisode(next);
         });
@@ -113,7 +113,7 @@ public partial class MainWindow
         DetailWatched.ToolTip = watched ? "Mark as unwatched" : "Mark as watched";
         System.Windows.Automation.AutomationProperties.SetName(DetailWatched, watched ? "Mark as unwatched" : "Mark as watched");
         // Songs start from the beginning; see SavePlaybackPosition.
-        var resume = !watched && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var position) && position >= 10000 ? position : 0;
+        var resume = ResumeAt(item) is >= 10000 and var position ? position : 0;
         DetailPlay.Content = resume > 0 ? "Resume at " + FormatTime(resume) : item.IsMusic ? "Play" : "Play locally";
         DetailHost.Content = item.IsMusic ? "Listen together" : "Watch together";
         RestartButton.Visibility = resume > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -124,6 +124,8 @@ public partial class MainWindow
         // Clearing a logical episode or a film also clears watched versions that cover it.
         var marked = LibraryWatchProgress.Marked(items, item, level, season, watched);
         library.SetSettings(marked.Select(id => KeyValuePair.Create("watched:" + id, watched ? "true" : "false")));
+        // A mark ends a rewatch: marking a show watched again takes it out of Continue watching.
+        library.ForgetRewatch(marked);
         foreach (var id in marked) watchedState[id] = watched;
         foreach (var card in libraryCards.Where(card => card.Card.Media.Id == item.Id || LibraryIdentity.SameShow(card.Card.Media, item) || LibraryIdentity.SameFilm(card.Card.Media, item)))
             UpdateCardPlayback(card);
@@ -140,7 +142,7 @@ public partial class MainWindow
         RefreshEpisodeEndAction();
         if (endedItem is not null && (room is null || room.Identity?.Host == true))
         {
-            library.Setting("position:" + endedItem.Id, "0");
+            FinishRewatch(endedItem); library.Setting("position:" + endedItem.Id, "0");
             if (!endedItem.IsMusic) SetWatched(endedItem, true);
         }
         // Looping is the host's choice in a room, and applies to everyone there.

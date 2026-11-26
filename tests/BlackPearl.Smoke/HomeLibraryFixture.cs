@@ -53,6 +53,52 @@ static class HomeLibraryFixture
             "Home lists the started titles to rewatch, with their facts and whether they were watched to the end");
         check(Enumerable.Range(0, 20).Select(seed => LibraryHome.Draw(overview.Seen, "Movie", MysteryLength.Any, seed)).All(title => title?.Card.Media.Id == "film") &&
             LibraryHome.Draw(overview.Seen, "Anime", MysteryLength.Any, 1) is null, "a rewatch draw keeps to the watched titles and the filters");
+        // Specials: a numberless pilot and a credit-free ending in season 0 sort before season 1, but aren't next in line.
+        MediaItem[] specials = [
+            Episode("p-s1", "Pilot show", 1, 1), Episode("p-s2a", "Pilot show", 2, 1), Episode("p-s2b", "Pilot show", 2, 2),
+            new("pilot", "C:/private/pilot.mkv", "Pilot show", "Show", Series: "Pilot show", Season: 0, RuntimeMinutes: 30),
+            Episode("p-nced", "Pilot show", 0, 9) with { IsBonus = true }];
+        var specialPlayback = new Dictionary<string, string> { ["watched:p-s1"] = "true", ["watched:p-s2a"] = "true", ["position:pilot"] = "8000" };
+        HomeLibraryCard? SpecialsCard() => LibraryHome.Browse(specials, specialPlayback, 7).SingleOrDefault(entry => entry.Section == "continue");
+        check(SpecialsCard()?.Card.Media.Id == "p-s2b", "a show continues with its next regular episode, not an unwatched pilot or special in season 0");
+        specialPlayback["watched:p-s2b"] = "true";
+        check(SpecialsCard() is null, "a show with only specials left unwatched leaves continue watching");
+        specialPlayback["position:pilot"] = "60000";
+        check(SpecialsCard() is { Card.Media.Id: "pilot", PositionMs: 60000 }, "a special left part-way still continues");
+        MediaItem[] onlySpecials = [Episode("ova1", "OVA show", 0, 1), Episode("ova2", "OVA show", 0, 2)];
+        check(LibraryHome.Browse(onlySpecials, new Dictionary<string, string> { ["watched:ova1"] = "true" }, 7)
+            .SingleOrDefault(entry => entry.Section == "continue")?.Card.Media.Id == "ova2", "a show with nothing but specials goes through them in order");
+        // Rewatching: every episode watched, some with an old place left from before they were marked.
+        MediaItem[] again = [Episode("r1", "Again show", 1, 1), Episode("r2", "Again show", 1, 2), Episode("r3", "Again show", 2, 1),
+            new("rfilm", "C:/private/rfilm.mkv", "Again film", "Movie", RuntimeMinutes: 100)];
+        var rewatch = new Dictionary<string, string> { ["watched:r1"] = "true", ["watched:r2"] = "true", ["watched:r3"] = "true", ["watched:rfilm"] = "true",
+            ["played:r1"] = "100", ["played:r2"] = "200", ["played:r3"] = "300", ["position:r2"] = "500000", ["position:rfilm"] = "700000" };
+        HomeLibraryCard[] Again() => LibraryHome.Browse(again, rewatch, 7).Where(entry => entry.Section == "continue").ToArray();
+        check(Again().Length == 0, "a finished show and film stay out of continue watching, whatever old places they keep");
+        rewatch["rewatch:r1"] = "300000"; rewatch["played:r1"] = "400";
+        check(Again() is [{ Card.Media.Id: "r1", PositionMs: 300000 }], "a show watched again continues with the episode rewatched last, at its place in the rewatch");
+        rewatch["rewatch:r1"] = "0";
+        check(Again() is [{ Card.Media.Id: "r2", PositionMs: 0 }], "a rewatched episode seen to the end moves the show on to the next one, from its start");
+        rewatch["rewatch:r3"] = "0"; rewatch["played:r3"] = "500";
+        check(Again().Length == 0, "a rewatch that reached the last episode leaves continue watching");
+        rewatch["rewatch:rfilm"] = "60000"; rewatch["played:rfilm"] = "600";
+        check(Again() is [{ Card.Media.Id: "rfilm", PositionMs: 60000 }], "a film watched again continues at its place in the rewatch");
+        rewatch["rewatch:rfilm"] = "0";
+        check(Again().Length == 0, "a film rewatched to the end leaves continue watching");
+        again = [.. again, Episode("r4", "Again show", 2, 2)];
+        check(Again() is [{ Card.Media.Id: "r4", PositionMs: 0 }], "a new episode of a show being rewatched comes first, as for any show not finished");
+        // A replay before the rest of the show was watched for the first time: finishing the show ends it.
+        MediaItem[] early = [Episode("e1", "Early show", 1, 1), Episode("e2", "Early show", 1, 2), Episode("e3", "Early show", 1, 3)];
+        var earlyPlayback = new Dictionary<string, string> { ["watched:e1"] = "true", ["watched:e2"] = "true", ["watched:e3"] = "true",
+            ["played:e1"] = "100", ["rewatch:e1"] = "0", ["played:e2"] = "200", ["played:e3"] = "300" };
+        HomeLibraryCard[] Early() => LibraryHome.Browse(early, earlyPlayback, 7).Where(entry => entry.Section == "continue").ToArray();
+        check(Early().Length == 0, "a show finished after one of its episodes was replayed stays out of continue watching");
+        earlyPlayback["rewatch:e1"] = "400000";
+        check(Early().Length == 0, "a replay left part-way before the show was finished is over once it is");
+        earlyPlayback["played:e1"] = "400";
+        check(Early() is [{ Card.Media.Id: "e1", PositionMs: 400000 }], "the same replay, played again after the show was finished, is a rewatch");
+        check(LibraryWatchProgress.Resume(rewatch.GetValueOrDefault, "r2", watched: true) == 0 && LibraryWatchProgress.Resume(rewatch.GetValueOrDefault, "r2", watched: false) == 500000,
+            "a watched video picks up at its rewatch, not at a place left from before it was marked");
         var mysteryIds = Enumerable.Range(0, 100).Select(seed => LibraryHome.Browse(items, playback, seed).Single(entry => entry.Section == "mystery").Card.Media.Id).ToHashSet();
         check(mysteryIds.Contains("anime") && mysteryIds.Contains("fresh") && mysteryIds.Contains("a1"), "mystery can pick movies, shows, and anime with one chance per title");
         var request = new LibraryBrowseRequest(Home: true, Seed: 7);

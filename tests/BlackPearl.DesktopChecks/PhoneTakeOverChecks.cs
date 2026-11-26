@@ -39,8 +39,13 @@ static class PhoneTakeOverChecks
             for (var i = 0; i < 50 && !(player.IsPlaying && player.Time > 3000); i++) await Task.Delay(100);
             check(player.IsPlaying && player.Time > 3000, "the fixture video plays before the phone takes it over");
 
-            var takenAt = await (Task<long?>)Call("TakeOverForPhone", item)!;
+            // Marked watched as it plays (Finish in the credits): the phone goes on with this first viewing, not a rewatch.
+            Call("SetWatched", item, true);
+            var taken = await (Task<(long At, bool Rewatch)?>)Call("TakeOverForPhone", item)!;
+            var takenAt = taken?.At;
             check(takenAt is > 3000, $"the phone takes over from where the PC was ({takenAt} ms)");
+            check(taken is { Rewatch: false }, "a first viewing marked watched as it plays goes on to the phone as a first viewing, not a rewatch");
+            Call("SetWatched", item, false);
             check(empty.Visibility == Visibility.Visible && Field<MediaItem?>("playingItem") is null && !Property("HasMediaPlayback"),
                 "the PC's player closes once a phone takes its video over");
             check(title.Text == "Playing on your phone" && hint.Visibility == Visibility.Visible && hint.Text.StartsWith("Takeover continues on the phone.") &&

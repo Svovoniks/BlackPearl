@@ -1197,7 +1197,8 @@ public partial class MainWindow : Window
         if (!File.Exists(item.Path)) throw new FileNotFoundException("Movie file is unavailable. Reconnect its drive and rescan.");
         await Disconnect(preserveFullscreen: (fullscreen || pictureInPicture) && room is null); target = null; loadedMedia = null; playingItem = item;
         var generation = loadGeneration;
-        localResume = !WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0;
+        playbackStart = (generation, item.Id, WasWatched(item.Id));
+        localResume = ResumeAt(item);
         var opening = CrashReports.PlaybackOpening(Path.GetExtension(item.Path), "local");
         using var media = new Media(vlc!, item.Path, FromType.FromPath);
         // AVIs often declare AC3 as a byte stream. VLC's AVI demuxer then splits its frames, and the bundled libVLC has
@@ -1213,8 +1214,9 @@ public partial class MainWindow : Window
     private void RestartLocal(object sender, RoutedEventArgs e)
     {
         if (selected is null) return;
-        library.Setting("position:" + selected.Id, "0");
-        SetWatched(selected, false);
+        // A rewatch starts over and stays watched; its place is saved again once it has played a while.
+        if (WasWatched(selected.Id)) library.ForgetRewatch([selected.Id]);
+        else { library.Setting("position:" + selected.Id, "0"); SetWatched(selected, false); }
         if (playingItem?.Id == selected.Id) playingItem = null;
         PlayLocal(sender, e);
     }
@@ -1236,6 +1238,19 @@ public partial class MainWindow : Window
     // The place last saved by SavePlaybackPosition, with whether the video was marked watched then: a video that hasn't
     // moved or been marked since is not saved again.
     private (string Id, long Time, bool Watched)? lastSavedPlayback;
+    // The video loaded last (by loadGeneration) and whether it was watched when it started; see SavePlaybackPosition.
+    // Set as a local video loads; for other playback, at its first save.
+    private (int Generation, string Id, bool Watched)? playbackStart;
+    // The playing video is a rewatch seen to the end (its end, Finish or Next episode): its rewatch moves on, and the
+    // saves after it, while the credits play on, no longer count as a place in it.
+    private void FinishRewatch(MediaItem item)
+    {
+        if (playbackStart is not { Watched: true } start || start.Generation != loadGeneration || start.Id != item.Id) return;
+        library.Setting(LibraryWatchProgress.RewatchPrefix + item.Id, "0");
+        playbackStart = start with { Watched = false };
+    }
+    // Where a video picks up: its saved place, or for a watched one, its place in the rewatch. Songs start over.
+    private long ResumeAt(MediaItem item) => item.IsMusic ? 0 : LibraryWatchProgress.Resume(library.Setting, item.Id, WasWatched(item.Id));
     // handingOver: the streaming role just left this app, and its own video is still in the player.
     private void SavePlaybackPosition(bool handingOver = false)
     {
@@ -1248,8 +1263,16 @@ public partial class MainWindow : Window
             // Continue watching ahead of what the phone had just watched. Marking it watched, or unwatched again, saves it
             // once more, so an undone mark gets its place back.
             var watched = WasWatched(playingItem.Id);
+            // A video already watched when it started is being watched again: its place is kept as the rewatch's, and it
+            // stays watched. One marked watched while it plays isn't a rewatch.
+            if (playbackStart is not { } start || start.Generation != loadGeneration || start.Id != playingItem.Id)
+                playbackStart = (loadGeneration, playingItem.Id, watched);
+            var rewatching = watched && playbackStart.Value.Watched;
             if (lastSavedPlayback == (playingItem.Id, time, watched)) return;
-            var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + playingItem.Id, watched || length > 0 && time >= length - 2000 ? "0" : Math.Max(0, time).ToString()) };
+            var ended = length > 0 && time >= length - 2000;
+            var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + playingItem.Id, watched || ended ? "0" : Math.Max(0, time).ToString()) };
+            if (rewatching && (time >= 10000 || ended))
+                saved.Add(KeyValuePair.Create(LibraryWatchProgress.RewatchPrefix + playingItem.Id, ended ? "0" : time.ToString()));
             // Home orders unfinished titles by when they were last played.
             if (time >= 10000) saved.Add(KeyValuePair.Create("played:" + playingItem.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString()));
             library.SetSettings(saved);
@@ -1595,6 +1618,8 @@ public partial class MainWindow : Window
         var client = room; if (client is null) return;
         var opening = CrashReports.PlaybackOpening(media.Extension, "room"); var requested = false;
         var generation = ++loadGeneration; loadedMedia = media.Id;
+        // The host plays its own file: whether it was watched as it loads decides if this playing is a rewatch.
+        if (client.Identity?.Host == true && playingItem is { } hosted) playbackStart = (generation, hosted.Id, WasWatched(hosted.Id));
         // Whoever plays the video plays its file; everyone else plays the converted stream when one is offered.
         var converted = client.Identity?.Host != true && client.Snapshot?.Stream is { } offered && offered.MediaId == media.Id ? offered : null;
         loadedStream = converted?.Id;

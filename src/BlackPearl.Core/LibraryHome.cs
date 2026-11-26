@@ -22,6 +22,7 @@ public static class LibraryHome
         bool Watched(string id) => playback.TryGetValue("watched:" + id, out var value) && value == "true";
         long Position(string id) => playback.TryGetValue("position:" + id, out var value) && long.TryParse(value, out var position) ? Math.Max(0, position) : 0;
         long Played(string id) => playback.TryGetValue("played:" + id, out var value) && long.TryParse(value, out var time) ? time : 0;
+        long Resume(string id) => LibraryWatchProgress.Resume(key => playback.GetValueOrDefault(key), id, Watched(id));
         // Home suggests things to watch; music lives in its own library tab.
         var all = source.Where(item => !item.IsExtra && !item.IsVirtual && !item.IsMusic).ToArray();
         var titles = LibraryCatalog.WithCurrentVersions(all, LibraryCatalog.Browse(all.Where(item => item.Available)), playback);
@@ -41,23 +42,45 @@ public static class LibraryHome
                 files.Select(item => LibraryAdded.At(playback, item.Id) ?? 0).DefaultIfEmpty().Max(), finished);
             if (!started) { unseen.Add(Facts(false)); continue; }
             seen.Add(Facts(LibraryWatchProgress.IsWatched(members, title, Watched, Position)));
-            // A film continues with a copy left part-way, the one played last; with none, a watched copy means it's done.
+            // A film continues with a copy left part-way, the one played last; with none, a watched copy means it's done. A
+            // watched copy being watched again is part-way too, at its place in the rewatch.
             if (title.Level == "movie")
             {
-                if (members.Where(item => item.Available && !Watched(item.Id) && Position(item.Id) >= 10000).MaxBy(item => Played(item.Id)) is { } resume)
-                    continuing.Add((new(resume.Id == title.Media.Id ? title : title with { Media = resume }, "continue", Position(resume.Id)), members.Max(item => Played(item.Id))));
+                if (members.Where(item => item.Available && Resume(item.Id) >= 10000).MaxBy(item => Played(item.Id)) is { } resume)
+                    continuing.Add((new(resume.Id == title.Media.Id ? title : title with { Media = resume }, "continue", Resume(resume.Id)), members.Max(item => Played(item.Id))));
                 continue;
             }
             var remaining = files.Where(item => !Completed(item)).OrderBy(item => item.Season ?? int.MaxValue)
                 .ThenBy(item => item.Episode ?? int.MaxValue).ThenBy(item => item.Id).ToArray();
             // A show continues with the episode left part-way that was played last, so one watched out of order (shuffle, a
             // queue, a jump ahead) isn't hidden behind an earlier one left part-way; ties keep episode order. With none part-way,
-            // the first unwatched episode is next.
-            var next = remaining.Where(item => Position(item.Id) >= 10000).MaxBy(item => Played(item.Id)) ?? remaining.FirstOrDefault();
-            if (next is null) continue;
+            // the first unwatched episode is next. Specials (season 0: a pilot, an OVA, a credit-free opening) aren't next in
+            // line: they'd sort before season 1 and pull a viewer in season 2 back to a pilot, and a show with only specials
+            // left is done. A special left part-way still continues, and a show with nothing but specials goes through them.
+            static bool Regular(MediaItem item) => item.Season != 0 && !item.IsBonus;
+            var regular = files.Any(Regular);
+            var next = remaining.Where(item => Position(item.Id) >= 10000).MaxBy(item => Played(item.Id))
+                ?? remaining.FirstOrDefault(item => !regular || Regular(item));
+            // Every episode watched: a show being watched again continues with the episode rewatched last, where the rewatch
+            // left it, or once that was seen to the end, the episode after it. A show finished and not started again, or
+            // whose rewatch reached its last episode, stays out.
+            if (next is null)
+            {
+                bool Counts(MediaItem item) => !regular || Regular(item);
+                if (members.Where(item => item.Available && Counts(item) && playback.ContainsKey(LibraryWatchProgress.RewatchPrefix + item.Id))
+                    .MaxBy(item => Played(item.Id)) is not { } again) continue;
+                // Only while the rewatch is the show's latest viewing: one replayed before the rest of the show was watched
+                // for the first time is over.
+                if (Played(again.Id) < members.Where(Counts).Max(item => Played(item.Id))) continue;
+                var end = (again.Season ?? int.MaxValue, again.EpisodeEnd ?? again.Episode ?? int.MaxValue);
+                next = Resume(again.Id) >= 10000 ? again : files.Where(Counts)
+                    .OrderBy(item => item.Season ?? int.MaxValue).ThenBy(item => item.Episode ?? int.MaxValue).ThenBy(item => item.Id)
+                    .FirstOrDefault(item => (item.Season ?? int.MaxValue, item.Episode ?? int.MaxValue).CompareTo(end) > 0);
+                if (next is null) continue;
+            }
             var card = next.Series is null ? title : new LibraryCard(next.Series + " · " + next.EpisodeDisplayTitle,
                 next.Caption, LibraryCatalog.EpisodeArtwork(next), next, "episode", next.Season);
-            continuing.Add((new(card, "continue", Position(next.Id)), members.Max(item => Played(item.Id))));
+            continuing.Add((new(card, "continue", Resume(next.Id)), members.Max(item => Played(item.Id))));
         }
         // Most recently played first; titles without a play time keep catalog order.
         var result = continuing.OrderByDescending(entry => entry.Played).Select(entry => entry.Entry).Take(ContinueLimit).ToList();

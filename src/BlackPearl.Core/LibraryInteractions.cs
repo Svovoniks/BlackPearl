@@ -66,8 +66,9 @@ public sealed partial class RoomClient
                 // Opening the file can block on slow or network storage.
                 if (!Offload(() =>
                 {
-                    var resume = message.Text == "resume" && store?.Setting("watched:" + item.Id) != "true" &&
-                        long.TryParse(store?.Setting("position:" + item.Id), out var saved) ? Math.Max(0, saved) : 0;
+                    // A watched video picks up where its rewatch is, as the host's own Continue watching does.
+                    var resume = message.Text == "resume" && store is not null
+                        ? LibraryWatchProgress.Resume(store.Setting, item.Id, store.Setting("watched:" + item.Id) == "true") : 0;
                     return (Selection: PrepareHostedFile(item.Path, item.EpisodeDisplayTitle), Resume: resume);
                 }, prepared =>
                 {
