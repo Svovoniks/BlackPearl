@@ -1,0 +1,10 @@
+# /etc/blackpearl/update.conf: settings for blackpearl-update.sh. Every line is optional; the defaults match
+# blackpearl.service as installed by deploy/README.md.
+#SERVICE=blackpearl
+#INSTALL=/opt/blackpearl
+#RELEASES=/opt/blackpearl-releases
+#DATA=/var/lib/blackpearl
+#HEALTH=http://127.0.0.1:5080/health
+# A release waits this long at most for every room to empty before the service restarts onto it.
+#MAX_WAIT_HOURS=24
+#KEEP=3

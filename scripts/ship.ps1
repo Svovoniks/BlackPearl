@@ -352,7 +352,10 @@ function Assert-ReleaseMetadata {
     # The file list lets later releases build update installers from this one and lets the app check its files.
     $files = @($Release.assets | Where-Object name -CEQ "BlackPearl-files-$ExpectedVersion-win-x64.txt")
     if ($files.Count -ne 1 -or $files[0].size -le 0 -or $files[0].digest -cnotmatch '^sha256:[a-f0-9]{64}$') { throw 'Missing file list, size, or SHA-256 digest.' }
-    $updates = @($updates) + $files
+    # The room service build that servers running deploy/blackpearl-update.sh install.
+    $server = @($Release.assets | Where-Object name -CEQ "BlackPearl-Server-$ExpectedVersion-linux-x64.tar.gz")
+    if ($server.Count -ne 1 -or $server[0].size -le 0 -or $server[0].digest -cnotmatch '^sha256:[a-f0-9]{64}$') { throw 'Missing room service build, size, or SHA-256 digest.' }
+    $updates = @($updates) + $files + $server
     foreach ($asset in @($installer[0], $checksums[0]) + $updates) {
         $expected = "https://github.com/$repository/releases/download/v$ExpectedVersion/$($asset.name)"
         if ($asset.browser_download_url -cne $expected) { throw 'Unexpected release asset URL.' }

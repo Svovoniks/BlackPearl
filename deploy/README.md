@@ -26,9 +26,30 @@ Without a registered domain, use [sslip.io](https://sslip.io): a name such as `2
 
 A server installed while the app was called Watchroom (`/opt/watchroom`, `watchroom.service`, `/etc/watchroom/watchroom.env`, `/var/lib/watchroom`) keeps working with its `WATCHROOM_*` settings, which the server still reads. To update it without moving anything, publish as in step 1 to `/opt/watchroom` and change `ExecStart` in `watchroom.service` to run `BlackPearl.Server.dll` instead of `Watchroom.Server.dll`. Keep the Caddy drop-in's `WATCHROOM_DOMAIN` unless you also install the new `Caddyfile`, which reads `BLACKPEARL_DOMAIN`.
 
-For an update, repeat step 1 and run `systemctl restart blackpearl`. Saved rooms, with their members and the people removed from them, are stored under `/var/lib/blackpearl` and survive a restart; everyone in a room is disconnected by it and their apps re-enter by themselves.
+To update by hand, repeat step 1 and run `systemctl restart blackpearl`, or let the server update itself as described next. Saved rooms, with their members and the people removed from them, are stored under `/var/lib/blackpearl` and survive a restart; everyone in a room is disconnected by it and their apps re-enter by themselves.
 
-The service speaks two room protocols, listed by `/health` as `protocols`. Protocol 2 is rooms without a host. Protocol 1 is what apps from before that speak: a host who admits each guest. Update the service before releasing an app on a newer protocol: an app says so when the room server is too old for it, while older apps keep working with a newer service. A room serves one protocol at a time, set by whoever is in it: someone on the other kind of app is told to update, or that the others need to. Its invitation, creator, name and people are the same on both, so a room carries over as its people update.
+## Automatic updates
+
+Every release from 0.3.159 on carries `BlackPearl-Server-VERSION-linux-x64.tar.gz`, the room service built by the release workflow, listed in the release's `SHA256SUMS.txt`. `blackpearl-update.sh` keeps the server on the latest one. `blackpearl-update.timer` runs it as root every 15 minutes, and each run does this:
+
+1. It asks GitHub for the latest stable release and stops if that is not newer than the running build.
+2. It downloads the room service build and checks it against GitHub's SHA-256 and the release's `SHA256SUMS.txt`.
+3. It unpacks the build into `/opt/blackpearl-releases/VERSION`, owned by root and not writable by anyone else, and runs it once as `nobody` with `--describe`. That shows the build starts here and reports its version and room protocols.
+4. It switches when nobody is in a room: the service writes `status.json` to its data folder every 10 seconds, with how many people are connected to rooms. Phone remote links don't count, since a PC with the remote turned on keeps one open. It switches right away when the new build speaks a room protocol the running one does not, so newer apps aren't turned away for long, and after `MAX_WAIT_HOURS` (24) in any case.
+5. It points `/opt/blackpearl` at the new folder, restarts the service, and waits up to a minute for `/health` and for `status.json` to report the new version. If the build doesn't come up, it goes back to the previous folder, prints the failed build's log lines, and skips that version until a newer one is released.
+6. It keeps the three newest releases.
+
+To install it:
+
+```sh
+install -D -m 755 blackpearl-update.sh /usr/local/lib/blackpearl/blackpearl-update.sh
+install -m 644 blackpearl-update.service blackpearl-update.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now blackpearl-update.timer
+```
+
+`/opt/blackpearl` may hold a build installed by hand. On its first switch, the updater moves that folder to `/opt/blackpearl-releases/manual-DATE` and keeps it to go back to. A server installed under other names, such as the Watchroom ones above, sets them in `/etc/blackpearl/update.conf`; `blackpearl-update.conf.example` lists every setting. `blackpearl-update.sh --check` reports what a run would do without changing anything. `journalctl -u blackpearl-update` shows what each run did. `--file ARCHIVE --version X.Y.Z` installs a local build in the same way.
+
+The service speaks two room protocols, listed by `/health` as `protocols`. Protocol 2 is rooms without a host. Protocol 1 is what apps from before that speak: a host who admits each guest. Update the service before releasing an app on a newer protocol: an app says so when the room server is too old for it, while older apps keep working with a newer service. With automatic updates, a server switches to such a release within about 15 minutes of it being published. A room serves one protocol at a time, set by whoever is in it: someone on the other kind of app is told to update, or that the others need to. Its invitation, creator, name and people are the same on both, so a room carries over as its people update.
 
 ## Internet acceptance test
 
