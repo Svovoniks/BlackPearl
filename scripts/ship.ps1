@@ -435,6 +435,9 @@ $root = Split-Path -Parent $PSScriptRoot
 # Records and sync backups go to the main checkout, which outlives agent worktrees.
 $mainRoot = Split-Path -Parent (Invoke-Native git @('-C', $root, 'rev-parse', '--path-format=absolute', '--git-common-dir')).Trim()
 $originalPath = $env:PATH
+# Agents run -Merge in the background and read this output from a completion notice. Several took that notice for the
+# end of the work and stopped there without telling the user, and once left a deploy undone (AGENTS.md, "Shipping updates").
+$nextStep = 'Next: tell the user now what this run did, as printed above, and carry on with anything else their request still needs, such as a deploy or a follow-up change. Shipping is one step of their request, not necessarily all of it.'
 Push-Location $root
 try {
     if ($CheckCommit) {
@@ -580,6 +583,7 @@ try {
             catch { throw "Pull request #$number is merged as $commit, but local master was not synchronized. $_" }
             Write-Host "Merged #$number without a release: $commit"
             Write-Host "Local master synchronized: $($synced.Commit)"
+            Write-Host $nextStep
             return
         }
     }
@@ -663,9 +667,11 @@ try {
     Write-Host "Verified file list, room service build and update installers: $(if ($result.Updates.Count) { $result.Updates -join ', ' } else { 'none' })"
     Write-Host "Verification record: $record"
     Write-Host "Local master synchronized: $($result.LocalMaster.Commit)"
+    Write-Host $nextStep
 }
 catch {
     if ($Merge -and $Version) { Write-Warning "If v$Version was pushed, recheck with -VerifyOnly -Version $Version. Never move a published tag." }
+    if ($Merge -or $VerifyOnly) { Write-Warning 'Next: tell the user which step failed and why, then recover as described here. Do not leave this failure unreported.' }
     throw
 }
 finally { $env:PATH = $originalPath; Pop-Location }
