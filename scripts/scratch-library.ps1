@@ -37,4 +37,6 @@ Write-Host "  Launch on it:  ./scripts/dev-launch.ps1 -Data '$Destination'"
 Write-Host "  Or set:        `$env:BLACKPEARL_DATA = '$Destination'"
 Write-Host 'A saved personal TMDB key belongs to its library folder, so the copy has none. Builds without the bundled key fall'
 Write-Host 'back to TVmaze and Wikipedia, so metadata results on the copy can differ from the installed app.'
+Write-Host 'The copy is a separate PC to the room server: it has no paired phones and enters saved rooms as a new person, so'
+Write-Host "a build on it never takes the user's phones or room places. Pair a phone with the copy to try phone features."
 Write-Host 'Delete the folder when you are done.'

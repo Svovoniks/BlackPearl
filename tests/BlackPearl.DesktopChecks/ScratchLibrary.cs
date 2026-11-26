@@ -6,7 +6,8 @@ using Microsoft.Data.Sqlite;
 // scripts/scratch-library.ps1 runs this; see AGENTS.md. The database is copied with SQLite's online backup, so a library
 // the app has open still copies consistently. Rows store artwork as absolute paths into the source folder, so the
 // artwork, plugins and metadata cache are copied too and every path is rewritten to the copy: an app running on the copy
-// then can never replace or delete the original's posters. Logs, update downloads and old backups are left behind.
+// then can never replace or delete the original's posters. Logs, update downloads and old backups are left behind, and
+// so are the keys the room server knows the user by (ForgetIdentity).
 static class ScratchLibrary
 {
     static readonly string[] Folders = ["posters", "episode-thumbnails", "plugins", "metadata-http-cache"];
@@ -42,7 +43,7 @@ static class ScratchLibrary
         // elsewhere (M:\Shows) keep their real paths.
         static string Json(string path) => Wire.Serialize(path)[1..^1];
         var forms = new[] { (source + "\\", destination + "\\"), (Json(source + "\\"), Json(destination + "\\")), ((source + "\\").Replace("\\", "\\\\"), (destination + "\\").Replace("\\", "\\\\")) }.Distinct().ToArray();
-        var rewritten = 0; var left = 0;
+        var rewritten = 0; var left = 0; string[] forgotten;
         using (var db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = copy, Pooling = false }.ToString()))
         {
             db.Open();
@@ -64,11 +65,54 @@ static class ScratchLibrary
                 for (var i = 0; i < forms.Length; i++) check.Parameters.AddWithValue($"$old{i}", forms[i].Item1);
                 left += Convert.ToInt32(check.ExecuteScalar());
             }
+            forgotten = ForgetIdentity(db, transaction);
             transaction.Commit();
         }
         Console.WriteLine($"Copied {source} to {destination}: the database, {bytes / 1048576.0:F0} MB of artwork, plugins and cache; {rewritten} rows now point at the copy.");
+        if (forgotten.Length > 0) Console.WriteLine($"The copy is a separate PC: {string.Join(", ", forgotten)}.");
         if (left > 0) { Console.Error.WriteLine($"{left} rows still name the original folder (a different letter case?). Fix this before running anything on the copy."); return 2; }
         return 0;
+    }
+
+    // The room server knows a PC by its phone-remote key and a person in a room by their room key, and lets each be
+    // connected once: a second connection under the same key takes over from the first. A build on the copy that kept
+    // the user's keys would take the user's phones from their own app every minute (PhoneRemoteOptions.ReplacedWait),
+    // and put them out of their rooms ("You entered this room from another BlackPearl window"). So the copy forgets
+    // them: it makes its own phone key when its phone remote starts, has no paired phones (pair one with the copy to try
+    // phone features), and enters saved rooms as a new person, not as the user or the room's creator.
+    static readonly string[] IdentitySettings = ["phoneRemoteHostKey", "phoneRemotePhones"];
+
+    static string[] ForgetIdentity(SqliteConnection db, SqliteTransaction transaction)
+    {
+        var forgotten = new List<string>();
+        foreach (var key in IdentitySettings)
+        {
+            using var delete = db.CreateCommand(); delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM settings WHERE key = $key"; delete.Parameters.AddWithValue("$key", key);
+            if (delete.ExecuteNonQuery() > 0) forgotten.Add(key == "phoneRemoteHostKey" ? "its own phone key" : "no paired phones");
+        }
+        using var read = db.CreateCommand(); read.Transaction = transaction;
+        read.CommandText = "SELECT value FROM settings WHERE key = 'rooms'";
+        if (read.ExecuteScalar() is string rooms)
+        {
+            using var write = db.CreateCommand(); write.Transaction = transaction;
+            try
+            {
+                var saved = Wire.Read<SavedRoom[]>(rooms) ?? [];
+                if (saved.Any(room => room.HostKey is not null))
+                {
+                    write.CommandText = "UPDATE settings SET value = $value WHERE key = 'rooms'";
+                    write.Parameters.AddWithValue("$value", Wire.Serialize(saved.Select(room => room with { HostKey = null }).ToArray()));
+                    write.ExecuteNonQuery(); forgotten.Add($"no room keys ({saved.Count(room => room.HostKey is not null)} saved rooms)");
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // A list this tool cannot read could still hold keys: the copy gets no saved rooms rather than the user's.
+                write.CommandText = "DELETE FROM settings WHERE key = 'rooms'"; write.ExecuteNonQuery(); forgotten.Add("no saved rooms (unreadable list)");
+            }
+        }
+        return [.. forgotten];
     }
 
     static long CopyFolder(string from, string to)
