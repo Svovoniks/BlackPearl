@@ -293,7 +293,8 @@ Settings › Playback, as two-letter language codes in priority order: `"tracks"
 "rules":[{"audio":"en","languages":["off"]}]}`. A rule replaces `subtitles` while the audio is in its language; `off`
 means no subtitles. The phone picks its starting tracks with them as the PC would. Older PCs send none of these.
 
-`positionMs` is where to start: the PC's saved position, 0 for a watched video. `note` says why the phone got the
+`positionMs` is where to start: the PC's saved position; for a watched video, the place of a rewatch under way (from
+0.3.159), otherwise 0. `note` says why the phone got the
 file when it asked for a conversion (no converter, or a file already smaller). The PC keeps one stream per phone; a
 new `watch` replaces it and `{"type":"stream-stop"}` ends it. A failure is an `error` with the `request` and the code
 `gone` (not in the library, or its drive is disconnected).

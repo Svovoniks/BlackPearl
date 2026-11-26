@@ -31,10 +31,12 @@ public partial class MainWindow
     // holds its resume point until it plays.
     // The player closes rather than stops: a stopped video stays loaded, and Space, a headset's play button or Windows'
     // media controls then started it again here, where the PC ignores the phone's progress on the video it plays.
-    private async Task<long?> TakeOverForPhone(MediaItem item)
+    // The phone goes on with this viewing: a rewatch when it began on a watched video and wasn't seen to the end yet.
+    private async Task<(long At, bool Rewatch)?> TakeOverForPhone(MediaItem item)
     {
         if (room is not null || playingItem?.Id != item.Id || !HasMediaPlayback || player is null) return null;
         var takenAt = Math.Max(0, player.Time <= 0 && localResume > 0 ? localResume : PlaybackPosition());
+        var rewatch = playbackStart is { } start && start.Generation == loadGeneration && start.Id == item.Id ? start.Watched : WasWatched(item.Id);
         EndUpNext(false);
         await Disconnect();
         // Another video started meanwhile keeps the player.
@@ -43,7 +45,7 @@ public partial class MainWindow
             watchingOnPhone = item.QueueTitle; RefreshPlayerEmpty();
             RoomHeading.Text = "BlackPearl player"; RoomSubtitle.Text = "Continuing on your phone";
         }
-        return takenAt;
+        return (takenAt, rewatch);
     }
 
     private void PhoneProgressSaved(MediaItem item, PhoneProgress progress, bool final)
