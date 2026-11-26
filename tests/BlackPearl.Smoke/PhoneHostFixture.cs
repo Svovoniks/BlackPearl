@@ -67,7 +67,7 @@ static class PhoneHostFixture
             check(lanPort is >= PhoneRemoteProtocol.LanPort and < PhoneRemoteProtocol.LanPort + PhoneRemoteProtocol.LanPorts &&
                 welcome!.Value.GetProperty("lan").GetProperty("addresses").EnumerateArray().Select(a => a.GetString()).SequenceEqual(["127.0.0.1"]),
                 "the phone host tells the phone where it listens on the home network");
-            check(welcome is { } w && w.GetProperty("features").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["library", "watch", "queues", "unwatched", "mark-watched"]) && !w.GetProperty("canStart").GetBoolean(),
+            check(welcome is { } w && w.GetProperty("features").EnumerateArray().Select(x => x.GetString()).SequenceEqual(["library", "watch", "queues", "unwatched", "mark-watched", "ping"]) && !w.GetProperty("canStart").GetBoolean(),
                 "the phone host welcomes the phone with the library, watching, queues, the unwatched list and watched marks, and the PC's settings");
             check(await link.Next("state", 5000) is { } state && !state.GetProperty("media").GetBoolean(), "the phone host says nothing is playing");
             link.Send(new { type = "command", action = "toggle" });
