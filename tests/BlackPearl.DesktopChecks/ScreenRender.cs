@@ -422,13 +422,27 @@ static class ScreenRender
                 await CaptureFocused($"{theme}-home-unwatched-focus", (FrameworkElement)window.FindName("HomeUnwatchedAll"));
             }
             home.ScrollToVerticalOffset(deck.TranslatePoint(new Point(0, 0), (UIElement)home.Content).Y - 24); await Capture($"{theme}-home-mystery");
-            var filters = Descendants((DependencyObject)window.FindName("HomeMysteryFilters")).OfType<WrapPanel>().Select(row => row.Children.OfType<RadioButton>().ToList()).ToList();
+            // The draw's sentence: its blanks are the pool of titles, the type and the length.
+            var blanks = new[] { "MysteryPoolChoice", "MysteryKindChoice", "MysteryLengthChoice" }.Select(name => (ComboBox)window.FindName(name)).ToList();
             // A draw from the titles watched, with any type and length.
-            filters[0][^1].IsChecked = true; await Task.Delay(900); await Capture($"{theme}-home-mystery-watched");
-            foreach (var row in filters) row[^1].IsChecked = true;
+            blanks[0].SelectedIndex = 1; await Task.Delay(900); await Capture($"{theme}-home-mystery-watched");
+            foreach (var blank in blanks) blank.SelectedIndex = blank.Items.Count - 1;
             await Capture($"{theme}-home-mystery-chosen");
-            await CaptureFocused($"{theme}-home-mystery-focus", filters[1][^1]);
-            foreach (var row in filters) row[0].IsChecked = true;
+            await CaptureFocused($"{theme}-home-mystery-focus", blanks[1]);
+            // The longest choice in each blank, which wraps the sentence in a narrow window.
+            blanks[1].SelectedIndex = 3; blanks[2].SelectedIndex = 1; await Capture($"{theme}-home-mystery-longest");
+            // A blank's menu, drawn in its own window, open on the current choice.
+            blanks[2].IsDropDownOpen = true; await Task.Delay(800);
+            if (blanks[2].Template.FindName("PART_Popup", blanks[2]) is System.Windows.Controls.Primitives.Popup { Child: FrameworkElement { ActualWidth: > 0 } menu })
+            {
+                var picture = Picture(menu); picture.Render(menu);
+                var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(picture));
+                await using (var file = File.Create(Path.Combine(output, $"{theme}-home-mystery-menu.png"))) encoder.Save(file);
+                Console.WriteLine($"Saved {theme}-home-mystery-menu");
+            }
+            await Capture($"{theme}-home-mystery-menu-open");
+            blanks[2].IsDropDownOpen = false; await Task.Delay(500);
+            foreach (var blank in blanks) blank.SelectedIndex = 0;
             home.ScrollToHome();
             Call("NavigateLibrary", 0, null, null, null); await Capture($"{theme}-library"); await CaptureCardHover($"{theme}-library");
             if (theme == "dark") { await CaptureFocused($"{theme}-library-focus", (FrameworkElement)window.FindName("AllLibraryNav")); await CaptureCountRoll(); await CaptureCategoryGlide(); }

@@ -182,7 +182,7 @@ public partial class MainWindow : Window
         library.MediaSaved += QueueLibraryUpdate;
         libraryUpdateTimer.Tick += (_, _) => ApplyLibraryUpdates();
         libraryUpdateTimer.Start();
-        InitializeSharedLibrary(); InitializeQueueSharing(); InitializeRoomStreaming(); InitializeRoomPresence(); InitializeSearchFilters();
+        InitializeSharedLibrary(); InitializeQueueSharing(); InitializeRoomStreaming(); InitializeRoomPresence(); InitializeSearchFilters(); InitializeMysteryFilters();
         var savedCursor = library.Setting("queuePosition");
         LoadSavedRooms(); RefreshQueuePickers();
         if (int.TryParse(library.Setting("volume"), out var savedVolume)) Volume.Value = Math.Clamp(savedVolume, 0, 100);

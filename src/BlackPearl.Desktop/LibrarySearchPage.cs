@@ -150,9 +150,12 @@ public partial class MainWindow
     }
 
     /// <summary>Acts on the control of Search's header at the point, a position in the header, unless that is the open menu.</summary>
-    private void ClickThrough(ComboBox open, Point point)
+    private void ClickThrough(ComboBox open, Point point) => ClickThroughMenu(SearchHeader, open, point);
+
+    /// <summary>Acts on the control of the area at the point, a position in the area, unless that is the open menu.</summary>
+    private void ClickThroughMenu(UIElement area, ComboBox open, Point point)
     {
-        if (SearchHeader.InputHitTest(point) is not DependencyObject hit) return;
+        if (area.InputHitTest(point) is not DependencyObject hit) return;
         for (var node = hit; node is not null; node = node is Visual ? VisualTreeHelper.GetParent(node) : LogicalTreeHelper.GetParent(node))
         {
             if (node == open) return;

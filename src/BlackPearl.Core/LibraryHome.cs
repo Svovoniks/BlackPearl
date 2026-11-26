@@ -113,6 +113,25 @@ public static class LibraryHome
             _ => true
         };
     }
+    // The draw's types of title: any, then each one.
+    public static readonly string?[] MysteryKinds = [null, "Movie", "Show", "Anime"];
+    /// <summary>
+    /// A random choice for the draw's filters, among the ones that have something to draw: the titles not started or the
+    /// ones watched, a type and a length. With a title to avoid (TitleKey), only choices with another title to draw, while
+    /// there are any. Null when neither pool has anything.
+    /// </summary>
+    public static (bool Rewatch, string? Kind, MysteryLength Length)? RandomFilters(IReadOnlyCollection<HomeTitle> unseen, IReadOnlyCollection<HomeTitle> seen, Random random, string? avoid = null)
+    {
+        (bool, string?, MysteryLength)[] Choices(string? skip) =>
+            (from rewatch in new[] { false, true }
+             from kind in MysteryKinds
+             from length in Enum.GetValues<MysteryLength>()
+             where (rewatch ? seen : unseen).Any(title => Matches(title, kind, length) && (skip is null || LibraryIdentity.TitleKey(title.Card.Media) != skip))
+             select (rewatch, kind, length)).ToArray();
+        var choices = Choices(avoid);
+        if (choices.Length == 0 && avoid is not null) choices = Choices(null);
+        return choices.Length == 0 ? null : choices[random.Next(choices.Length)];
+    }
     // Keeps the current pick while it still matches, unless another is asked for; a new draw avoids the current pick.
     public static HomeTitle? Pick(IEnumerable<HomeTitle> pool, string? kind, MysteryLength length, int seed, string? current, bool redraw)
     {

@@ -44,6 +44,10 @@ public partial class MainWindow
     private MysteryLength mysteryLength;
     // Draws from the titles already watched or started instead of the ones not started; only in your own library.
     private bool mysteryRewatch;
+    // The draw's blanks are random until you pick one yourself: they start at a random choice once a launch, the first time
+    // your library has something to draw, and Draw another picks new ones. Picked by hand, they keep what they show until
+    // Random again. Someone else's library keeps what they show: their app draws, so this one can't tell what matches.
+    private bool mysteryFiltersShuffled, mysteryFiltersChosen, applyingMysteryFilters;
     private int mysteryDraw = Random.Shared.Next();
     private HomeRowView[]? homeRows;
     private long homeGeneration;
@@ -83,6 +87,7 @@ public partial class MainWindow
             return view;
         }).ToArray();
         homeUnseen = overview.Unseen; homeSeen = overview.Seen;
+        if (!mysteryFiltersShuffled && !mysteryFiltersChosen) mysteryFiltersShuffled = ShuffleMysteryFilters();
         homeFacts = overview.Unseen.Concat(overview.Seen).GroupBy(title => LibraryCardView.Identity(title.Card)).ToDictionary(group => group.Key, group => group.First());
         HomeStatus.Text = items.Count == 0 ? "Add a folder to find something to watch." : "";
         RenderHome(views);
@@ -241,6 +246,9 @@ public partial class MainWindow
         // Your own library can also draw something to watch again; someone else's app draws only titles not started.
         var rewatch = mysteryRewatch && !GuestLibrary;
         MysteryPoolBar.Visibility = GuestLibrary ? Visibility.Collapsed : Visibility.Visible;
+        HomeMysteryRandom.Visibility = mysteryFiltersChosen && !GuestLibrary ? Visibility.Visible : Visibility.Collapsed;
+        MysteryGuestPool.Visibility = GuestLibrary ? Visibility.Visible : Visibility.Collapsed;
+        if (GuestLibrary) MysteryGuestPool.Text = $"that {StreamerName} hasn't started.";
         LibraryCardView? pick = waiting ? null : homeMysteryFallback; var note = ""; var empty = "Try another type or length.";
         if (waiting) HomeMysteryDraw.IsEnabled = false;
         else if (remote is { Unseen: > 0 })
@@ -256,7 +264,9 @@ public partial class MainWindow
             var title = LibraryHome.Pick(pool, mysteryKind, mysteryLength, mysteryDraw, current, redraw);
             pick = title is null ? null : homeMystery is { HomeSection: "draw" } same && same.Key == LibraryCardView.Identity(title.Card) ? same : new LibraryCardView(title.Card) { HomeSection = "draw" };
             if (title is not null) { pick!.Update(title.Card); note = !rewatch ? "Not started yet" : title.Finished ? "Watched" : "In progress"; }
-            HomeMysteryDraw.IsEnabled = pool.Count(candidate => LibraryHome.Matches(candidate, mysteryKind, mysteryLength)) > 1;
+            // At random, the next draw can pick other choices, so anything else in the library can come up.
+            HomeMysteryDraw.IsEnabled = mysteryFiltersChosen ? pool.Count(candidate => LibraryHome.Matches(candidate, mysteryKind, mysteryLength)) > 1
+                : homeUnseen.Length + homeSeen.Length > 1;
             if (pool.Length == 0) empty = rewatch ? "You haven't watched anything yet." : "You've started everything. Try Watched.";
         }
         else HomeMysteryDraw.IsEnabled = pick is not null;
@@ -374,18 +384,66 @@ public partial class MainWindow
         Move(MysteryLeftShift, TranslateTransform.YProperty, gather ? 2 : 8);
         Move(MysteryRightShift, TranslateTransform.YProperty, gather ? 2 : 8);
     }
-    private void MysteryFilterChanged(object sender, RoutedEventArgs e)
+    // The sentence's blanks: each menu's Tag names what it chooses, and each choice's Tag the value.
+    private void MysteryFilterChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (sender is not RadioButton { Tag: string tag } button || HomeMysteryCard is null) return;
-        if (button.GroupName == "MysteryPool") mysteryRewatch = tag == "Seen";
-        else if (button.GroupName == "MysteryKind") mysteryKind = tag.Length == 0 ? null : tag;
+        if (applyingMysteryFilters || sender is not ComboBox { SelectedItem: ComboBoxItem { Tag: string tag } } blank || HomeMysteryCard is null) return;
+        mysteryFiltersChosen = true;
+        if (blank.Tag as string == "Pool") mysteryRewatch = tag == "Seen";
+        else if (blank.Tag as string == "Kind") mysteryKind = tag.Length == 0 ? null : tag;
         else mysteryLength = Enum.Parse<MysteryLength>(tag);
         RenderMystery(redraw: false, animate: true);
     }
+    // Sets the blanks to a random choice that has a title to draw, other than the one avoided while there is another.
+    private bool ShuffleMysteryFilters(string? avoid = null)
+    {
+        if (LibraryHome.RandomFilters(homeUnseen, homeSeen, Random.Shared, avoid) is not { } choice) return false;
+        var (rewatch, kind, length) = choice;
+        mysteryRewatch = rewatch; mysteryKind = kind; mysteryLength = length;
+        static void Show(ComboBox blank, string tag) =>
+            blank.SelectedItem = blank.Items.OfType<ComboBoxItem>().First(choice => (string)choice.Tag == tag);
+        applyingMysteryFilters = true;
+        try
+        {
+            Show(MysteryPoolChoice, rewatch ? "Seen" : "Unseen");
+            Show(MysteryKindChoice, kind ?? "");
+            Show(MysteryLengthChoice, length.ToString());
+        }
+        finally { applyingMysteryFilters = false; }
+        return true;
+    }
+    private string? DrawnMysteryKey => homeMystery is { HomeSection: "draw" } shown ? LibraryIdentity.TitleKey(shown.Card.Media) : null;
+    private void RandomMysteryAgain(object sender, RoutedEventArgs e)
+    {
+        // The button leaves once clicked; the keyboard goes on from Draw another.
+        if (HomeMysteryRandom.IsKeyboardFocused) HomeMysteryDraw.Focus();
+        mysteryFiltersChosen = false;
+        mysteryDraw = Random.Shared.Next();
+        ShuffleMysteryFilters(DrawnMysteryKey);
+        RenderMystery(redraw: true, animate: true);
+    }
+    // The sentence is set large where the deck has room, and a size smaller in a narrow window, where its longest choice,
+    // "under 30 minutes long", would not fit its column at the large size.
+    private void FitMysterySentence(object sender, SizeChangedEventArgs e)
+    {
+        if (!e.WidthChanged) return;
+        var size = e.NewSize.Width >= 320 ? 25.0 : 21.0;
+        if (HomeMysteryFilters.GetValue(System.Windows.Documents.TextElement.FontSizeProperty) is double shown && shown != size)
+            HomeMysteryFilters.SetValue(System.Windows.Documents.TextElement.FontSizeProperty, size);
+    }
+    // As in Search's filters, a click on another blank while one is open closes the open one and opens that one.
+    private void InitializeMysteryFilters() =>
+        HomeMysteryFilters.AddHandler(PreviewMouseLeftButtonDownEvent, new System.Windows.Input.MouseButtonEventHandler((_, e) =>
+        {
+            if (System.Windows.Input.Mouse.Captured is ComboBox { IsDropDownOpen: true } open && e.OriginalSource == open)
+                ClickThroughMenu(HomeMysteryFilters, open, e.GetPosition(HomeMysteryFilters));
+        }), handledEventsToo: true);
     private void DrawMystery(object sender, RoutedEventArgs e)
     {
         if (GuestLibrary ? guestDraw is not { Unseen: > 0 } : homeUnseen.Length + homeSeen.Length == 0) { RefreshHomePicks(sender, e); return; }
-        mysteryDraw = Random.Shared.Next(); RenderMystery(redraw: true, animate: true);
+        mysteryDraw = Random.Shared.Next();
+        if (!GuestLibrary && !mysteryFiltersChosen) ShuffleMysteryFilters(DrawnMysteryKey);
+        RenderMystery(redraw: true, animate: true);
     }
     private void RefreshHomePicks(object sender, RoutedEventArgs e)
     {

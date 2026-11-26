@@ -16,6 +16,8 @@ static class HomeChecks
         void Call(string name, params object?[] args) => typeof(MainWindow).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, args);
         T Field<T>(string name) => (T)typeof(MainWindow).GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)!;
         T Control<T>(string name) => (T)window.FindName(name);
+        // Picks the choice with this tag in one of the draw sentence's blanks.
+        void Choose(string blank, string tag) => Control<ComboBox>(blank).SelectedItem = Control<ComboBox>(blank).Items.OfType<ComboBoxItem>().Single(choice => (string)choice.Tag == tag);
         LibraryCardView[] Continuing() => new[] { Field<LibraryCardView?>("homeHero") }.OfType<LibraryCardView>().Concat(Field<LibraryCardView[]>("homeContinueAll")).ToArray();
         HomeRowView Row(string kind) => Field<HomeRowView[]>("homeRows").Single(row => row.Kind == kind);
         int Suggested() => Field<HomeRowView[]>("homeRows").Sum(row => row.Tiles.Length + (row.Spotlight is null ? 0 : 1));
@@ -68,7 +70,42 @@ static class HomeChecks
             Check(Row("Movie").Spotlight is not null && Row("Movie").Tiles.Length == LibraryHome.SuggestionsPerKind - 1 && Row("Show").Spotlight is null && Row("Anime").Spotlight is null &&
                 Row("Movie").CountText == "12 not started" && Control<Button>("HomeMysteryPlay").IsEnabled,
                 "local Home fills only categories with unstarted titles and enables the mystery deck");
-            LibraryCardView[] Unwatched() => Control<ItemsControl>("HomeUnwatched").Items.Cast<LibraryCardView>().ToArray();
+            // The draw's blanks start at a random choice with something to draw, shown in the blanks; the checks below start
+            // from the first choice in each.
+            Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } && Field<bool>("mysteryFiltersShuffled") && !Field<bool>("mysteryFiltersChosen") &&
+                Control<Button>("HomeMysteryRandom").Visibility == Visibility.Collapsed &&
+                Control<ComboBox>("MysteryPoolChoice").SelectedIndex == (Field<bool>("mysteryRewatch") ? 1 : 0) &&
+                (Control<ComboBox>("MysteryKindChoice").SelectedItem as ComboBoxItem)?.Tag as string == (Field<string?>("mysteryKind") ?? "") &&
+                (Control<ComboBox>("MysteryLengthChoice").SelectedItem as ComboBoxItem)?.Tag as string == Field<MysteryLength>("mysteryLength").ToString(),
+                "the draw starts at a random choice that has a title to draw, and its blanks show it");
+            // While the blanks are random, Draw another picks new ones each time, always with another title to draw.
+            (bool, string?, MysteryLength) Filters() => (Field<bool>("mysteryRewatch"), Field<string?>("mysteryKind"), Field<MysteryLength>("mysteryLength"));
+            var draws = new List<((bool, string?, MysteryLength) Filters, string Key)>();
+            for (var draw = 0; draw < 12; draw++)
+            {
+                var before = Field<LibraryCardView?>("homeMystery");
+                Call("DrawMystery", null, new RoutedEventArgs());
+                var after = Field<LibraryCardView?>("homeMystery");
+                Check(after is { HomeSection: "draw" } && after.Key != before?.Key, $"a random draw {draw + 1} picks another title");
+                draws.Add((Filters(), after!.Key));
+            }
+            Check(draws.Select(draw => draw.Filters).Distinct().Count() > 1 && !Field<bool>("mysteryFiltersChosen") && Control<Button>("HomeMysteryRandom").Visibility == Visibility.Collapsed &&
+                (Control<ComboBox>("MysteryKindChoice").SelectedItem as ComboBoxItem)?.Tag as string == (Field<string?>("mysteryKind") ?? ""),
+                $"Draw another picks new random choices for the blanks and shows them ({draws.Select(draw => draw.Filters).Distinct().Count()} different in 12 draws)");
+            // A blank picked by hand keeps every choice through Draw another, and Random again lets them go random again.
+            Choose("MysteryPoolChoice", "Unseen"); Choose("MysteryLengthChoice", "Any"); Choose("MysteryKindChoice", "Movie");
+            var handPicked = Filters();
+            Call("DrawMystery", null, new RoutedEventArgs());
+            Check(Field<bool>("mysteryFiltersChosen") && Filters() == handPicked && Control<Button>("HomeMysteryRandom").Visibility == Visibility.Visible &&
+                Field<LibraryCardView?>("homeMystery")?.Card.Media.Kind == "Movie",
+                "after a blank is picked by hand, Draw another keeps the choices and Random again appears");
+            Call("RandomMysteryAgain", null, new RoutedEventArgs());
+            Check(!Field<bool>("mysteryFiltersChosen") && Control<Button>("HomeMysteryRandom").Visibility == Visibility.Collapsed && Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" },
+                "Random again hides itself and draws at random again");
+            Choose("MysteryPoolChoice", "Unseen"); Choose("MysteryKindChoice", ""); Choose("MysteryLengthChoice", "Any");
+            Call("RefreshHome"); await Until(() => Continuing().Length == 2);
+            Check(Control<ComboBox>("MysteryKindChoice").SelectedIndex == 0 && Control<ComboBox>("MysteryLengthChoice").SelectedIndex == 0 && Control<ComboBox>("MysteryPoolChoice").SelectedIndex == 0,
+                "the blanks keep a choice you made when Home refreshes");            LibraryCardView[] Unwatched() => Control<ItemsControl>("HomeUnwatched").Items.Cast<LibraryCardView>().ToArray();
             Check(Control<StackPanel>("HomeUnwatchedSection").Visibility == Visibility.Visible && Unwatched().Length == 12 &&
                 Unwatched().All(view => view.HomeSection == "unwatched" && view.Card.Media.Id.StartsWith("home-new", StringComparison.Ordinal)) &&
                 Control<TextBlock>("HomeUnwatchedCount").Text == "Newest first · 12 not started" && Unwatched()[0].HomeDetail == "2026",
@@ -86,29 +123,36 @@ static class HomeChecks
             await Until(() => Control<Button>("HomeMysteryCard").DataContext == Field<LibraryCardView>("homeMystery"));
             Check(Field<LibraryCardView>("homeMystery") is { HomeSection: "draw" } drawn && drawn.Key != firstPick.Key && drawn.Card.Media.Kind == "Movie",
                 "drawing another mystery card picks a different unstarted title");
-            Control<RadioButton>("MysteryAnime").IsChecked = true;
+            Choose("MysteryKindChoice", "Anime");
             await Until(() => Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches");
             Check(Field<LibraryCardView?>("homeMystery") is null && !Control<Button>("HomeMysteryPlay").IsEnabled && Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches",
                 "mystery filters with no matching titles say so instead of drawing something else");
-            Control<RadioButton>("MysteryAnything").IsChecked = true;
+            Choose("MysteryKindChoice", "");
             Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } && Control<Button>("HomeMysteryPlay").IsEnabled, "clearing the type filter draws again");
             // Watched: a draw from the titles already watched or started, under the same filters.
             Check(Control<FrameworkElement>("MysteryPoolBar").Visibility == Visibility.Visible, "your own library offers a draw from the titles you've watched");
-            Control<RadioButton>("MysterySeen").IsChecked = true;
+            Choose("MysteryPoolChoice", "Seen");
             await Until(() => Control<TextBlock>("HomeMysteryMeta").Text.EndsWith("In progress"));
             Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } rewatch && rewatch.DisplayTitle is "Night Train" or "A Sunday in October" &&
                 Control<Button>("HomeMysteryPlay").IsEnabled && Control<Button>("HomeMysteryDraw").IsEnabled,
                 "the Watched choice draws a started title and says it's in progress");
-            ((Panel)Control<RadioButton>("MysteryAnime").Parent).Children.OfType<RadioButton>().Single(choice => choice.Tag as string == "Movie").IsChecked = true;
+            Choose("MysteryKindChoice", "Movie");
             await Until(() => Control<TextBlock>("HomeMysteryTitle").Text == "A Sunday in October");
             Check(Control<TextBlock>("HomeMysteryMeta").Text == "Movie · 1 h 40 m · 2025 · In progress" && !Control<Button>("HomeMysteryDraw").IsEnabled,
                 "a watched draw keeps to the type filter, and with one match there is nothing else to draw");
-            Control<RadioButton>("MysteryAnime").IsChecked = true;
+            Choose("MysteryKindChoice", "Anime");
             await Until(() => Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches");
-            Control<RadioButton>("MysteryAnything").IsChecked = true; Control<RadioButton>("MysteryUnseen").IsChecked = true;
+            Choose("MysteryKindChoice", ""); Choose("MysteryPoolChoice", "Unseen");
             await Until(() => Control<TextBlock>("HomeMysteryMeta").Text.EndsWith("Not started yet"));
             Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } back && back.Card.Media.Id.StartsWith("home-new", StringComparison.Ordinal),
                 "going back to Not started draws an unstarted title again");
+            // The choices read as one sentence, each blank in the sentence's own words.
+            Choose("MysteryKindChoice", "Movie"); Choose("MysteryLengthChoice", "Evening");
+            Check(Control<ComboBox>("MysteryKindChoice").SelectionBoxItem as string == "a movie" && Control<ComboBox>("MysteryLengthChoice").SelectionBoxItem as string == "under 2 hours long" &&
+                Control<ComboBox>("MysteryPoolChoice").SelectionBoxItem as string == "haven't started" && Control<FrameworkElement>("MysteryGuestPool").Visibility == Visibility.Collapsed &&
+                Field<string?>("mysteryKind") == "Movie" && Field<MysteryLength>("mysteryLength") == MysteryLength.Evening,
+                "the draw reads as a sentence: Pick a movie under 2 hours long that I haven't started");
+            Choose("MysteryKindChoice", ""); Choose("MysteryLengthChoice", "Any");
             Layout(1280, 850, "home-desktop"); Layout(900, 640, "home-compact");
             Check(Control<ScrollViewer>("HomePage").ScrollableHeight > 0, "Home remains vertically scrollable at the minimum window size");
             Control<ScrollViewer>("HomePage").ScrollToBottom();
@@ -194,7 +238,7 @@ static class HomeChecks
                 if ((index + 1) * SharedLibrary.PageSize >= page.Total) break;
             }
             Check(Continuing().Length == 2 && Suggested() == LibraryHome.SuggestionsPerKind && Control<Button>("HomeMysteryPlay").IsEnabled &&
-                Control<StackPanel>("HomeMysteryFilters").Visibility == Visibility.Collapsed && Row("Movie").CountText == "",
+                Control<FrameworkElement>("HomeMysteryFilters").Visibility == Visibility.Collapsed && Row("Movie").CountText == "",
                 "guest Home assembles all paginated continue, suggestion, and mystery cards");
             var paused = Continuing().Single(view => !view.IsEpisode);
             Check(paused.IsRemote && paused.PlaybackLabel == "Resume · 1:30", "guest Home displays the host's saved movie progress");
@@ -225,20 +269,22 @@ static class HomeChecks
             Sent("catalog-draw");
             typeof(RoomClient).GetField("hostFeatures", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(client, 3);
             // A Watched choice left from your own library doesn't apply to someone else's: their app draws titles not started.
-            Control<RadioButton>("MysterySeen").IsChecked = true;
+            Choose("MysteryPoolChoice", "Seen");
             Call("RenderGuestHome");
-            Check(Control<StackPanel>("HomeMysteryFilters").Visibility == Visibility.Visible && Control<FrameworkElement>("MysteryPoolBar").Visibility == Visibility.Collapsed && Field<LibraryCardView?>("homeMystery") is null &&
+            Check(Control<FrameworkElement>("HomeMysteryFilters").Visibility == Visibility.Visible && Control<FrameworkElement>("MysteryPoolBar").Visibility == Visibility.Collapsed && Field<LibraryCardView?>("homeMystery") is null &&
                 Control<Button>("HomeMysteryCard").Visibility == Visibility.Hidden && Control<TextBlock>("HomeMysteryTitle").Text == "" &&
                 !Control<Button>("HomeMysteryPlay").IsEnabled && !Control<Button>("HomeMysteryDraw").IsEnabled,
                 "while the streamer draws, the filters keep their place and the card waits blank instead of showing a fixed pick");
             var first = await Answer();
             var guestPick = Field<LibraryCardView?>("homeMystery");
             Check(Wire.Read<LibraryDrawRequest>(first.Data!) is { Kind: null, Length: MysteryLength.Any, Current: null, Redraw: false } &&
-                Control<StackPanel>("HomeMysteryFilters").Visibility == Visibility.Visible && guestPick is { IsRemote: true, HomeSection: "draw" } &&
+                Control<FrameworkElement>("HomeMysteryFilters").Visibility == Visibility.Visible && guestPick is { IsRemote: true, HomeSection: "draw" } &&
                 guestPick.Card.Media.Id.StartsWith("home-new") && Control<TextBlock>("HomeMysteryMeta").Text == "Movie · 2026 · Not started yet" &&
                 Control<Button>("HomeMysteryDraw").IsEnabled && Control<Button>("HomeMysteryCard").DataContext == guestPick,
                 "guest Home shows the type and length filters and a title the streamer's app drew from its unstarted titles");
-            Control<RadioButton>("MysteryUnseen").IsChecked = true;
+            Check(Control<TextBlock>("MysteryGuestPool") is { Visibility: Visibility.Visible } ending && ending.Text.EndsWith(" hasn't started.") && !ending.Text.Contains(" I "),
+                "in someone else's library the sentence ends with whose titles are not started, in place of the pool blank");
+            Choose("MysteryPoolChoice", "Unseen");
             Call("RenderGuestHome"); Call("RefreshSharedLibrary");
             Check(Sent("catalog-draw").Count == 0, "refreshing guest Home does not ask the streamer to draw again");
             Call("DrawMystery", null, new RoutedEventArgs());
@@ -247,24 +293,31 @@ static class HomeChecks
             Check(Wire.Read<LibraryDrawRequest>(another.Data!) is { Redraw: true } redrawn && redrawn.Current == guestPick.Card.Media.Id &&
                 Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } other && other.Key != guestPick.Key && Continuing().Length == 2,
                 "Draw another asks the streamer for a different title and keeps the rest of guest Home");
-            Control<RadioButton>("MysteryAnime").IsChecked = true;
+            Choose("MysteryKindChoice", "Anime");
             var anime = await Answer();
             await Until(() => Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches");
             Check(Wire.Read<LibraryDrawRequest>(anime.Data!) is { Kind: "Anime", Redraw: false } && Field<LibraryCardView?>("homeMystery") is null &&
                 !Control<Button>("HomeMysteryPlay").IsEnabled && !Control<Button>("HomeMysteryDraw").IsEnabled,
                 "a guest filter with no matching titles in the streamer's library says so");
-            Control<RadioButton>("MysteryAnything").IsChecked = true;
+            Choose("MysteryKindChoice", "");
             await Answer();
             Check(Field<LibraryCardView?>("homeMystery") is { HomeSection: "draw" } && Control<Button>("HomeMysteryPlay").IsEnabled, "clearing the guest's type filter draws again");
             Layout(1280, 850, "home-guest-draw");
+            // The draw's deck alone, to see the guest's sentence, which is below the fold in the page's picture.
+            var deck = Control<FrameworkElement>("HomeMysteryPanel");
+            var deckDrawing = new DrawingVisual();
+            using (var context = deckDrawing.RenderOpen()) context.DrawRectangle(new VisualBrush(deck), null, new Rect(0, 0, deck.ActualWidth, deck.ActualHeight));
+            var deckImage = new RenderTargetBitmap((int)Math.Ceiling(deck.ActualWidth), (int)Math.Ceiling(deck.ActualHeight), 96, 96, PixelFormats.Pbgra32); deckImage.Render(deckDrawing);
+            var deckEncoder = new PngBitmapEncoder(); deckEncoder.Frames.Add(BitmapFrame.Create(deckImage));
+            using (var deckFile = File.Create(Path.Combine(directory, "home-guest-sentence.png"))) deckEncoder.Save(deckFile);
             var kept = Field<LibraryCardView?>("homeMystery");
-            Control<RadioButton>("MysteryAnime").IsChecked = true;
+            Choose("MysteryKindChoice", "Anime");
             var failed = Sent("catalog-draw").Single();
             await Receive(new WireMessage("catalog-error", Number: failed.Number, Text: "Their app is busy. Try again shortly."));
             Call("RenderGuestHome"); Call("RefreshSharedLibrary");
             Check(ReferenceEquals(Field<LibraryCardView?>("homeMystery"), kept) && Continuing().Length == 2 && Field<string?>("guestLibraryNotice") is null &&
                 Sent("catalog-draw").Count == 0, "a failed guest draw keeps the card and Home, and is not asked again on every refresh");
-            Control<RadioButton>("MysteryAnything").IsChecked = true;
+            Choose("MysteryKindChoice", "");
             await Answer();
             // A draw that cannot be sent, here because the room's control queue is full, is not waited on for 15 seconds.
             var writer = events.GetType().GetProperty("Writer")!.GetValue(events)!;
@@ -272,7 +325,7 @@ static class HomeChecks
             var tryWrite = writer.GetType().GetMethod("TryWrite")!;
             while ((bool)tryWrite.Invoke(writer, [filler.Invoke(filler.GetParameters().Select(p => p.Name == "Kind" ? "filler" : p.DefaultValue).ToArray())])!) { }
             var beforeFull = Field<LibraryCardView?>("homeMystery");
-            ((Panel)Control<RadioButton>("MysteryAnime").Parent).Children.OfType<RadioButton>().Single(choice => choice.Tag as string == "Show").IsChecked = true;
+            Choose("MysteryKindChoice", "Show");
             Check(typeof(MainWindow).GetField("guestDrawPending", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window) is null &&
                 ReferenceEquals(Field<LibraryCardView?>("homeMystery"), beforeFull) && Control<Button>("HomeMysteryPlay").IsEnabled,
                 "a guest draw that cannot be sent keeps the card instead of waiting on an answer");
@@ -281,7 +334,7 @@ static class HomeChecks
             var resent = await Answer();
             Check(Wire.Read<LibraryDrawRequest>(resent.Data!) is { Kind: "Show" } && Control<TextBlock>("HomeMysteryTitle").Text == "Nothing matches",
                 "the next refresh sends the draw that could not be sent");
-            Control<RadioButton>("MysteryAnything").IsChecked = true;
+            Choose("MysteryKindChoice", "");
             await Answer();
             Call("OpenHomeTitle", paused);
             Check(Field<string>("currentPage") == "Details" && Field<bool>("guestHomeResume") && Control<Button>("DetailPlay").Content.Equals("Play in room"),
