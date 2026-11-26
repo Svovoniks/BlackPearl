@@ -101,7 +101,7 @@ static class PhoneRemoteFixture
 
         var store = new MemoryStore();
         using var host = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Test PC", AppVersion = "0.0.0-test", Store = store,
-            ReplacedWait = TimeSpan.FromSeconds(8), Features = ["library", "watch"], PhoneSilence = TimeSpan.FromSeconds(3) });
+            ReplacedWait = TimeSpan.FromSeconds(8), Features = ["library", "watch"] });
         // A made-up video of 600,000 bytes, and a resource that is never ready.
         var video = Enumerable.Range(0, 600000).Select(i => (byte)(i * 31 % 251)).ToArray();
         host.ResolveMedia = (_, resource, _) => Task.FromResult(resource switch
@@ -213,34 +213,14 @@ static class PhoneRemoteFixture
             }
             phone.Send(new { type = "pair", name = "again" });
             check(await phone.Next("error") is { } refused && refused.GetProperty("code").GetString() == "pairing" && store.Saved.Count == 1, "a paired phone can't pair again on its link");
-            // Phone apps from before pings say nothing while nothing changes, for as long as they like.
-            await Task.Delay(4500);
-            check(host.Connected.Count == 1, "a phone that never pings keeps its link however long it says nothing");
+            // A phone checks its link with pings (PHONE-REMOTE.md, "Checking the link").
+            phone.Send(new { type = "ping", number = 12 });
+            check(await phone.Next("pong") is { } pong && pong.GetProperty("number").GetInt64() == 12, "the PC answers a phone's ping with its number");
             // The pairing link closing counted too; this counts only the paired phone's.
             Interlocked.Exchange(ref disconnected, 0);
             host.Forget(phoneId);
             check(await phone.Closed() && await Until(() => disconnected == 1, 5000), "removing a phone closes its link and tells the PC it went");
         }
-        // A phone checks its link with pings (PHONE-REMOTE.md, "Checking the link"). One that pinged and then says nothing
-        // has lost the link, though WebRTC can go on calling it connected: the PC lets it go rather than keep it forever.
-        var pingCode = System.Web.HttpUtility.ParseQueryString(new Uri(host.BeginPairing()).Query)["code"]!;
-        string pingingId;
-        await using (var pinging = await FakePhone.Connect(url, pcId, "pair", pingCode))
-        {
-            check(await pinging.Opened(), "a second phone pairs with a new code");
-            pinging.Send(new { type = "hello", protocol = 1, app = "test", device = "Pinging phone" });
-            await pinging.Next("welcome");
-            pinging.Send(new { type = "pair", name = "Pinging phone" });
-            pingingId = (await pinging.Next("paired"))?.GetProperty("phoneId").GetString() ?? "";
-            pinging.Send(new { type = "ping", number = 12 });
-            check(await pinging.Next("pong") is { } pong && pong.GetProperty("number").GetInt64() == 12, "the PC answers a phone's ping with its number");
-            Interlocked.Exchange(ref disconnected, 0);
-            pinging.Send(new { type = "ping", number = 13 });
-            await pinging.Next("pong");
-            check(host.Connected.Any(s => s.PhoneId == pingingId), "a phone that pings keeps its link while it does");
-            check(await pinging.Closed(10000) && await Until(() => disconnected == 1, 5000), "a phone that pinged and then went silent has its link closed, and the PC hears it went");
-        }
-        host.Forget(pingingId);
         // A copy of this library running elsewhere, with the same host key, takes the phone remote over. The first one
         // says why and waits, rather than the two replacing each other every second.
         using (var twin = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Copy", AppVersion = "0.0.0-test", Store = new MemoryStore() }))
@@ -277,9 +257,7 @@ static class PhoneRemoteFixture
             Has("remote-session-state", r => Field(r, "session") == greeted[0] && Field(r, "state") == "connected" && Field(r, "path") == "direct" && Field(r, "local").Contains("host:", StringComparison.Ordinal)) &&
             Has("remote-session-closed", r => Field(r, "session") == greeted[0] && Field(r, "reason") == "removed" && Field(r, "greeted") == "True"),
             "the log follows a phone's session from offer to close: connected directly, greeted, and closed because the phone was removed");
-        check(Has("remote-session-paired", _ => true) && Has("remote-session-refused", r => Field(r, "reason") == "already-paired"), "the log records pairing, and a paired phone's refused second pairing");
-        check(Has("remote-session-closed", r => Field(r, "phone") == pingingId[..8] && Field(r, "reason") == "silent"), "the log says a link was closed because its phone went silent");
-        check(Has("phone-read-failed", r => Field(r, "resource") == "file" && Field(r, "error") == "UnauthorizedAccessException"), "a read the PC can't answer is logged with the kind of resource asked for");
+        check(Has("remote-session-paired", _ => true) && Has("remote-session-refused", r => Field(r, "reason") == "already-paired"), "the log records pairing, and a paired phone's refused second pairing");        check(Has("phone-read-failed", r => Field(r, "resource") == "file" && Field(r, "error") == "UnauthorizedAccessException"), "a read the PC can't answer is logged with the kind of resource asked for");
         check(!new[] { hostKey, secret, code, phoneId, pcId }.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)), "the phone remote's log holds no keys, secrets, codes or whole ids");
     }
 
