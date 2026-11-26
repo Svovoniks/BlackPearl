@@ -13,6 +13,12 @@ static class Program
     static void Main(string[] args)
     {
         if (args.FirstOrDefault() == "--copy-library") { Environment.ExitCode = ScratchLibrary.Run(args[1], args[2]); return; }
+        if (args.FirstOrDefault() == "--scratch-library")
+        {
+            var scratchChecks = 0;
+            ScratchLibraryChecks.Run((condition, name) => { if (!condition) throw new Exception("FAIL: " + name); Console.WriteLine("PASS: " + name); scratchChecks++; });
+            Console.WriteLine($"{scratchChecks} scratch library checks passed."); return;
+        }
         if (HiddenDesktop.Relaunch(out var hiddenExitCode)) { Environment.ExitCode = hiddenExitCode; return; }
         // Voice runs on simulated devices so the checks never open the microphone; --voice-devices checks the real ones,
         // and --voice-live watches the processing on a chosen one.
