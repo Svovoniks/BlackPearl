@@ -54,6 +54,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         // A conversion's choice of sound: the file's audio tracks, and the one the conversion carries (null: none).
         public ProbedAudio[] AudioTracks { get; init; } = [];
         public int? Audio { get; init; }
+        // The video was watched when the phone started it, and the rewatch hasn't reached its end yet (see SaveProgress).
+        public bool Rewatch { get; set; }
         public void Dispose() => CloseConversion(Converter, Store, Directory);
     }
     // By phone id: a phone whose link drops and comes back keeps reading the same stream.
@@ -140,7 +142,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 case "browse": await Browse(remote, session, request, message); break;
                 case "queues": await Queues(remote, session, request); break;
                 case "watch": await Watch(remote, session, request, message, Fail); break;
-                case "progress": SaveProgress(message); break;
+                case "progress": SaveProgress(session, message); break;
                 case "mark-watched": MarkWatchedFor(remote, session, request, message, Fail); break;
                 case "play":
                     if (!await Play(message, Fail)) break;
@@ -358,7 +360,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         if (ffmpeg is not null && (wanted == StreamQuality.OriginalId || wanted == "auto" && home)) _ = Probe(ffmpeg, item, TimeSpan.Zero);
         long? takenAt = Flag(message, "takeOver") && TakeOver is { } takeOver ? await takeOver(item) : null;
         if (streams.TryRemove(session.PhoneId, out var previous)) previous.Dispose();
-        var resume = takenAt ?? (item.IsMusic ? 0 : LibraryWatchProgress.Resume(library.Setting, item.Id, WasWatched(item.Id)));
+        var startedWatched = !item.IsMusic && WasWatched(item.Id);
+        var resume = takenAt ?? (item.IsMusic ? 0 : LibraryWatchProgress.Resume(library.Setting, item.Id, startedWatched));
         var file = new FileMediaSource(item.Path, item.QueueTitle, item.Id);
         var qualities = new List<string> { StreamQuality.OriginalId };
         PhoneStream stream = new(item, file);
@@ -387,6 +390,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         catch { stream.Dispose(); throw; }
         if (current() != remote) { stream.Dispose(); return; }
         if (streams.TryRemove(session.PhoneId, out var raced)) raced.Dispose();
+        stream.Rewatch = startedWatched;
         streams[session.PhoneId] = stream;
         // The phone left while the video was being prepared: the stream waits for it as for any dropped link.
         if (remote.Connected.All(s => s.PhoneId != session.PhoneId)) ExpireStream(session.PhoneId);
@@ -610,26 +614,24 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         return probe;
     }
 
-    // The videos phones are watching now, by id, and whether each was watched when its viewing started.
-    private readonly ConcurrentDictionary<string, bool> viewings = new();
     // How far the phone got. Saved as this PC saves its own playback, so Continue watching and the watched marks match.
     // A video playing here right now keeps its own position.
-    private void SaveProgress(JsonElement message)
+    private void SaveProgress(PhoneRemoteSession session, JsonElement message)
     {
         var id = Text(message, "id");
         if (Items().FirstOrDefault(x => x.Id == id) is not { IsMusic: false } item || Number(message, "positionMs") is not { } position) return;
         if (PlaysHere?.Invoke(item.Id) == true) return;
-        var final = Flag(message, "final");
-        var progress = PhoneProgress.From(position, Number(message, "durationMs") ?? 0, Flag(message, "ended"), WasWatched(item.Id), final);
+        var progress = PhoneProgress.From(position, Number(message, "durationMs") ?? 0, Flag(message, "ended"), WasWatched(item.Id), Flag(message, "final"));
         var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + item.Id, progress.ResumeMs.ToString(CultureInfo.InvariantCulture)) };
-        // A viewing that started on a watched video is a rewatch, and the phone's place is the rewatch's
-        // (LibraryWatchProgress.RewatchPrefix). A viewing starts with its first report that isn't final, and ends with a final
-        // one: the phone sends a final report as a video ends and another as its player closes, and that second one, for a
-        // video the first has just marked watched, starts nothing.
-        var rewatch = viewings.TryGetValue(item.Id, out var startedWatched) ? startedWatched : !final && viewings.GetOrAdd(item.Id, WasWatched(item.Id));
-        if (final) viewings.TryRemove(item.Id, out _);
-        if (rewatch && WasWatched(item.Id) && progress.Played)
+        // The phone's stream of a video already watched when it started is a rewatch, and the phone's place is the rewatch's
+        // (LibraryWatchProgress.RewatchPrefix). Its reports, final or not (the phone also reports as it goes to the
+        // background, and on after the end), count until the rewatch is seen to the end; a stream of a video watched for the
+        // first time never does.
+        if (streams.TryGetValue(session.PhoneId, out var stream) && stream.Item.Id == item.Id && stream.Rewatch && WasWatched(item.Id) && progress.Played)
+        {
             saved.Add(KeyValuePair.Create(LibraryWatchProgress.RewatchPrefix + item.Id, (progress.Ended ? 0 : Math.Max(0, position)).ToString(CultureInfo.InvariantCulture)));
+            if (progress.Ended) stream.Rewatch = false;
+        }
         if (progress.Played) saved.Add(KeyValuePair.Create("played:" + item.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)));
         library.SetSettings(saved);
         if (progress.Ended && !WasWatched(item.Id)) SetWatched(item, true);
@@ -660,7 +662,6 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     public void SaveHandOver(MediaItem item, long? positionMs)
     {
         if (positionMs is not { } position || item.IsMusic) return;
-        viewings.TryRemove(item.Id, out _);
         if (!WasWatched(item.Id)) library.Setting("position:" + item.Id, Math.Max(0, position).ToString(CultureInfo.InvariantCulture));
         else if (position >= 10000) library.Setting(LibraryWatchProgress.RewatchPrefix + item.Id, position.ToString(CultureInfo.InvariantCulture));
         else library.ForgetRewatch([item.Id]);

@@ -1618,6 +1618,8 @@ public partial class MainWindow : Window
         var client = room; if (client is null) return;
         var opening = CrashReports.PlaybackOpening(media.Extension, "room"); var requested = false;
         var generation = ++loadGeneration; loadedMedia = media.Id;
+        // The host plays its own file: whether it was watched as it loads decides if this playing is a rewatch.
+        if (client.Identity?.Host == true && playingItem is { } hosted) playbackStart = (generation, hosted.Id, WasWatched(hosted.Id));
         // Whoever plays the video plays its file; everyone else plays the converted stream when one is offered.
         var converted = client.Identity?.Host != true && client.Snapshot?.Stream is { } offered && offered.MediaId == media.Id ? offered : null;
         loadedStream = converted?.Id;

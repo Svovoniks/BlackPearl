@@ -301,8 +301,10 @@ new `watch` replaces it and `{"type":"stream-stop"}` ends it. A failure is an `e
 Phone → PC while watching, every 10 seconds, on pause, and when it stops:
 `{"type":"progress","id":"…","positionMs":1180000,"durationMs":2830000,"ended":false,"final":false}`. The PC saves it
 as its own playback: the resume point, when it was last played, and the watched mark once the position is within
-2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). For a video
-already watched, from 0.3.159 the position is saved as its place in a rewatch, and it stays watched. `final` is true for the last report of a viewing. A `final` report in the last tenth of the video, as when Next skips the credits, also marks it watched, as the PC's "Next episode" button does. The PC ignores reports for
+2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). From 0.3.159,
+when the video was already watched as the phone's `watch` started its stream, the phone is rewatching it: its reports
+over that stream save the position as its place in the rewatch, and it stays watched, until a report that counts as the
+end (as above); after that, and for a stream started on a video not yet watched, they save no rewatch place. `final` is true for the last report of a viewing. A `final` report in the last tenth of the video, as when Next skips the credits, also marks it watched, as the PC's "Next episode" button does. The PC ignores reports for
 the video it is playing itself at that moment.
 
 ### Continuing on the PC

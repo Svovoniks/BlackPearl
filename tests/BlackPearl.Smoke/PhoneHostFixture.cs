@@ -98,18 +98,23 @@ static class PhoneHostFixture
             var finished = false;
             for (var waited = 0; waited < 5000 && !finished; waited += 100) { finished = store.Setting("watched:" + id) == "true" && store.Setting("position:" + id) == "0"; if (!finished) await Task.Delay(100); }
             check(finished, "a video the phone leaves in its credits is marked watched");
-            // The phone sends another final report as its player closes. It starts no rewatch of the video just finished.
-            async Task<bool> Played(string? before)
+            // The phone goes on reporting over the stream of the video it has just finished: back from the background in the
+            // credits, playing on after the end, and as its player closes. None of it is a rewatch.
+            async Task<bool> Reported(long positionMs, bool ended, bool final)
             {
+                var before = store.Setting("played:" + id);
+                await Task.Delay(20);
+                link.Send(new { type = "progress", id, positionMs, durationMs = 6300000, ended, final });
                 for (var waited = 0; waited < 5000; waited += 100) { if (store.Setting("played:" + id) != before) return true; await Task.Delay(100); }
                 return false;
             }
-            var playedAt = store.Setting("played:" + id);
-            await Task.Delay(20);
-            link.Send(new { type = "progress", id, positionMs = 6300000, durationMs = 6300000, ended = true, final = true });
-            check(await Played(playedAt) && store.Setting("rewatch:" + id) is null && store.Setting("watched:" + id) == "true",
-                "a second end report for a video the phone just finished starts no rewatch");
-            // Watching it again: the phone's place is the rewatch's, and it stays watched until it ends again.
+            var firstWatch = true;
+            foreach (var (at, ended, final) in new[] { (6000000L, false, false), (6300000L, true, false), (6300000L, true, true) })
+                firstWatch &= await Reported(at, ended, final) && store.Setting("rewatch:" + id) is null && store.Setting("watched:" + id) == "true";
+            check(firstWatch, "what a phone reports over the stream of a video it has just watched for the first time starts no rewatch");
+            // Watching it again starts a stream of a watched video: the phone's place is the rewatch's, and it stays watched.
+            link.Send(new { type = "watch", request = 20, id, quality = "original", network = "home" });
+            check(await link.Next("stream", 20000) is not null, "a phone starts watching a watched video again");
             link.Send(new { type = "progress", id, positionMs = 120000, durationMs = 6300000 });
             var rewatching = false;
             for (var waited = 0; waited < 5000 && !rewatching; waited += 100) { rewatching = store.Setting("rewatch:" + id) == "120000"; if (!rewatching) await Task.Delay(100); }
@@ -119,6 +124,8 @@ static class PhoneHostFixture
             var rewatched = false;
             for (var waited = 0; waited < 5000 && !rewatched; waited += 100) { rewatched = store.Setting("rewatch:" + id) == "0"; if (!rewatched) await Task.Delay(100); }
             check(rewatched && store.Setting("watched:" + id) == "true", "a rewatch the phone leaves in its credits is seen to the end");
+            check(await Reported(3000000, false, false) && store.Setting("rewatch:" + id) == "0",
+                "a phone that plays on after its rewatch reached the end doesn't start it again");
 
             // The phone's own watched mark, which saves before the phone hears it's done.
             link.Send(new { type = "mark-watched", request = 4, id, level = "movie", watched = false });
