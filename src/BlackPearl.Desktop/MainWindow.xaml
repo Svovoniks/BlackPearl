@@ -226,32 +226,104 @@
       <Grid>
        <Rectangle IsHitTestVisible="False"><Rectangle.Fill><RadialGradientBrush Center="0.82,0.5" GradientOrigin="0.82,0.5" RadiusX="0.4" RadiusY="0.8" Opacity="0.22"><GradientStop Color="{DynamicResource AccentColor}" Offset="0"/><GradientStop Color="{DynamicResource AccentClear}" Offset="1"/></RadialGradientBrush></Rectangle.Fill></Rectangle>
        <Grid Margin="30,26,40,24"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="300"/></Grid.ColumnDefinitions>
-        <StackPanel VerticalAlignment="Center">
+        <StackPanel VerticalAlignment="Center" SizeChanged="FitMysterySentence">
          <TextBlock Text="Can't decide?" FontFamily="{StaticResource DisplayFont}" FontSize="30" FontWeight="SemiBold" Margin="0,0,0,14"/>
-         <!-- Choices on the app's thread selector (ThreadBar.cs): titles not started or ones watched, the type of title, then
-              its length. Someone else's library draws only from titles not started, so its first choice hides. -->
-         <StackPanel x:Name="HomeMysteryFilters">
-          <local:ThreadBar x:Name="MysteryPoolBar" HorizontalAlignment="Left" Reach="5"><WrapPanel AutomationProperties.Name="Draw from">
-           <RadioButton x:Name="MysteryUnseen" GroupName="MysteryPool" Content="Not started" Tag="Unseen" IsChecked="True" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-           <RadioButton x:Name="MysterySeen" GroupName="MysteryPool" Content="Watched" Tag="Seen" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}" ToolTip="Titles you've watched or started, to watch again"/>
-          </WrapPanel></local:ThreadBar>
-          <local:ThreadBar HorizontalAlignment="Left" Reach="5"><WrapPanel AutomationProperties.Name="Type of title">
-           <RadioButton x:Name="MysteryAnything" GroupName="MysteryKind" Content="Anything" Tag="" IsChecked="True" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-           <RadioButton GroupName="MysteryKind" Content="Movie" Tag="Movie" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-           <RadioButton GroupName="MysteryKind" Content="Show" Tag="Show" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-           <RadioButton x:Name="MysteryAnime" GroupName="MysteryKind" Content="Anime" Tag="Anime" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-          </WrapPanel></local:ThreadBar>
-          <local:ThreadBar HorizontalAlignment="Left" Reach="5"><WrapPanel AutomationProperties.Name="Length">
-           <RadioButton GroupName="MysteryLength" Content="Any length" Tag="Any" IsChecked="True" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-           <RadioButton GroupName="MysteryLength" Content="Under 30 min" Tag="Short" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-           <RadioButton GroupName="MysteryLength" Content="Under 2 hours" Tag="Evening" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}"/>
-           <RadioButton GroupName="MysteryLength" Content="Long night" Tag="LongNight" Checked="MysteryFilterChanged" Style="{StaticResource ThreadOptionChoice}" ToolTip="Movies over two hours, or series with six or more episodes"/>
-          </WrapPanel></local:ThreadBar>
+         <!-- The draw reads as a sentence whose blanks are menus: "Pick a movie under 2 hours long that I haven't started."
+              Each blank shows its choice in the sentence's own words, so the words around it stay fixed. Someone else's
+              library draws only from titles not started, so its last blank gives way to the streamer's name. The blanks start at a random
+              choice that has something to draw (Home.cs, ShuffleMysteryFilters). -->
+         <StackPanel x:Name="HomeMysteryFilters" Margin="-6,0,0,0" TextElement.FontFamily="{StaticResource DisplayFont}" TextElement.FontSize="25">
+          <StackPanel.Resources>
+           <Style x:Key="SentenceWord" TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="6,0,0,3"/></Style>
+           <Style x:Key="BlankFocus"><Setter Property="Control.Template"><Setter.Value><ControlTemplate><Grid SnapsToDevicePixels="True"><Border Margin="-3" BorderBrush="{DynamicResource AccentHalo}" BorderThickness="3" CornerRadius="13"/><Border BorderBrush="{DynamicResource Accent}" BorderThickness="2" CornerRadius="10"/></Grid></ControlTemplate></Setter.Value></Setter></Style>
+           <Style x:Key="SentenceBlank" TargetType="ComboBox">
+            <Setter Property="Height" Value="46"/><Setter Property="Margin" Value="4,0,0,0"/><Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="{DynamicResource Accent}"/><Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource BlankFocus}"/><Setter Property="ScrollViewer.CanContentScroll" Value="False"/>
+            <Setter Property="ItemContainerStyle"><Setter.Value>
+             <Style TargetType="ComboBoxItem">
+              <Setter Property="Foreground" Value="{DynamicResource Ink}"/><Setter Property="Cursor" Value="Hand"/><Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+              <Setter Property="FontFamily" Value="{StaticResource DisplayFont}"/><Setter Property="FontSize" Value="16"/>
+              <!-- Picking the choice a blank already shows raises no selection change, but it is still a choice made by hand. -->
+              <EventSetter Event="PreviewMouseLeftButtonUp" Handler="MysteryChoicePicked"/><EventSetter Event="PreviewKeyDown" Handler="MysteryChoiceKey"/>
+              <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem">
+               <Border x:Name="Row" Background="Transparent" CornerRadius="7" Padding="10,6" Margin="0,1">
+                <DockPanel><TextBlock x:Name="Check" DockPanel.Dock="Right" Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="12" Foreground="{DynamicResource Accent}" Margin="18,0,0,0" VerticalAlignment="Center" Visibility="Hidden"/><ContentPresenter VerticalAlignment="Center"/></DockPanel>
+               </Border>
+               <ControlTemplate.Triggers>
+                <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Row" Property="Background" Value="{DynamicResource Hover}"/></Trigger>
+                <Trigger Property="IsSelected" Value="True"><Setter TargetName="Check" Property="Visibility" Value="Visible"/><Setter Property="FontWeight" Value="SemiBold"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate></Setter.Value></Setter>
+             </Style>
+            </Setter.Value></Setter>
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
+             <Grid>
+              <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+               <ToggleButton.Template><ControlTemplate TargetType="ToggleButton"><ContentPresenter/></ControlTemplate></ToggleButton.Template>
+               <!-- The blank: its words in the accent over a short rule, as on a form; it lights like a pill under the mouse. -->
+               <Grid Background="Transparent">
+                <Border x:Name="Tint" CornerRadius="10" Background="{DynamicResource Ink}" Opacity="0"/>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="7,0,7,3">
+                 <ContentPresenter x:Name="Choice" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}" VerticalAlignment="Center" TextElement.FontWeight="SemiBold" TextElement.Foreground="{TemplateBinding Foreground}" IsHitTestVisible="False"/>
+                 <TextBlock x:Name="Chevron" Text="&#xE70D;" FontFamily="{StaticResource IconFont}" FontSize="11" Foreground="{TemplateBinding Foreground}" Opacity="0.75" Margin="8,4,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+                <Border x:Name="Rule" Height="2" CornerRadius="1" VerticalAlignment="Bottom" Margin="7,0,7,7" Background="{DynamicResource AccentEdge}"/>
+               </Grid>
+              </ToggleButton>
+              <!-- The player's menu popup, as Search's filters have it: it grows down out of the blank and folds back into it. -->
+              <local:PlayerMenuPopup x:Name="PART_Popup" GrowsDown="True" TakesMouse="False" SoftwareSurface="False" Placement="Bottom" HorizontalOffset="-12" VerticalOffset="-6" StaysOpen="True" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="None">
+               <Border>
+                <ContentControl Margin="12" Focusable="False" IsTabStop="False" MinWidth="200">
+                 <ContentControl.Template><ControlTemplate TargetType="ContentControl"><local:Stone Depth="Chip" Background="{DynamicResource Raised}" CornerRadius="14" Padding="6,6,4,6"><ContentPresenter/></local:Stone></ControlTemplate></ContentControl.Template>
+                 <DockPanel>
+                  <TextBlock DockPanel.Dock="Top" Text="{TemplateBinding AutomationProperties.Name}" FontFamily="{x:Static SystemFonts.MessageFontFamily}" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource Muted}" Margin="10,6,10,4"/>
+                  <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                 </DockPanel>
+                </ContentControl>
+               </Border>
+              </local:PlayerMenuPopup>
+             </Grid>
+             <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Tint" Property="Opacity" Value="0.06"/><Setter TargetName="Rule" Property="Background" Value="{DynamicResource Accent}"/></Trigger>
+              <Trigger Property="IsDropDownOpen" Value="True"><Setter TargetName="Tint" Property="Opacity" Value="0.1"/><Setter TargetName="Rule" Property="Background" Value="{DynamicResource Accent}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
+             </ControlTemplate.Triggers>
+            </ControlTemplate></Setter.Value></Setter>
+           </Style>
+          </StackPanel.Resources>
+          <!-- Two lines, what to watch and from which titles. Words that belong together wrap together in a narrow window:
+               "Pick" with its blank, "that I" with its blank and the full stop. -->
+          <WrapPanel>
+          <StackPanel Orientation="Horizontal">
+           <TextBlock Text="Pick" Style="{StaticResource SentenceWord}"/>
+           <ComboBox x:Name="MysteryKindChoice" Style="{StaticResource SentenceBlank}" Tag="Kind" SelectedIndex="0" SelectionChanged="MysteryFilterChanged" AutomationProperties.Name="Type of title">
+            <ComboBoxItem Content="anything" Tag=""/><ComboBoxItem Content="a movie" Tag="Movie"/><ComboBoxItem Content="a show" Tag="Show"/><ComboBoxItem Content="an anime" Tag="Anime"/>
+           </ComboBox>
+          </StackPanel>
+          <ComboBox x:Name="MysteryLengthChoice" Style="{StaticResource SentenceBlank}" Tag="Length" SelectedIndex="0" SelectionChanged="MysteryFilterChanged" AutomationProperties.Name="Length">
+           <ComboBoxItem Content="of any length" Tag="Any"/><ComboBoxItem Content="under 30 minutes long" Tag="Short"/><ComboBoxItem Content="under 2 hours long" Tag="Evening"/><ComboBoxItem Content="for a long night" Tag="LongNight" ToolTip="Movies over two hours, or series with six or more episodes"/>
+          </ComboBox>
+          </WrapPanel>
+          <WrapPanel>
+          <StackPanel x:Name="MysteryPoolBar" Orientation="Horizontal">
+           <TextBlock Text="that I" Style="{StaticResource SentenceWord}"/>
+           <ComboBox x:Name="MysteryPoolChoice" Style="{StaticResource SentenceBlank}" Tag="Pool" SelectedIndex="0" SelectionChanged="MysteryFilterChanged" AutomationProperties.Name="Draw from">
+            <ComboBoxItem Content="haven't started" Tag="Unseen"/><ComboBoxItem Content="watched before" Tag="Seen" ToolTip="Titles you've watched or started, to watch again"/>
+           </ComboBox>
+           <TextBlock Text="." Style="{StaticResource SentenceWord}" Margin="-3,0,0,3"/>
+          </StackPanel>
+          <TextBlock x:Name="MysteryGuestPool" Style="{StaticResource SentenceWord}" Visibility="Collapsed"/>
+          </WrapPanel>
          </StackPanel>
-         <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+         <!-- Random again shows once a blank was picked by hand, as Search's Clear filters shows once a filter is on. -->
+         <WrapPanel Margin="0,18,0,0">
           <Button x:Name="HomeMysteryPlay" Content="Play" Click="PlayHomeCard" Style="{StaticResource Primary}" ContentTemplate="{StaticResource PlayContent}" Padding="20,8"/>
           <Button x:Name="HomeMysteryDraw" Content="Draw another" Click="DrawMystery" ContentTemplate="{StaticResource RefreshContent}"/>
-         </StackPanel>
+          <Button x:Name="HomeMysteryRandom" Content="Random again" Click="RandomMysteryAgain" Style="{StaticResource QuietButton}" Foreground="{DynamicResource Accent}" Padding="12,0" Visibility="Collapsed" ToolTip="Let each draw pick the type, length and titles at random again">
+           <Button.ContentTemplate><DataTemplate><StackPanel Orientation="Horizontal"><TextBlock Text="&#xE8B1;" Style="{StaticResource Icon}" FontSize="13" Margin="0,0,9,0"/><TextBlock Text="{Binding}" VerticalAlignment="Center"/></StackPanel></DataTemplate></Button.ContentTemplate>
+          </Button>
+         </WrapPanel>
         </StackPanel>
         <Grid Grid.Column="1" Height="262" VerticalAlignment="Center">
          <Grid Height="214" VerticalAlignment="Top" Margin="0,6,0,0">

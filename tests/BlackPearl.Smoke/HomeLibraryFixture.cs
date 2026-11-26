@@ -53,6 +53,18 @@ static class HomeLibraryFixture
             "Home lists the started titles to rewatch, with their facts and whether they were watched to the end");
         check(Enumerable.Range(0, 20).Select(seed => LibraryHome.Draw(overview.Seen, "Movie", MysteryLength.Any, seed)).All(title => title?.Card.Media.Id == "film") &&
             LibraryHome.Draw(overview.Seen, "Anime", MysteryLength.Any, 1) is null, "a rewatch draw keeps to the watched titles and the filters");
+        // The draw's blanks start at random, but only where there is something to draw.
+        var starts = Enumerable.Range(0, 200).Select(seed => LibraryHome.RandomFilters(overview.Unseen, overview.Seen, new Random(seed))).ToArray();
+        check(starts.All(start => start is { } chosen && (chosen.Rewatch ? overview.Seen : overview.Unseen).Any(title => LibraryHome.Matches(title, chosen.Kind, chosen.Length))) &&
+            starts.Distinct().Count() > 4 && starts.Any(start => start?.Rewatch == true) && starts.Any(start => start?.Rewatch == false) &&
+            LibraryHome.RandomFilters([], [], new Random(1)) is null && LibraryHome.RandomFilters([], overview.Seen, new Random(1)) is { Rewatch: true },
+            "the draw starts at a random type, length and pool that has a title to draw");
+        // Draw another at random picks choices with another title to draw, while there is one.
+        var watchedFilm = overview.Seen.Single(title => title.Card.Media.Id == "film");
+        var others = Enumerable.Range(0, 200).Select(seed => LibraryHome.RandomFilters([], overview.Seen, new Random(seed), LibraryIdentity.TitleKey(watchedFilm.Card.Media))).ToArray();
+        check(others.All(start => start is { } chosen && overview.Seen.Any(title => title != watchedFilm && LibraryHome.Matches(title, chosen.Kind, chosen.Length))) &&
+            LibraryHome.RandomFilters([], [watchedFilm], new Random(1), LibraryIdentity.TitleKey(watchedFilm.Card.Media)) is { Rewatch: true },
+            "a random draw picks choices with another title to draw, and the only title when there is no other");
         // Specials: a numberless pilot and a credit-free ending in season 0 sort before season 1, but aren't next in line.
         MediaItem[] specials = [
             Episode("p-s1", "Pilot show", 1, 1), Episode("p-s2a", "Pilot show", 2, 1), Episode("p-s2b", "Pilot show", 2, 2),
