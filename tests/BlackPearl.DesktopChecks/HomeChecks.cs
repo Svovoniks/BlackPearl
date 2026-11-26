@@ -16,8 +16,14 @@ static class HomeChecks
         void Call(string name, params object?[] args) => typeof(MainWindow).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, args);
         T Field<T>(string name) => (T)typeof(MainWindow).GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)!;
         T Control<T>(string name) => (T)window.FindName(name);
-        // Picks the choice with this tag in one of the draw sentence's blanks.
-        void Choose(string blank, string tag) => Control<ComboBox>(blank).SelectedItem = Control<ComboBox>(blank).Items.OfType<ComboBoxItem>().Single(choice => (string)choice.Tag == tag);
+        // Picks the choice with this tag in one of the draw sentence's blanks, by hand: cleared first, so the pick is a change
+        // even when a random draw already shows that choice (the app counts a click on the shown choice the same way).
+        void Choose(string blank, string tag)
+        {
+            var box = Control<ComboBox>(blank);
+            box.SelectedIndex = -1;
+            box.SelectedItem = box.Items.OfType<ComboBoxItem>().Single(choice => (string)choice.Tag == tag);
+        }
         LibraryCardView[] Continuing() => new[] { Field<LibraryCardView?>("homeHero") }.OfType<LibraryCardView>().Concat(Field<LibraryCardView[]>("homeContinueAll")).ToArray();
         HomeRowView Row(string kind) => Field<HomeRowView[]>("homeRows").Single(row => row.Kind == kind);
         int Suggested() => Field<HomeRowView[]>("homeRows").Sum(row => row.Tiles.Length + (row.Spotlight is null ? 0 : 1));
