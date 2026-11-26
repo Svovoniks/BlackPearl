@@ -320,6 +320,8 @@ public sealed partial class LibraryStore
                     Setting("watched:" + replacements[0].Id, "true");
                 if (Setting("position:" + gone.Id) is { } position && replacements.All(x => Setting("position:" + x.Id) is null))
                     Setting("position:" + replacements[0].Id, position);
+                if (Setting(LibraryWatchProgress.RewatchPrefix + gone.Id) is { } rewatch && replacements.All(x => Setting(LibraryWatchProgress.RewatchPrefix + x.Id) is null))
+                    Setting(LibraryWatchProgress.RewatchPrefix + replacements[0].Id, rewatch);
                 using var db = Open(); using var command = db.CreateCommand();
                 command.CommandText = "DELETE FROM media WHERE id=$id AND json_extract(json,'$.available')=0"; command.Parameters.AddWithValue("$id", gone.Id);
                 dropped += command.ExecuteNonQuery();

@@ -1197,6 +1197,7 @@ public partial class MainWindow : Window
         if (!File.Exists(item.Path)) throw new FileNotFoundException("Movie file is unavailable. Reconnect its drive and rescan.");
         await Disconnect(preserveFullscreen: (fullscreen || pictureInPicture) && room is null); target = null; loadedMedia = null; playingItem = item;
         var generation = loadGeneration;
+        playbackStart = (generation, item.Id, WasWatched(item.Id));
         localResume = ResumeAt(item);
         var opening = CrashReports.PlaybackOpening(Path.GetExtension(item.Path), "local");
         using var media = new Media(vlc!, item.Path, FromType.FromPath);
@@ -1213,8 +1214,8 @@ public partial class MainWindow : Window
     private void RestartLocal(object sender, RoutedEventArgs e)
     {
         if (selected is null) return;
-        // A rewatch starts over and stays watched.
-        if (WasWatched(selected.Id)) library.Setting(LibraryWatchProgress.RewatchPrefix + selected.Id, "0");
+        // A rewatch starts over and stays watched; its place is saved again once it has played a while.
+        if (WasWatched(selected.Id)) library.ForgetRewatch([selected.Id]);
         else { library.Setting("position:" + selected.Id, "0"); SetWatched(selected, false); }
         if (playingItem?.Id == selected.Id) playingItem = null;
         PlayLocal(sender, e);
@@ -1238,7 +1239,16 @@ public partial class MainWindow : Window
     // moved or been marked since is not saved again.
     private (string Id, long Time, bool Watched)? lastSavedPlayback;
     // The video loaded last (by loadGeneration) and whether it was watched when it started; see SavePlaybackPosition.
+    // Set as a local video loads; for other playback, at its first save.
     private (int Generation, string Id, bool Watched)? playbackStart;
+    // The playing video is a rewatch seen to the end (its end, Finish or Next episode): its rewatch moves on, and the
+    // saves after it, while the credits play on, no longer count as a place in it.
+    private void FinishRewatch(MediaItem item)
+    {
+        if (playbackStart is not { Watched: true } start || start.Generation != loadGeneration || start.Id != item.Id) return;
+        library.Setting(LibraryWatchProgress.RewatchPrefix + item.Id, "0");
+        playbackStart = start with { Watched = false };
+    }
     // Where a video picks up: its saved place, or for a watched one, its place in the rewatch. Songs start over.
     private long ResumeAt(MediaItem item) => item.IsMusic ? 0 : LibraryWatchProgress.Resume(library.Setting, item.Id, WasWatched(item.Id));
     // handingOver: the streaming role just left this app, and its own video is still in the player.

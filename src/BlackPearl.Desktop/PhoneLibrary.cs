@@ -213,8 +213,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
 
     // Whether each card is watched, as the PC's own card is (LibraryWatchProgress.IsWatched): a show or a season once every
     // episode the library has is, an episode or a film also when another copy of it is. Continue watching names an episode
-    // not finished yet, as the PC's Home card does: one already watched is being watched again. Off the dispatcher thread: only the shows and films on the page are gathered, in one
-    // pass over the library, so a film is compared with its own copies rather than with every film.
+    // not finished yet, as the PC's Home card does: one already watched is being watched again. Off the dispatcher thread:
+    // only the shows and films on the page are gathered, in one pass over the library, so a film is compared with its own
+    // copies rather than with every film.
     private static bool[] CardsWatched(MediaItem[] source, SharedLibraryEntry[] entries, IReadOnlyDictionary<string, string> playback)
     {
         bool Watched(string id) => playback.GetValueOrDefault("watched:" + id) == "true";
@@ -609,6 +610,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         return probe;
     }
 
+    // The videos phones are watching now, by id, and whether each was watched when its viewing started.
+    private readonly ConcurrentDictionary<string, bool> viewings = new();
     // How far the phone got. Saved as this PC saves its own playback, so Continue watching and the watched marks match.
     // A video playing here right now keeps its own position.
     private void SaveProgress(JsonElement message)
@@ -616,10 +619,16 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var id = Text(message, "id");
         if (Items().FirstOrDefault(x => x.Id == id) is not { IsMusic: false } item || Number(message, "positionMs") is not { } position) return;
         if (PlaysHere?.Invoke(item.Id) == true) return;
-        var progress = PhoneProgress.From(position, Number(message, "durationMs") ?? 0, Flag(message, "ended"), WasWatched(item.Id), Flag(message, "final"));
+        var final = Flag(message, "final");
+        var progress = PhoneProgress.From(position, Number(message, "durationMs") ?? 0, Flag(message, "ended"), WasWatched(item.Id), final);
         var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + item.Id, progress.ResumeMs.ToString(CultureInfo.InvariantCulture)) };
-        // A video watched before is being watched again: the phone's place is the rewatch's (LibraryWatchProgress.RewatchPrefix).
-        if (WasWatched(item.Id) && progress.Played)
+        // A viewing that started on a watched video is a rewatch, and the phone's place is the rewatch's
+        // (LibraryWatchProgress.RewatchPrefix). A viewing starts with its first report that isn't final, and ends with a final
+        // one: the phone sends a final report as a video ends and another as its player closes, and that second one, for a
+        // video the first has just marked watched, starts nothing.
+        var rewatch = viewings.TryGetValue(item.Id, out var startedWatched) ? startedWatched : !final && viewings.GetOrAdd(item.Id, WasWatched(item.Id));
+        if (final) viewings.TryRemove(item.Id, out _);
+        if (rewatch && WasWatched(item.Id) && progress.Played)
             saved.Add(KeyValuePair.Create(LibraryWatchProgress.RewatchPrefix + item.Id, (progress.Ended ? 0 : Math.Max(0, position)).ToString(CultureInfo.InvariantCulture)));
         if (progress.Played) saved.Add(KeyValuePair.Create("played:" + item.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)));
         library.SetSettings(saved);
@@ -646,13 +655,15 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         remote.SendMessage(session, new { type = "done", request });
     }
 
-    // What Continue on the PC saves before the PC plays the video: where the phone was, and a title watched before that
-    // the phone has started again is no longer marked watched.
+    // What Continue on the PC saves before the PC plays the video: where the phone was. A video watched before stays
+    // watched, and the phone's place is its place in the rewatch, which the PC picks up and carries on.
     public void SaveHandOver(MediaItem item, long? positionMs)
     {
         if (positionMs is not { } position || item.IsMusic) return;
-        if (position >= 10000 && WasWatched(item.Id)) SetWatched(item, false);
-        library.Setting("position:" + item.Id, Math.Max(0, position).ToString(CultureInfo.InvariantCulture));
+        viewings.TryRemove(item.Id, out _);
+        if (!WasWatched(item.Id)) library.Setting("position:" + item.Id, Math.Max(0, position).ToString(CultureInfo.InvariantCulture));
+        else if (position >= 10000) library.Setting(LibraryWatchProgress.RewatchPrefix + item.Id, position.ToString(CultureInfo.InvariantCulture));
+        else library.ForgetRewatch([item.Id]);
     }
 
     // The video a play request names, if it can play.

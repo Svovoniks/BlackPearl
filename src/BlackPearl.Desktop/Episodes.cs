@@ -20,8 +20,6 @@ public partial class MainWindow
     }
     private void SetWatched(MediaItem item, bool watched)
     {
-        // Seen to the end again: the rewatch moves on, so Continue watching offers the next episode.
-        if (watched && WasWatched(item.Id)) library.Setting(LibraryWatchProgress.RewatchPrefix + item.Id, "0");
         library.Setting("watched:" + item.Id, watched ? "true" : "false"); watchedState[item.Id] = watched;
         RefreshHome();
         foreach (var card in libraryCards.Where(card => card.Card.Media.Id == item.Id || LibraryIdentity.SameShow(card.Card.Media, item) || LibraryIdentity.SameFilm(card.Card.Media, item)))
@@ -73,7 +71,7 @@ public partial class MainWindow
             RefreshEpisodeEndAction();
             if (EpisodeEndButton.Visibility != Visibility.Visible || !EpisodeEndButton.IsEnabled || playingItem is not { } item) return;
             var next = FollowingEpisode(item, candidate => File.Exists(candidate.Path));
-            library.Setting("position:" + item.Id, "0"); SetWatched(item, true);
+            FinishRewatch(item); library.Setting("position:" + item.Id, "0"); SetWatched(item, true);
             if (next is null) { SetStatus(item.Series is null ? "Movie marked as watched." : "Episode marked as watched."); return; }
             await PlayFollowingEpisode(next);
         });
@@ -144,7 +142,7 @@ public partial class MainWindow
         RefreshEpisodeEndAction();
         if (endedItem is not null && (room is null || room.Identity?.Host == true))
         {
-            library.Setting("position:" + endedItem.Id, "0");
+            FinishRewatch(endedItem); library.Setting("position:" + endedItem.Id, "0");
             if (!endedItem.IsMusic) SetWatched(endedItem, true);
         }
         // Looping is the host's choice in a room, and applies to everyone there.

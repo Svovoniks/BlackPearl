@@ -98,6 +98,27 @@ static class PhoneHostFixture
             var finished = false;
             for (var waited = 0; waited < 5000 && !finished; waited += 100) { finished = store.Setting("watched:" + id) == "true" && store.Setting("position:" + id) == "0"; if (!finished) await Task.Delay(100); }
             check(finished, "a video the phone leaves in its credits is marked watched");
+            // The phone sends another final report as its player closes. It starts no rewatch of the video just finished.
+            async Task<bool> Played(string? before)
+            {
+                for (var waited = 0; waited < 5000; waited += 100) { if (store.Setting("played:" + id) != before) return true; await Task.Delay(100); }
+                return false;
+            }
+            var playedAt = store.Setting("played:" + id);
+            await Task.Delay(20);
+            link.Send(new { type = "progress", id, positionMs = 6300000, durationMs = 6300000, ended = true, final = true });
+            check(await Played(playedAt) && store.Setting("rewatch:" + id) is null && store.Setting("watched:" + id) == "true",
+                "a second end report for a video the phone just finished starts no rewatch");
+            // Watching it again: the phone's place is the rewatch's, and it stays watched until it ends again.
+            link.Send(new { type = "progress", id, positionMs = 120000, durationMs = 6300000 });
+            var rewatching = false;
+            for (var waited = 0; waited < 5000 && !rewatching; waited += 100) { rewatching = store.Setting("rewatch:" + id) == "120000"; if (!rewatching) await Task.Delay(100); }
+            check(rewatching && store.Setting("watched:" + id) == "true" && store.Setting("position:" + id) == "0",
+                "a phone watching a watched video again saves its place as the rewatch's, and the video stays watched");
+            link.Send(new { type = "progress", id, positionMs = 5900000, durationMs = 6300000, final = true });
+            var rewatched = false;
+            for (var waited = 0; waited < 5000 && !rewatched; waited += 100) { rewatched = store.Setting("rewatch:" + id) == "0"; if (!rewatched) await Task.Delay(100); }
+            check(rewatched && store.Setting("watched:" + id) == "true", "a rewatch the phone leaves in its credits is seen to the end");
 
             // The phone's own watched mark, which saves before the phone hears it's done.
             link.Send(new { type = "mark-watched", request = 4, id, level = "movie", watched = false });

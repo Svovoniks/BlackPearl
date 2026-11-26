@@ -113,7 +113,30 @@ static class EpisodeEndChecks
             check(long.TryParse(library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id), out var rewatchAt) && rewatchAt >= 12000 &&
                 library2.Setting("watched:" + second.Id) == "true" && library2.Setting("position:" + second.Id) == "0",
                 "a watched episode played again keeps its place as a rewatch and stays watched");
+            // Finish during a rewatch: the video plays on, and its later saves don't bring the rewatch back.
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            for (var wait = 0; wait < 50 && library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) != "0"; wait++) await Task.Delay(100);
+            vlc.Time = 14000;
+            for (var wait = 0; wait < 50 && vlc.Time < 14000; wait++) await Task.Delay(100);
+            Call("SavePlaybackPosition", false);
             await (Task)Call("Disconnect", false, false)!;
+            check(library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) == "0" && library2.Setting("watched:" + second.Id) == "true",
+                "Finish during a rewatch ends it, though the video plays on and saves its place after");
+            // A first watch finished with Finish and then played on is not a rewatch.
+            Call("SetWatched", second, false); library2.ForgetRewatch([second.Id]);
+            await (Task)Call("PlayLocalItem", second)!;
+            for (var wait = 0; wait < 100 && !Field<bool>("ready"); wait++) await Task.Delay(100);
+            vlc = Field<MediaPlayer>("player"); vlc.Time = 12000;
+            for (var wait = 0; wait < 50 && vlc.Time < 12000; wait++) await Task.Delay(100);
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            for (var wait = 0; wait < 50 && library2.Setting("watched:" + second.Id) != "true"; wait++) await Task.Delay(100);
+            vlc.Time = 14000;
+            for (var wait = 0; wait < 50 && vlc.Time < 14000; wait++) await Task.Delay(100);
+            Call("SavePlaybackPosition", false);
+            await (Task)Call("Disconnect", false, false)!;
+            check(library2.Setting("watched:" + second.Id) == "true" && library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) is null,
+                "a first watch marked watched with Finish leaves no rewatch behind");
+            library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id, "12000");
             Call("Select", second);
             var restart = (Button)window.FindName("RestartButton");
             check(((string)((Button)window.FindName("DetailPlay")).Content).StartsWith("Resume at ") && restart.Visibility == Visibility.Visible,
@@ -121,11 +144,8 @@ static class EpisodeEndChecks
             restart.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             for (var wait = 0; wait < 100 && !(Field<bool>("ready") && Field<MediaItem?>("playingItem")?.Id == second.Id); wait++) await Task.Delay(100);
             await (Task)Call("Disconnect", false, false)!;
-            check(library2.Setting("watched:" + second.Id) == "true" && library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) == "0",
-                "restarting a rewatch starts it over and keeps the episode watched");
-            library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id, "30000");
-            Call("SetWatched", second, true);
-            check(library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) == "0", "a rewatch seen to the end moves on to the next episode");
+            check(library2.Setting("watched:" + second.Id) == "true" && library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) is null,
+                "restarting a rewatch starts it over, keeps the episode watched, and doesn't count it as seen to the end");
             library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id, "30000");
             Call("Select", second); watchedButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             check(library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) is null && library2.Setting("watched:" + second.Id) == "false",
