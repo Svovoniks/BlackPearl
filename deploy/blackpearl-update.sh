@@ -62,7 +62,11 @@ else
     tag=$(json "d['tag_name'] if not d.get('draft') and not d.get('prerelease') else ''" < "$work/release.json")
     [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { log "The latest release has no usable version tag."; exit 0; }
     version=${tag#v}
-    if ! newer "$version" "$current"; then log "Up to date: $current (latest release $version)."; exit 0; fi
+    if ! newer "$version" "$current"; then
+        # A build installed some other way leaves no release waiting.
+        $check || rm -f "$STATE"/pending-*
+        log "Up to date: $current (latest release $version)."; exit 0
+    fi
     if [ -e "$STATE/failed-$version" ]; then log "$version failed to start here before; waiting for a newer release."; exit 0; fi
     name="BlackPearl-Server-$version-linux-x64.tar.gz"
     # Name, download link and GitHub's digest of the room service build, and the link to SHA256SUMS.txt.
@@ -108,11 +112,12 @@ fi
 pending=$STATE/pending-$version
 [ -e "$pending" ] || $check || date +%s > "$pending"
 # The wait counts from the first release still waiting, so releases that follow each other quickly can't put it off.
-since=$(cat "$STATE"/pending-* 2>/dev/null | sort -n | head -n 1)
+since=$( { cat "$STATE"/pending-* 2>/dev/null || true; } | sort -n | head -n 1)
 since=${since:-$(date +%s)}
 running_protocols=$(curl -fsS --max-time 10 "$HEALTH" 2>/dev/null | json "' '.join(map(str, d.get('protocols', [])))" 2>/dev/null || true)
 new_protocols=$( (cat "$target/.blackpearl-describe.json" 2>/dev/null || echo '{"protocols":[]}') | json "' '.join(map(str, d['protocols']))")
 reason=
+if $check && [ ! -f "$target/.blackpearl-describe.json" ]; then log "Its room protocols are known once it is installed; a real run may switch at once for a new one."; fi
 # A service that doesn't answer now gives no protocols to compare; whether anyone is in a room decides then.
 if [ -n "$running_protocols" ]; then
     for protocol in $new_protocols; do
