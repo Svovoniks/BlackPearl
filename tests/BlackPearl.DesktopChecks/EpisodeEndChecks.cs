@@ -103,6 +103,37 @@ static class EpisodeEndChecks
             watchedButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             check(library2.Setting("watched:" + second.Id) == "false" && watchedText.Text == "Mark as watched", "the details page can mark an episode unwatched again");
 
+            // Rewatching: a watched episode played again keeps its place apart and stays watched.
+            Call("SetWatched", second, true); library2.Setting("position:" + second.Id, "0");
+            await (Task)Call("PlayLocalItem", second)!;
+            for (var wait = 0; wait < 100 && !Field<bool>("ready"); wait++) await Task.Delay(100);
+            var vlc = Field<MediaPlayer>("player"); vlc.Time = 12000;
+            for (var wait = 0; wait < 50 && vlc.Time < 12000; wait++) await Task.Delay(100);
+            Call("SavePlaybackPosition", false);
+            check(long.TryParse(library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id), out var rewatchAt) && rewatchAt >= 12000 &&
+                library2.Setting("watched:" + second.Id) == "true" && library2.Setting("position:" + second.Id) == "0",
+                "a watched episode played again keeps its place as a rewatch and stays watched");
+            await (Task)Call("Disconnect", false, false)!;
+            Call("Select", second);
+            var restart = (Button)window.FindName("RestartButton");
+            check(((string)((Button)window.FindName("DetailPlay")).Content).StartsWith("Resume at ") && restart.Visibility == Visibility.Visible,
+                "a rewatch left part-way offers Resume and Restart on its details page");
+            restart.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            for (var wait = 0; wait < 100 && !(Field<bool>("ready") && Field<MediaItem?>("playingItem")?.Id == second.Id); wait++) await Task.Delay(100);
+            await (Task)Call("Disconnect", false, false)!;
+            check(library2.Setting("watched:" + second.Id) == "true" && library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) == "0",
+                "restarting a rewatch starts it over and keeps the episode watched");
+            library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id, "30000");
+            Call("SetWatched", second, true);
+            check(library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) == "0", "a rewatch seen to the end moves on to the next episode");
+            library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id, "30000");
+            Call("Select", second); watchedButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            check(library2.Setting(LibraryWatchProgress.RewatchPrefix + second.Id) is null && library2.Setting("watched:" + second.Id) == "false",
+                "marking a video by hand ends its rewatch");
+            Call("SetWatched", second, false);
+            // The first episode plays on, as the library now has it (matched above), for the episode list below.
+            await (Task)Call("PlayLocalItem", Field<List<MediaItem>>("items").First(item => item.Id == first.Id))!;
+
             // Without a queue, the queue menu lists the playing show's episodes.
             var queueList = (ListBox)window.FindName("QueueList");
             queue.Clear(); Set("queuePosition", -1); Call("PublishQueue");

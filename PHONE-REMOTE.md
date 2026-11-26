@@ -242,7 +242,8 @@ PC → phone:
 (which name the episode to resume even when their level is `series`). `positionMs` and `watched` are the PC's own
 resume point and watched mark, as its own cards show it: a show or a season is watched once every episode the
 library has is (from 0.3.156; earlier PCs always sent `false` for them), and a film or an episode also when another copy
-of it is.
+of it is. A Continue watching entry can name a video already watched that is being watched again (from 0.3.158): it is
+sent with `watched` false and its place in that rewatch as `positionMs`.
 A failure is an `error` with code `browse` and the `request`.
 
 BlackPearl's window starts the phone remote before it has read its library. After 0.3.144 a library request (`browse`,
@@ -300,7 +301,8 @@ new `watch` replaces it and `{"type":"stream-stop"}` ends it. A failure is an `e
 Phone → PC while watching, every 10 seconds, on pause, and when it stops:
 `{"type":"progress","id":"…","positionMs":1180000,"durationMs":2830000,"ended":false,"final":false}`. The PC saves it
 as its own playback: the resume point, when it was last played, and the watched mark once the position is within
-2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). `final` is true for the last report of a viewing. A `final` report in the last tenth of the video, as when Next skips the credits, also marks it watched, as the PC's "Next episode" button does. The PC ignores reports for
+2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). For a video
+already watched, from 0.3.158 the position is saved as its place in a rewatch, and it stays watched. `final` is true for the last report of a viewing. A `final` report in the last tenth of the video, as when Next skips the credits, also marks it watched, as the PC's "Next episode" button does. The PC ignores reports for
 the video it is playing itself at that moment.
 
 ### Continuing on the PC

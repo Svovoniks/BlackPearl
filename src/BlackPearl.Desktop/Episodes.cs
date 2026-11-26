@@ -20,6 +20,8 @@ public partial class MainWindow
     }
     private void SetWatched(MediaItem item, bool watched)
     {
+        // Seen to the end again: the rewatch moves on, so Continue watching offers the next episode.
+        if (watched && WasWatched(item.Id)) library.Setting(LibraryWatchProgress.RewatchPrefix + item.Id, "0");
         library.Setting("watched:" + item.Id, watched ? "true" : "false"); watchedState[item.Id] = watched;
         RefreshHome();
         foreach (var card in libraryCards.Where(card => card.Card.Media.Id == item.Id || LibraryIdentity.SameShow(card.Card.Media, item) || LibraryIdentity.SameFilm(card.Card.Media, item)))
@@ -113,7 +115,7 @@ public partial class MainWindow
         DetailWatched.ToolTip = watched ? "Mark as unwatched" : "Mark as watched";
         System.Windows.Automation.AutomationProperties.SetName(DetailWatched, watched ? "Mark as unwatched" : "Mark as watched");
         // Songs start from the beginning; see SavePlaybackPosition.
-        var resume = !watched && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var position) && position >= 10000 ? position : 0;
+        var resume = ResumeAt(item) is >= 10000 and var position ? position : 0;
         DetailPlay.Content = resume > 0 ? "Resume at " + FormatTime(resume) : item.IsMusic ? "Play" : "Play locally";
         DetailHost.Content = item.IsMusic ? "Listen together" : "Watch together";
         RestartButton.Visibility = resume > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -124,6 +126,8 @@ public partial class MainWindow
         // Clearing a logical episode or a film also clears watched versions that cover it.
         var marked = LibraryWatchProgress.Marked(items, item, level, season, watched);
         library.SetSettings(marked.Select(id => KeyValuePair.Create("watched:" + id, watched ? "true" : "false")));
+        // A mark ends a rewatch: marking a show watched again takes it out of Continue watching.
+        library.ForgetRewatch(marked);
         foreach (var id in marked) watchedState[id] = watched;
         foreach (var card in libraryCards.Where(card => card.Card.Media.Id == item.Id || LibraryIdentity.SameShow(card.Card.Media, item) || LibraryIdentity.SameFilm(card.Card.Media, item)))
             UpdateCardPlayback(card);

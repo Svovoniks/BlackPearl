@@ -190,7 +190,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             return;
         }
         if (current() != remote) return;
-        long Position(string id) => long.TryParse(playback.GetValueOrDefault("position:" + id), out var at) ? Math.Max(0, at) : 0;
+        // A watched episode in Continue watching is being rewatched, and picks up at its place in the rewatch.
+        long Position(string id) => LibraryWatchProgress.Resume(key => playback.GetValueOrDefault(key), id, playback.GetValueOrDefault("watched:" + id) == "true");
         var byId = source.ToDictionary(x => x.Id);
         var entries = page.Entries.Select((entry, index) =>
         {
@@ -212,7 +213,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
 
     // Whether each card is watched, as the PC's own card is (LibraryWatchProgress.IsWatched): a show or a season once every
     // episode the library has is, an episode or a film also when another copy of it is. Continue watching names an episode
-    // not finished yet, by its own mark. Off the dispatcher thread: only the shows and films on the page are gathered, in one
+    // not finished yet, as the PC's Home card does: one already watched is being watched again. Off the dispatcher thread: only the shows and films on the page are gathered, in one
     // pass over the library, so a film is compared with its own copies rather than with every film.
     private static bool[] CardsWatched(MediaItem[] source, SharedLibraryEntry[] entries, IReadOnlyDictionary<string, string> playback)
     {
@@ -222,9 +223,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var byId = source.ToDictionary(item => item.Id);
         var cards = entries.Select(entry => entry.HomeSection == "continue" ? null : byId.GetValueOrDefault(entry.Id)).ToArray();
         var titles = cards.OfType<MediaItem>().Select(Title).ToHashSet();
-        if (titles.Count == 0) return entries.Select(entry => Watched(entry.Id)).ToArray();
+        if (titles.Count == 0) return entries.Select(entry => entry.HomeSection != "continue" && Watched(entry.Id)).ToArray();
         var members = source.Where(item => titles.Contains(Title(item))).ToLookup(Title);
-        return entries.Select((entry, index) => cards[index] is not { } item ? Watched(entry.Id) : LibraryWatchProgress.IsWatched(members[Title(item)],
+        return entries.Select((entry, index) => cards[index] is not { } item ? entry.HomeSection != "continue" && Watched(entry.Id) : LibraryWatchProgress.IsWatched(members[Title(item)],
             new LibraryCard("", "", null, item, entry.Level, entry.Season, Versions: members[Title(item)].Count()), Watched, Position)).ToArray();
     }
 
@@ -356,7 +357,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         if (ffmpeg is not null && (wanted == StreamQuality.OriginalId || wanted == "auto" && home)) _ = Probe(ffmpeg, item, TimeSpan.Zero);
         long? takenAt = Flag(message, "takeOver") && TakeOver is { } takeOver ? await takeOver(item) : null;
         if (streams.TryRemove(session.PhoneId, out var previous)) previous.Dispose();
-        var resume = takenAt ?? (!WasWatched(item.Id) && !item.IsMusic && long.TryParse(library.Setting("position:" + item.Id), out var saved) ? saved : 0);
+        var resume = takenAt ?? (item.IsMusic ? 0 : LibraryWatchProgress.Resume(library.Setting, item.Id, WasWatched(item.Id)));
         var file = new FileMediaSource(item.Path, item.QueueTitle, item.Id);
         var qualities = new List<string> { StreamQuality.OriginalId };
         PhoneStream stream = new(item, file);
@@ -502,7 +503,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     private Entry ListEntry(MediaItem item, int index, IReadOnlyDictionary<string, string> playback)
     {
         var watched = playback.GetValueOrDefault("watched:" + item.Id) == "true";
-        var position = !watched && long.TryParse(playback.GetValueOrDefault("position:" + item.Id), out var at) ? Math.Max(0, at) : 0;
+        var position = LibraryWatchProgress.Resume(key => playback.GetValueOrDefault(key), item.Id, watched);
         var overview = item.DetailOverview ?? "";
         return new Entry(item.Id, item.QueueTitle, StreamDetail(item) ?? "", item.Series is null ? "movie" : "episode", item.Season, item.Episode,
             overview[..Math.Min(overview.Length, 300)], item.Kind, item.RuntimeMinutes, item.Year, 0, null, position, watched,
@@ -617,6 +618,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         if (PlaysHere?.Invoke(item.Id) == true) return;
         var progress = PhoneProgress.From(position, Number(message, "durationMs") ?? 0, Flag(message, "ended"), WasWatched(item.Id), Flag(message, "final"));
         var saved = new List<KeyValuePair<string, string>> { KeyValuePair.Create("position:" + item.Id, progress.ResumeMs.ToString(CultureInfo.InvariantCulture)) };
+        // A video watched before is being watched again: the phone's place is the rewatch's (LibraryWatchProgress.RewatchPrefix).
+        if (WasWatched(item.Id) && progress.Played)
+            saved.Add(KeyValuePair.Create(LibraryWatchProgress.RewatchPrefix + item.Id, (progress.Ended ? 0 : Math.Max(0, position)).ToString(CultureInfo.InvariantCulture)));
         if (progress.Played) saved.Add(KeyValuePair.Create("played:" + item.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)));
         library.SetSettings(saved);
         if (progress.Ended && !WasWatched(item.Id)) SetWatched(item, true);

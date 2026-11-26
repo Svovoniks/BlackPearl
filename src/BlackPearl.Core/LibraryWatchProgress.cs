@@ -2,6 +2,15 @@ namespace BlackPearl.Core;
 
 public static class LibraryWatchProgress
 {
+    // A video already watched and played again is a rewatch. Its place in the rewatch is kept under rewatch:, apart from
+    // position:, so the watched mark stays and a watched video's saved place stays 0. 0 once the rewatch reached the end.
+    // Only a rewatch writes it, and marking the video watched or unwatched forgets it, so a show whose episodes are all
+    // watched comes back to Continue watching only when someone is actually watching it again.
+    public const string RewatchPrefix = "rewatch:";
+    // Where a video picks up: its saved place, or for a watched one, its place in the rewatch.
+    public static long Resume(Func<string, string?> setting, string id, bool watched) =>
+        long.TryParse(setting((watched ? RewatchPrefix : "position:") + id), out var at) ? Math.Max(0, at) : 0;
+
     public static bool CanContinue(IEnumerable<MediaItem> source, LibraryCard card, IReadOnlyDictionary<string, string> settings)
     {
         var candidates = card.Level is "series" or "season"
