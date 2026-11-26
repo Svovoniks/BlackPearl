@@ -242,7 +242,7 @@ PC → phone:
 (which name the episode to resume even when their level is `series`). `positionMs` and `watched` are the PC's own
 resume point and watched mark, as its own cards show it: a show or a season is watched once every episode the
 library has is (from 0.3.156; earlier PCs always sent `false` for them), and a film or an episode also when another copy
-of it is. A Continue watching entry can name a video already watched that is being watched again (from 0.3.159): it is
+of it is. A Continue watching entry can name a video already watched that is being watched again (from 0.3.160): it is
 sent with `watched` false and its place in that rewatch as `positionMs`.
 A failure is an `error` with code `browse` and the `request`.
 
@@ -294,7 +294,7 @@ Settings › Playback, as two-letter language codes in priority order: `"tracks"
 means no subtitles. The phone picks its starting tracks with them as the PC would. Older PCs send none of these.
 
 `positionMs` is where to start: the PC's saved position; for a watched video, the place of a rewatch under way (from
-0.3.159), otherwise 0. `note` says why the phone got the
+0.3.160), otherwise 0. `note` says why the phone got the
 file when it asked for a conversion (no converter, or a file already smaller). The PC keeps one stream per phone; a
 new `watch` replaces it and `{"type":"stream-stop"}` ends it. A failure is an `error` with the `request` and the code
 `gone` (not in the library, or its drive is disconnected).
@@ -302,7 +302,7 @@ new `watch` replaces it and `{"type":"stream-stop"}` ends it. A failure is an `e
 Phone → PC while watching, every 10 seconds, on pause, and when it stops:
 `{"type":"progress","id":"…","positionMs":1180000,"durationMs":2830000,"ended":false,"final":false}`. The PC saves it
 as its own playback: the resume point, when it was last played, and the watched mark once the position is within
-2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). From 0.3.159,
+2 seconds of the end, or `ended` is true within the last minute (or anywhere, when `durationMs` is 0). From 0.3.160,
 when the video was already watched as the phone's `watch` started its stream, the phone is rewatching it: its reports
 over that stream save the position as its place in the rewatch, and it stays watched, until a report that counts as the
 end (as above); after that, and for a stream started on a video not yet watched, they save no rewatch place. `final` is true for the last report of a viewing. A `final` report in the last tenth of the video, as when Next skips the credits, also marks it watched, as the PC's "Next episode" button does. The PC ignores reports for

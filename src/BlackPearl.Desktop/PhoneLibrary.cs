@@ -113,7 +113,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     public void CloseStreams()
     {
         foreach (var phone in streams.Keys) if (streams.TryRemove(phone, out var stream)) stream.Dispose();
-        artwork.Clear(); artworkCache.Clear();
+        expired.Clear(); artwork.Clear(); artworkCache.Clear();
         lock (listingGate) listing = null;
     }
 
