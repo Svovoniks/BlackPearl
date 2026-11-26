@@ -660,7 +660,7 @@ try {
     Write-Host "$outcome BlackPearl ${Version}: $($result.Release)"
     Write-Host "Actions: $($run.html_url)"
     Write-Host "Verified SHA-256: $($result.Sha256)"
-    Write-Host "Verified file list and update installers: $(if ($result.Updates.Count) { $result.Updates -join ', ' } else { 'none' })"
+    Write-Host "Verified file list, room service build and update installers: $(if ($result.Updates.Count) { $result.Updates -join ', ' } else { 'none' })"
     Write-Host "Verification record: $record"
     Write-Host "Local master synchronized: $($result.LocalMaster.Commit)"
 }

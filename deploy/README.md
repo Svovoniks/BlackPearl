@@ -13,6 +13,7 @@ Without a registered domain, use [sslip.io](https://sslip.io): a name such as `2
 ## Requirements
 
 - Ubuntu with `haproxy`, `aspnetcore-runtime-10.0`, and Caddy from the [official repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). Ubuntu's own Caddy package is too old.
+- For automatic updates, also `curl` and `python3`, which Ubuntu installs by default, as it does `flock` and `setpriv`.
 - Public TCP 443 reachable. Nothing else needs to be open.
 - A Cloudflare Realtime TURN key: its key ID and API token. Without them the service still works, but only participants who can connect directly will succeed.
 
@@ -26,7 +27,7 @@ Without a registered domain, use [sslip.io](https://sslip.io): a name such as `2
 
 A server installed while the app was called Watchroom (`/opt/watchroom`, `watchroom.service`, `/etc/watchroom/watchroom.env`, `/var/lib/watchroom`) keeps working with its `WATCHROOM_*` settings, which the server still reads. To update it without moving anything, publish as in step 1 to `/opt/watchroom` and change `ExecStart` in `watchroom.service` to run `BlackPearl.Server.dll` instead of `Watchroom.Server.dll`. Keep the Caddy drop-in's `WATCHROOM_DOMAIN` unless you also install the new `Caddyfile`, which reads `BLACKPEARL_DOMAIN`.
 
-To update by hand, repeat step 1 and run `systemctl restart blackpearl`, or let the server update itself as described next. Saved rooms, with their members and the people removed from them, are stored under `/var/lib/blackpearl` and survive a restart; everyone in a room is disconnected by it and their apps re-enter by themselves.
+To update by hand, repeat step 1 and run `systemctl restart blackpearl`, or let the server update itself as described next. Once it has, `/opt/blackpearl` is a link to a release folder; install a hand-made build with `blackpearl-update.sh --file` instead of copying over it. Saved rooms, with their members and the people removed from them, are stored under `/var/lib/blackpearl` and survive a restart; everyone in a room is disconnected by it and their apps re-enter by themselves.
 
 ## Automatic updates
 
@@ -35,7 +36,7 @@ Every release from 0.3.159 on carries `BlackPearl-Server-VERSION-linux-x64.tar.g
 1. It asks GitHub for the latest stable release and stops if that is not newer than the running build.
 2. It downloads the room service build and checks it against GitHub's SHA-256 and the release's `SHA256SUMS.txt`.
 3. It unpacks the build into `/opt/blackpearl-releases/VERSION`, owned by root and not writable by anyone else, and runs it once as `nobody` with `--describe`. That shows the build starts here and reports its version and room protocols.
-4. It switches when nobody is in a room: the service writes `status.json` to its data folder every 10 seconds, with how many people are connected to rooms. Phone remote links don't count, since a PC with the remote turned on keeps one open. It switches right away when the new build speaks a room protocol the running one does not, so newer apps aren't turned away for long, and after `MAX_WAIT_HOURS` (24) in any case.
+4. It switches when nobody is in a room: the service writes `status.json` to its data folder every 10 seconds, with how many people are connected to rooms. Phone remote links don't count, since a PC with the remote turned on keeps one open. It switches right away when the new build speaks a room protocol the running one does not, so newer apps aren't turned away for long, and in any case once a release has waited `MAX_WAIT_HOURS` (24), counted from the first release still waiting.
 5. It points `/opt/blackpearl` at the new folder, restarts the service, and waits up to a minute for `/health` and for `status.json` to report the new version. If the build doesn't come up, it goes back to the previous folder, prints the failed build's log lines, and skips that version until a newer one is released.
 6. It keeps the three newest releases.
 

@@ -41,9 +41,11 @@ log() { echo "$*"; }
 newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]; }
 json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 
-mkdir -p "$STATE" "$RELEASES"
-exec 9>"$STATE/lock"
-flock -n 9 || { log "Another update is running."; exit 0; }
+if ! $check; then
+    mkdir -p "$STATE" "$RELEASES"
+    exec 9>"$STATE/lock"
+    flock -n 9 || { log "Another update is running."; exit 0; }
+fi
 
 # The running build. Builds installed by hand before this updater have no version file, so any release is newer.
 current=$(cat "$INSTALL/.blackpearl-version" 2>/dev/null || echo 0.0.0)
@@ -105,13 +107,18 @@ fi
 # When to switch. A restart disconnects everyone in a room; their apps enter again by themselves.
 pending=$STATE/pending-$version
 [ -e "$pending" ] || $check || date +%s > "$pending"
-since=$(cat "$pending" 2>/dev/null || date +%s)
+# The wait counts from the first release still waiting, so releases that follow each other quickly can't put it off.
+since=$(cat "$STATE"/pending-* 2>/dev/null | sort -n | head -n 1)
+since=${since:-$(date +%s)}
 running_protocols=$(curl -fsS --max-time 10 "$HEALTH" 2>/dev/null | json "' '.join(map(str, d.get('protocols', [])))" 2>/dev/null || true)
 new_protocols=$( (cat "$target/.blackpearl-describe.json" 2>/dev/null || echo '{"protocols":[]}') | json "' '.join(map(str, d['protocols']))")
 reason=
-for protocol in $new_protocols; do
-    [[ " $running_protocols " == *" $protocol "* ]] || reason="it speaks room protocol $protocol, which the running service does not"
-done
+# A service that doesn't answer now gives no protocols to compare; whether anyone is in a room decides then.
+if [ -n "$running_protocols" ]; then
+    for protocol in $new_protocols; do
+        [[ " $running_protocols " == *" $protocol "* ]] || reason="it speaks room protocol $protocol, which the running service does not"
+    done
+fi
 if [ -z "$reason" ]; then
     people=$(python3 - "$DATA/status.json" <<'EOF' 2>/dev/null || echo unknown
 import json, sys, time
