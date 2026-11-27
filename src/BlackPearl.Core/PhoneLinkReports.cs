@@ -40,10 +40,9 @@ public static class PhoneLinkReports
     /// <summary>How often the PC pings a phone that answers pings: twenty round trips a window, and little for a locked phone
     /// to wake for.</summary>
     public static TimeSpan PingInterval { get; set; } = TimeSpan.FromSeconds(30);
-    /// <summary>A window with no reads in it (only pings, as with a phone left connected in the background all day) goes at most
-    /// this often; one with reads, or the one that ends a link, always.</summary>
+    /// <summary>A link's window with no reads in it (only pings, as with a phone left connected in the background all day) goes at
+    /// most this often; one with reads, or the one that ends a link, always.</summary>
     public static readonly TimeSpan IdleInterval = TimeSpan.FromHours(1);
-    private static long idleSent = long.MinValue;
     /// <summary>A setup that ended without the phone's hello goes once per reason this often.</summary>
     public static readonly TimeSpan FailureInterval = TimeSpan.FromMinutes(30);
     private static readonly Dictionary<string, long> failedAt = [];
@@ -58,15 +57,6 @@ public static class PhoneLinkReports
         }
     }
     internal static void ForgetFailures() { lock (failedAt) failedAt.Clear(); }
-    internal static bool MayReportIdle(long now)
-    {
-        lock (typeof(PhoneLinkReports))
-        {
-            if (idleSent != long.MinValue && Stopwatch.GetElapsedTime(idleSent, now) < IdleInterval) return false;
-            idleSent = now;
-            return true;
-        }
-    }
     /// <summary>A ping not answered within this long counts as unanswered; an answer after it counts for nothing.</summary>
     public static readonly TimeSpan PongWait = TimeSpan.FromSeconds(10);
 
@@ -154,7 +144,7 @@ internal sealed class PhoneLinkStats
         {
             Expire(now);
             var window = new PhoneLinkWindow(path, via, app, end, Stopwatch.GetElapsedTime(windowStarted, now), age,
-                pings, pongs, unanswered, Percentile(rtts, 0.5), Percentile(rtts, 0.9), rtts.Count == 0 ? null : rtts.Max(),
+                pings, pongs, unanswered, Percentile(rtts, 0.5), Percentile(rtts, 0.9), Percentile(rtts, 1),
                 bytes, reads, busy, Percentile(waits, 0.5), Percentile(waits, 0.9), trace);
             rtts.Clear(); waits.Clear();
             pings = pongs = unanswered = reads = busy = 0; bytes = 0;

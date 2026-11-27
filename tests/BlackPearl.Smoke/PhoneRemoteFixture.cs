@@ -324,6 +324,16 @@ static class PhoneRemoteFixture
         stats.PingSent(start + Seconds(21));
         stats.Take(start + Seconds(40), "relay", "server", null, "open", TimeSpan.Zero, null);
         check(!stats.Measured, "a window with only unanswered pings isn't reported");
+        // Round trips with more digits than are sent: the 90th percentile of few samples is their largest, rounded as the
+        // largest is, so it never comes out above it.
+        var fine = new PhoneLinkStats();
+        foreach (var (n, ms) in new[] { (0, 0.8123), (1, 2.4839) })
+        {
+            var sent = start + Seconds(50 + n);
+            fine.Pong(fine.PingSent(sent), sent + (long)(ms / 1000 * System.Diagnostics.Stopwatch.Frequency));
+        }
+        var rounded = fine.Take(start + Seconds(60), "direct", "lan", null, "open", TimeSpan.Zero, null);
+        check(rounded.RttP90 <= rounded.RttMax && rounded.RttMax == 2.5, $"a window's largest round trip is rounded as its percentiles are ({rounded.RttMedian}/{rounded.RttP90}/{rounded.RttMax})");
         check(PhoneLinkStats.Percentile([1, 2, 3, 4], 0.5) == 2 && PhoneLinkStats.Percentile([.. Enumerable.Range(1, 10).Select(i => (double)i)], 0.9) == 9 && PhoneLinkStats.Percentile([], 0.5) is null,
             "link percentiles take the nearest rank");
         check(PhoneRemoteDiagnostics.AppVersion("0.13.0+31") == "0.13.0+31" && PhoneRemoteDiagnostics.AppVersion("C:\\Users\\Ann") == "other" && PhoneRemoteDiagnostics.AppVersion(null) is null,

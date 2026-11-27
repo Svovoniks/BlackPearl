@@ -214,6 +214,8 @@ public sealed class PhoneRemoteSession
     internal object? WindowTrace { get; set; }
     internal int ConnectReported;
     internal readonly object ReportGate = new();
+    // When this link last sent a window with only pings (PhoneLinkReports.IdleInterval).
+    internal long IdleSent = long.MinValue;
     internal string Path => Routed ? Relayed ? "relay" : "direct" : "none";
     internal string Via => ViaLan ? "lan" : "server";
 }
@@ -287,20 +289,25 @@ internal static class PhoneRemoteDiagnostics
     public static void WindowEnded(PhoneRemoteSession session, string end, bool start)
     {
         PhoneLinkWindow window;
-        bool measured;
-        long now;
+        bool send;
         lock (session.ReportGate)
         {
             // The ping timer's turn came as the session closed: the close reports its window.
             if (start && Volatile.Read(ref session.ClosedLogged) != 0) return;
-            now = System.Diagnostics.Stopwatch.GetTimestamp();
-            measured = session.Stats.Measured;
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var measured = session.Stats.Measured;
             window = session.Stats.Take(now, session.Path, session.Via, session.App, end, TimeSpan.FromMilliseconds(session.Age), session.WindowTrace);
             session.WindowTrace = start ? PhoneLinkReports.Start(PhoneLinkReports.WindowStarting) : null;
+            send = measured && window.Trace is not null;
+            // Only pings, as with a phone connected in the background all day: this link's once an hour
+            // (PhoneLinkReports.IdleInterval). Counted only for a window that would go.
+            if (send && end == "open" && window.Reads == 0)
+            {
+                if (session.IdleSent != long.MinValue && System.Diagnostics.Stopwatch.GetElapsedTime(session.IdleSent, now) < PhoneLinkReports.IdleInterval) send = false;
+                else session.IdleSent = now;
+            }
         }
-        // Only pings, as with a phone connected in the background all day: once an hour (PhoneLinkReports.IdleInterval).
-        if (measured && end == "open" && window.Reads == 0 && !PhoneLinkReports.MayReportIdle(now)) return;
-        if (measured && window.Trace is not null && PhoneLinkReports.Windows is { } sink) PhoneLinkReports.Safe(() => sink(window));
+        if (send && PhoneLinkReports.Windows is { } sink) PhoneLinkReports.Safe(() => sink(window));
     }
 
     // The first window, once the phone's hello is accepted.
