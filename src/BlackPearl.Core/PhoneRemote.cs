@@ -204,6 +204,20 @@ public sealed class PhoneRemoteSession
     // ICE candidates by type (host, srflx, prflx, relay): this PC's, and the phone's.
     internal readonly int[] LocalCandidates = new int[4], RemoteCandidates = new int[4];
     internal int ClosedLogged;
+
+    // For link reports (PhoneLinkReports): the phone app's version from its hello, whether it answers the PC's pings, and
+    // the numbers and traces of its setup and of its current window.
+    internal string? App { get; set; }
+    internal bool AnswersPings { get; set; }
+    internal PhoneLinkStats Stats { get; } = new();
+    internal object? ConnectTrace { get; set; }
+    internal object? WindowTrace { get; set; }
+    internal int ConnectReported;
+    internal readonly object ReportGate = new();
+    // When this link last sent a window with only pings (PhoneLinkReports.IdleInterval).
+    internal long IdleSent = long.MinValue;
+    internal string Path => Routed ? Relayed ? "relay" : "direct" : "none";
+    internal string Via => ViaLan ? "lan" : "server";
 }
 
 // What the phone remote writes to the diagnostics log (logs/diagnostics.jsonl), so a phone that can't connect can be
@@ -250,10 +264,72 @@ internal static class PhoneRemoteDiagnostics
         PlaybackDiagnostics.Record("remote-session-closed", new
         {
             session = session.LogId, phone = session.LogPhone, reason, ms = session.Age, greeted = session.Greeted,
-            path = session.Routed ? session.Relayed ? "relay" : "direct" : "none", via = session.ViaLan ? "lan" : "server",
+            path = session.Path, via = session.Via,
             local = Candidates(session.LocalCandidates), remote = Candidates(session.RemoteCandidates),
         });
+        ConnectEnded(session, reason);
+        if (session.Greeted) WindowEnded(session, reason, start: false);
     }
+
+    // The session's setup, reported once: when the phone's hello is accepted, or with the reason it closed before.
+    public static void ConnectEnded(PhoneRemoteSession session, string outcome)
+    {
+        if (Interlocked.Exchange(ref session.ConnectReported, 1) != 0) return;
+        var trace = session.ConnectTrace;
+        session.ConnectTrace = null;
+        if (trace is null || PhoneLinkReports.Connects is not { } sink) return;
+        // A phone that keeps failing to link up would send one per try: the same reason goes once a half hour.
+        if (outcome != "greeted" && !PhoneLinkReports.MayReportFailure(outcome)) return;
+        var report = new PhoneConnectReport(outcome, session.SignalAs == "pair", session.Via, session.Path, session.App,
+            Candidates(session.LocalCandidates), Candidates(session.RemoteCandidates), trace);
+        PhoneLinkReports.Safe(() => sink(report));
+    }
+
+    // The window so far goes out, if anything was measured in it; [start] begins the next one.
+    public static void WindowEnded(PhoneRemoteSession session, string end, bool start)
+    {
+        PhoneLinkWindow window;
+        bool send;
+        lock (session.ReportGate)
+        {
+            // The ping timer's turn came as the session closed: the close reports its window.
+            if (start && Volatile.Read(ref session.ClosedLogged) != 0) return;
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var measured = session.Stats.Measured;
+            window = session.Stats.Take(now, session.Path, session.Via, session.App, end, TimeSpan.FromMilliseconds(session.Age), session.WindowTrace);
+            session.WindowTrace = start ? PhoneLinkReports.Start(PhoneLinkReports.WindowStarting) : null;
+            send = measured && window.Trace is not null;
+            // Only pings, as with a phone connected in the background all day: this link's once an hour
+            // (PhoneLinkReports.IdleInterval). Counted only for a window that would go.
+            if (send && end == "open" && window.Reads == 0)
+            {
+                if (session.IdleSent != long.MinValue && System.Diagnostics.Stopwatch.GetElapsedTime(session.IdleSent, now) < PhoneLinkReports.IdleInterval) send = false;
+                else session.IdleSent = now;
+            }
+        }
+        if (send && PhoneLinkReports.Windows is { } sink) PhoneLinkReports.Safe(() => sink(window));
+    }
+
+    // The first window, once the phone's hello is accepted.
+    public static void WindowBegan(PhoneRemoteSession session)
+    {
+        lock (session.ReportGate)
+        {
+            if (Volatile.Read(ref session.ClosedLogged) != 0) return;
+            session.Stats.Take(System.Diagnostics.Stopwatch.GetTimestamp(), "", "", null, "", TimeSpan.Zero, null);
+            session.WindowTrace = PhoneLinkReports.Start(PhoneLinkReports.WindowStarting);
+        }
+    }
+
+    // The session's setup reached a stage: "connected" (ICE), then "channel" (remote-v1 open).
+    public static void ConnectStage(PhoneRemoteSession session, string stage)
+    {
+        if (session.ConnectTrace is { } trace && PhoneLinkReports.ConnectStage is { } sink) PhoneLinkReports.Safe(() => sink(trace, stage));
+    }
+
+    // A phone app's version as its hello gives it, or "other" for anything that doesn't look like one.
+    public static string? AppVersion(string? app) =>
+        app is null ? null : System.Text.RegularExpressions.Regex.IsMatch(app, @"^[0-9A-Za-z][0-9A-Za-z.+\-]{0,39}$") ? app : "other";
 }
 
 public sealed class PhoneRemoteHost : IDisposable
@@ -319,6 +395,28 @@ public sealed class PhoneRemoteHost : IDisposable
         lock (gate) PlaybackDiagnostics.Record("remote-start", new { pc = PcId[..8], phones = phones.Count, app = options.AppVersion });
         running = Task.Run(() => RunAsync(lifetime.Token));
         lan?.Start();
+        pinger = new Timer(_ => Measure(), null, PhoneLinkReports.PingInterval, PhoneLinkReports.PingInterval);
+    }
+
+    // Times each link that phones let it (PHONE-REMOTE.md, "Measuring the link"): a ping to every phone that answers them, and
+    // the window so far reported once it has lasted its time.
+    private Timer? pinger;
+    private void Measure()
+    {
+        // Pings are only for the reports: none while crash reports are off, or in a build that sends none.
+        if (PhoneLinkReports.Windows is null) return;
+        try
+        {
+            PhoneRemoteSession[] open;
+            lock (gate) open = sessions.Values.Where(s => s.Open).ToArray();
+            foreach (var session in open)
+            {
+                if (session.AnswersPings) Send(session, Wire.Serialize(new { type = "ping", number = session.Stats.PingSent(System.Diagnostics.Stopwatch.GetTimestamp()) }));
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(session.Stats.WindowStarted) >= PhoneLinkReports.Window) PhoneRemoteDiagnostics.WindowEnded(session, "open", start: true);
+            }
+        }
+        // A timer's exception would end the process; a missed ping or window costs nothing.
+        catch (Exception ex) { PlaybackDiagnostics.Record("remote-measure-failed", new { error = ex.GetType().Name }); }
     }
 
     // A new one-use pairing link, valid for ten minutes; the previous one stops working.
@@ -637,7 +735,7 @@ public sealed class PhoneRemoteHost : IDisposable
             IceServers = servers, MaxMessageSize = 65536, Mtu = 1200,
             TransportPolicy = relay ? rtcTransportPolicy.RTC_TRANSPORT_POLICY_RELAY : rtcTransportPolicy.RTC_TRANSPORT_POLICY_ALL
         });
-        var session = new PhoneRemoteSession(phoneId, sessionId, peer, key, connection) { ViaLan = viaLan };
+        var session = new PhoneRemoteSession(phoneId, sessionId, peer, key, connection) { ViaLan = viaLan, ConnectTrace = PhoneLinkReports.Start(PhoneLinkReports.Connecting) };
         PhoneRemoteSession? overwritten;
         lock (gate) { sessions.Remove(sessionKey, out overwritten); sessions[sessionKey] = session; }
         // Signals are handled one at a time, so nothing should be here; if something is, it is closed rather than lost
@@ -657,6 +755,7 @@ public sealed class PhoneRemoteHost : IDisposable
                 session.Routed = true;
                 session.Relayed = pair.LocalCandidate?.Contains("typ relay") == true || pair.RemoteCandidate?.Contains("typ relay") == true;
             }
+            if (state == rtcState.RTC_CONNECTED) PhoneRemoteDiagnostics.ConnectStage(session, "connected");
             var name = state.ToString().Replace("RTC_", "", StringComparison.Ordinal).ToLowerInvariant();
             PlaybackDiagnostics.Record("remote-session-state", new
             {
@@ -691,6 +790,7 @@ public sealed class PhoneRemoteHost : IDisposable
         if (channel.Label != PhoneRemoteProtocol.Label || session.Channel is not null) { try { channel.Dispose(); } catch { } return; }
         session.Channel = channel;
         PlaybackDiagnostics.Record("remote-session-channel", new { session = session.LogId, ms = session.Age });
+        PhoneRemoteDiagnostics.ConnectStage(session, "channel");
         channel.OnClose += _ => Drop(sessionKey, session, "channel-closed");
         channel.OnTextReceivedSafe += (_, text) =>
         {
@@ -723,12 +823,18 @@ public sealed class PhoneRemoteHost : IDisposable
                     Close(session, "protocol"); return;
                 }
                 session.Device = Text(message, "device") is { Length: > 0 and <= 80 } device ? device : null;
+                session.App = PhoneRemoteDiagnostics.AppVersion(app);
+                // A phone that answers the PC's pings, so the PC can time the link too (PHONE-REMOTE.md, "Measuring the link").
+                session.AnswersPings = message.TryGetProperty("features", out var phoneFeatures) && phoneFeatures.ValueKind == JsonValueKind.Array &&
+                    phoneFeatures.EnumerateArray().Any(f => f.ValueKind == JsonValueKind.String && f.GetString() == "ping");
                 // Where phones reach this PC on the home network, while it listens there (PHONE-REMOTE.md, "On the home
                 // network"). Left out otherwise, so a phone keeps the place it knew: the other BlackPearl process may
                 // have it again in a moment.
                 Send(session, PhoneRemoteHost.Welcome(options, PcId, lan?.Advertised()));
                 session.Greeted = true;
-                PlaybackDiagnostics.Record("remote-session-greeted", new { session = session.LogId, phone = session.LogPhone, app, ms = session.Age });
+                PlaybackDiagnostics.Record("remote-session-greeted", new { session = session.LogId, phone = session.LogPhone, app, ms = session.Age, pings = session.AnswersPings });
+                PhoneRemoteDiagnostics.ConnectEnded(session, "greeted");
+                PhoneRemoteDiagnostics.WindowBegan(session);
                 if (session.PhoneId != "pair") { Seen(session.PhoneId); SendState(session); }
                 Changed?.Invoke();
                 break;
@@ -775,7 +881,11 @@ public sealed class PhoneRemoteHost : IDisposable
             case "ping" when session.Greeted:
                 Send(session, Wire.Serialize(new { type = "pong", number = message.TryGetProperty("number", out var n) && n.TryGetInt64(out var ping) ? ping : 0 }));
                 break;
-            case { Length: > 0 and <= 40 } type when session.Greeted && session.PhoneId != "pair" && type is not ("hello" or "pair" or "command" or "clock" or "ping"):
+            // The answer to the PC's own ping (PHONE-REMOTE.md, "Measuring the link"), timed here on the native thread too.
+            case "pong" when session.Greeted:
+                if (message.TryGetProperty("number", out var answered) && answered.TryGetInt64(out var pong)) session.Stats.Pong(pong, System.Diagnostics.Stopwatch.GetTimestamp());
+                break;
+            case { Length: > 0 and <= 40 } type when session.Greeted && session.PhoneId != "pair" && type is not ("hello" or "pair" or "command" or "clock" or "ping" or "pong"):
                 Request?.Invoke(session, type, message.Clone());
                 break;
         }
@@ -838,6 +948,7 @@ public sealed class PhoneRemoteHost : IDisposable
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         lifetime.Cancel();
+        pinger?.Dispose();
         PhoneRemoteSession[] open;
         // The listener first, so no signal arrives on it after the sessions are closed; one already being handled
         // finishes before the sessions are collected, as signals are handled one at a time.

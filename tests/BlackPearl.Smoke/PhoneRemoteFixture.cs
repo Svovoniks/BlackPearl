@@ -47,6 +47,7 @@ static class PhoneRemoteFixture
         check(PhoneProgress.From(2516000, 2696000, false, false) == new PhoneProgress(2516000, true, false) &&
             PhoneProgress.From(2400000, 2696000, false, false, final: true) == new PhoneProgress(2400000, true, false) && !PhoneProgress.From(100, 0, false, false, final: true).Ended,
             "a pause in the credits, or leaving a video before its last tenth, keeps its resume point");
+        LinkStats(check);
         await HostlessRoomFixture.WithServer(sdk, serverDll, directory, "phone-remote", async url => { await Exercise(url, check); await PhoneHostFixture.Run(url, directory, check); await PhoneLanFixture.Replays(url, check); });
         await OtherServers(check);
         await PhoneLanFixture.Run(check);
@@ -117,6 +118,18 @@ static class PhoneRemoteFixture
         var commands = Channel.CreateUnbounded<RemoteCommand>();
         host.Command += (_, command) => commands.Writer.TryWrite(command);
         host.CurrentState = () => new RemoteState(true, "Night Signal", "Season 2 · Episode 3", Playing: false, PositionMs: 1000, DurationMs: 60000, Volume: 40);
+        // Link reports (PHONE-REMOTE.md, "Measuring the link"), with pings and windows quicker than the app's.
+        var connects = new ConcurrentQueue<PhoneConnectReport>();
+        var windows = new ConcurrentQueue<PhoneLinkWindow>();
+        var (pingInterval, windowLength) = (PhoneLinkReports.PingInterval, PhoneLinkReports.Window);
+        PhoneLinkReports.PingInterval = TimeSpan.FromMilliseconds(250);
+        PhoneLinkReports.Window = TimeSpan.FromSeconds(2);
+        PhoneLinkReports.Connecting = () => new ConcurrentQueue<string>();
+        PhoneLinkReports.ConnectStage = (trace, stage) => ((ConcurrentQueue<string>)trace).Enqueue(stage);
+        PhoneLinkReports.Connects = connects.Enqueue;
+        PhoneLinkReports.WindowStarting = () => new object();
+        PhoneLinkReports.Windows = windows.Enqueue;
+        PhoneLinkReports.ForgetFailures();
         host.Start();
         check(await Until(() => host.ServerReady, 10000), "the PC connects to the room server for phones");
         check(await early.Next("remote-online") is not null, "a waiting phone hears when its PC comes online");
@@ -166,6 +179,9 @@ static class PhoneRemoteFixture
                 "pairing gives the phone its own id and secret, and the PC keeps them");
             check(await pairing.Next("state") is { } first && first.GetProperty("title").GetString() == "Night Signal", "a newly paired phone gets the player's state at once");
             check(!host.PairingOpen, "a pairing code works once");
+            // Its hello didn't say it answers pings, as BlackPearl Mobile's before them didn't: the PC never pings it.
+            await Task.Delay(800);
+            check(pairing.PcPings == 0, "the PC doesn't ping a phone whose hello doesn't say it answers");
         }
 
         await using (var reuse = await FakePhone.Connect(url, pcId, "pair", code))
@@ -177,7 +193,7 @@ static class PhoneRemoteFixture
         await using (var phone = await FakePhone.Connect(url, pcId, phoneId, secret))
         {
             check(await phone.Opened(), "a paired phone connects with its own secret");
-            phone.Send(new { type = "hello", protocol = 1, app = "test", device = "Test phone" });
+            phone.Send(new { type = "hello", protocol = 1, app = "test", device = "Test phone", features = new[] { "ping" } });
             check(await phone.Next("welcome") is not null && await phone.Next("state") is { } state && state.GetProperty("volume").GetInt32() == 40, "a paired phone is welcomed and sent the state");
             check(await Until(() => host.Connected.Count == 1 && host.Connected[0].PhoneId == phoneId, 5000), "the PC lists the connected phone");
             phone.Send(new { type = "command", action = "seek-by", value = -10000 });
@@ -216,11 +232,28 @@ static class PhoneRemoteFixture
             // A phone checks its link with pings (PHONE-REMOTE.md, "Checking the link").
             phone.Send(new { type = "ping", number = 12 });
             check(await phone.Next("pong") is { } pong && pong.GetProperty("number").GetInt64() == 12, "the PC answers a phone's ping with its number");
+            // The PC times the link as well (PHONE-REMOTE.md, "Measuring the link"): how it was set up, then its round trips and reads.
+            check(connects.Any(c => c is { Outcome: "greeted", Pairing: true, PhoneApp: "test" }) &&
+                connects.Any(c => c is { Outcome: "greeted", Pairing: false, Via: "server", Path: "direct", PhoneApp: "test" } && c.Trace is ConcurrentQueue<string> stages && stages.Contains("connected") && stages.Contains("channel")),
+                "the PC reports how each phone's link was set up: its stages, its path, and the phone app's version");
+            check(await Until(() => phone.PcPings > 0 && windows.Any(w => w is { Pongs: > 0, RttMedian: > 0, Path: "direct", Via: "server", End: "open" } && w.RttP90 >= w.RttMedian && w.RttMax >= w.RttP90), 8000),
+                "the PC pings a phone whose hello says it answers, and reports the round trips in stretches while the link stays open");
+            check(await Until(() => windows.Sum(w => w.Reads) >= 3 && windows.Sum(w => w.MediaBytes) == 262144 + 10 && windows.Sum(w => w.Busy) >= 1 && windows.Any(w => w.ReadWaitMedian >= 0), 8000),
+                $"the PC's link reports count the reads it answered, their bytes, and the ones it was too busy for ({string.Join("; ", windows.Select(w => $"{w.Reads} reads {w.MediaBytes} bytes {w.Busy} busy"))})");
+            check(windows.All(w => w.Measurements.Count <= PhoneLinkWindow.MeasurementLimit), "a link report sets no more measurements than Sentry keeps");
+            // Windows of 2 seconds here, so a dozen have passed: those with only pings go once an hour.
+            await Task.Delay(3000);
+            check(windows.Count(w => w is { End: "open", Reads: 0 }) <= 1, $"stretches with only pings are reported once an hour ({windows.Count(w => w is { End: "open", Reads: 0 })} sent)");
             // The pairing link closing counted too; this counts only the paired phone's.
             Interlocked.Exchange(ref disconnected, 0);
             host.Forget(phoneId);
             check(await phone.Closed() && await Until(() => disconnected == 1, 5000), "removing a phone closes its link and tells the PC it went");
+            check(await Until(() => windows.Any(w => w.End == "removed"), 3000), "the link's last stretch is reported with why it closed");
         }
+        check(connects.Count(c => c.Outcome == "greeted") == 2 && connects.Any(c => c.Outcome == "unreadable-offer"),
+            "only the links that reached a phone's hello report as greeted, and one that failed says why");
+        check(PhoneLinkReports.MayReportFailure("check-reason") && !PhoneLinkReports.MayReportFailure("check-reason") && PhoneLinkReports.MayReportFailure("other-check-reason"),
+            "a setup that failed for the same reason goes once a half hour; another reason still goes");
         // A copy of this library running elsewhere, with the same host key, takes the phone remote over. The first one
         // says why and waits, rather than the two replacing each other every second.
         using (var twin = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Copy", AppVersion = "0.0.0-test", Store = new MemoryStore() }))
@@ -259,6 +292,52 @@ static class PhoneRemoteFixture
             "the log follows a phone's session from offer to close: connected directly, greeted, and closed because the phone was removed");
         check(Has("remote-session-paired", _ => true) && Has("remote-session-refused", r => Field(r, "reason") == "already-paired"), "the log records pairing, and a paired phone's refused second pairing");        check(Has("phone-read-failed", r => Field(r, "resource") == "file" && Field(r, "error") == "UnauthorizedAccessException"), "a read the PC can't answer is logged with the kind of resource asked for");
         check(!new[] { hostKey, secret, code, phoneId, pcId }.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)), "the phone remote's log holds no keys, secrets, codes or whole ids");
+        PhoneLinkReports.PingInterval = pingInterval; PhoneLinkReports.Window = windowLength;
+        PhoneLinkReports.Connecting = null; PhoneLinkReports.ConnectStage = null; PhoneLinkReports.Connects = null; PhoneLinkReports.WindowStarting = null; PhoneLinkReports.Windows = null;
+    }
+
+    // The numbers a link report is made of (PhoneLinkStats), with made-up times.
+    static void LinkStats(Action<bool, string> check)
+    {
+        long Seconds(double s) => (long)(s * System.Diagnostics.Stopwatch.Frequency);
+        var stats = new PhoneLinkStats();
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        var first = stats.PingSent(start);
+        var second = stats.PingSent(start + Seconds(1));
+        var third = stats.PingSent(start + Seconds(2));
+        check(stats.Pong(first, start + Seconds(0.040)) && stats.Pong(second, start + Seconds(1.020)) && !stats.Pong(second, start + Seconds(1.5)) && !stats.Pong(99, start + Seconds(2)),
+            "a pong times the ping it answers, once; one for a ping never sent counts for nothing");
+        check(!stats.Pong(third, start + Seconds(13)), "an answer that comes after the wait counts for nothing");
+        stats.Served(262144, TimeSpan.FromMilliseconds(30));
+        stats.Served(10, TimeSpan.FromMilliseconds(5));
+        stats.Busy();
+        var window = stats.Take(start + Seconds(14), "relay", "server", "0.13.0", "open", TimeSpan.FromMinutes(3), null);
+        check(window is { Pings: 3, Pongs: 2, Unanswered: 1, RttMedian: 20.0, RttMax: 40.0, MediaBytes: 262154, Reads: 2, Busy: 1, ReadWaitMedian: 5.0, ReadWaitP90: 30.0 } &&
+            Math.Abs(window.Duration.TotalSeconds - 14) < 0.01,
+            $"a link window has its round trips, unanswered pings, reads and bytes ({window})");
+        check(window.Measurements.Count <= PhoneLinkWindow.MeasurementLimit && window.Measurements.Select(m => m.Name).Distinct().Count() == window.Measurements.Count,
+            "a link window sets no more measurements than Sentry keeps");
+        var next = stats.Take(start + Seconds(20), "relay", "server", null, "open", TimeSpan.Zero, null);
+        check(next is { Pings: 0, Pongs: 0, Reads: 0, RttMedian: null } && !next.Measurements.Any(m => m.Name.StartsWith("rtt")) && !stats.Measured,
+            "the next window starts empty, and leaves out round trips nothing measured");
+        // Pings a locked phone leaves unanswered alone don't make a window worth sending.
+        stats.PingSent(start + Seconds(21));
+        stats.Take(start + Seconds(40), "relay", "server", null, "open", TimeSpan.Zero, null);
+        check(!stats.Measured, "a window with only unanswered pings isn't reported");
+        // Round trips with more digits than are sent: the 90th percentile of few samples is their largest, rounded as the
+        // largest is, so it never comes out above it.
+        var fine = new PhoneLinkStats();
+        foreach (var (n, ms) in new[] { (0, 0.8123), (1, 2.4839) })
+        {
+            var sent = start + Seconds(50 + n);
+            fine.Pong(fine.PingSent(sent), sent + (long)(ms / 1000 * System.Diagnostics.Stopwatch.Frequency));
+        }
+        var rounded = fine.Take(start + Seconds(60), "direct", "lan", null, "open", TimeSpan.Zero, null);
+        check(rounded.RttP90 <= rounded.RttMax && rounded.RttMax == 2.5, $"a window's largest round trip is rounded as its percentiles are ({rounded.RttMedian}/{rounded.RttP90}/{rounded.RttMax})");
+        check(PhoneLinkStats.Percentile([1, 2, 3, 4], 0.5) == 2 && PhoneLinkStats.Percentile([.. Enumerable.Range(1, 10).Select(i => (double)i)], 0.9) == 9 && PhoneLinkStats.Percentile([], 0.5) is null,
+            "link percentiles take the nearest rank");
+        check(PhoneRemoteDiagnostics.AppVersion("0.13.0+31") == "0.13.0+31" && PhoneRemoteDiagnostics.AppVersion("C:\\Users\\Ann") == "other" && PhoneRemoteDiagnostics.AppVersion(null) is null,
+            "a link report names the phone app's version, and nothing that isn't one");
     }
 
     // Drives a running BlackPearl as a paired phone would, for trying the desktop app by hand: each step is a command

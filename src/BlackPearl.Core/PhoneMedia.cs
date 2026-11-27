@@ -48,7 +48,8 @@ internal sealed class PhoneMediaServer : IDisposable
     private readonly CancellationTokenSource lifetime = new();
     private int disposed;
 
-    private sealed record Request(uint Id, string Resource, long Offset, int Count, CancellationTokenSource Cancellation);
+    // Received: when the request arrived (Stopwatch), for how long it waited before its first frame went out.
+    private sealed record Request(uint Id, string Resource, long Offset, int Count, CancellationTokenSource Cancellation, long Received);
 
     public PhoneMediaServer(PhoneRemoteSession session, IRtcDataChannel channel, PhoneResourceResolver? resolve)
     {
@@ -81,10 +82,11 @@ internal sealed class PhoneMediaServer : IDisposable
             {
                 if (!active.TryAdd(id, cancellation)) { cancellation.Dispose(); return; }
             }
-            if (!requests.Writer.TryWrite(new(id, resource, offset, count, cancellation)))
+            if (!requests.Writer.TryWrite(new(id, resource, offset, count, cancellation, System.Diagnostics.Stopwatch.GetTimestamp())))
             {
                 lock (active) active.Remove(id);
                 cancellation.Dispose();
+                session.Stats.Busy();
                 Fail(id, "busy", "The PC is busy. Ask again.");
             }
         }
@@ -125,6 +127,7 @@ internal sealed class PhoneMediaServer : IDisposable
                     BinaryPrimitives.WriteInt64LittleEndian(frame.AsSpan(16), result.Resource.Length);
                     // An empty reply (a read past the end) is one frame with no data.
                     var offset = 0;
+                    var waited = System.Diagnostics.Stopwatch.GetElapsedTime(request.Received);
                     do
                     {
                         var count = Math.Min(FrameBytes, bytes.Length - offset);
@@ -133,9 +136,10 @@ internal sealed class PhoneMediaServer : IDisposable
                         channel.Send(frame.AsSpan(0, HeaderBytes + count));
                         offset += count;
                     } while (offset < bytes.Length && !request.Cancellation.IsCancellationRequested);
+                    session.Stats.Served(offset, waited);
                 }
                 catch (OperationCanceledException) when (request.Cancellation.IsCancellationRequested && !lifetime.IsCancellationRequested) { }
-                catch (PhoneResourceBusyException ex) when (!lifetime.IsCancellationRequested) { Fail(request.Id, "busy", ex.Message); }
+                catch (PhoneResourceBusyException ex) when (!lifetime.IsCancellationRequested) { session.Stats.Busy(); Fail(request.Id, "busy", ex.Message); }
                 catch (Exception ex) when (!lifetime.IsCancellationRequested && ex.GetType().Namespace?.StartsWith("DataChannelDotnet") != true)
                 {
                     PlaybackDiagnostics.Record("phone-read-failed", new { error = ex.GetType().Name, session = session.LogId, resource = ResourceKind(request.Resource), offset = request.Offset });
