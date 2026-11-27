@@ -209,6 +209,8 @@ public static class ContentAcquisition
             catch (Exception ex) when (ex is JsonException or InvalidDataException or IOException or UnauthorizedAccessException)
             { problems.Add($"{name}: plugin.json can't be read: {ex.Message}"); }
         }
+        // Settings shows each problem; the log only says there were some, since they quote folders and plugin.json.
+        if (problems.Count > 0) PlaybackDiagnostics.Record("acquisition-plugin-problems", new { plugins = plugins.Count, problems = problems.Count });
         return (plugins, problems);
     }
 
@@ -314,8 +316,20 @@ public static class ContentAcquisition
 
     // Runs the plugin with the request on standard input, also saved to the file named by BLACKPEARL_REQUEST_FILE.
     // Success is exit code 0 unless the last line printed is JSON with success or status; its message is shown to the user.
+    // Each run is logged with what was asked (scope, content type, action, how many episodes or releases) and how it
+    // ended: the plugin didn't start, didn't finish in time, was stopped, or exited, with its exit code, whether it
+    // succeeded, its stage and how many choices it offered. Never the title, folders or the plugin's message.
     public static async Task<AcquisitionResult> RunAsync(AcquisitionPlugin plugin, AcquisitionRequest request, CancellationToken ct)
     {
+        var started = Stopwatch.StartNew();
+        AcquisitionResult Done(AcquisitionResult result, string outcome, int? exit = null)
+        {
+            PlaybackDiagnostics.Record("acquisition-run", new { plugin = plugin.Id, scope = request.Scope, content = request.ContentType, action = request.Action ?? "get",
+                episodes = request.Episodes.Length, selected = request.SelectedReleases?.Length ?? 0, interactive = plugin.Interactive, outcome, exit, success = result.Success,
+                // The plugin writes its stage; only the documented ones (PLUGINS.md) are recorded as they are.
+                stage = result.Stage is null or "shows" or "releases" ? result.Stage : "other", choices = result.Choices?.Length ?? 0, ms = started.ElapsedMilliseconds });
+            return result;
+        }
         var json = Wire.Serialize(request);
         var requestFile = Path.Combine(Path.GetTempPath(), $"blackpearl-acquire-{Guid.NewGuid():N}.json");
         await File.WriteAllTextAsync(requestFile, json, ct);
@@ -342,8 +356,12 @@ public static class ContentAcquisition
                 start.Environment[prefix + "PLUGIN_DIR"] = plugin.Directory;
             }
             using var process = new Process { StartInfo = start };
-            try { if (!process.Start()) return new(false, $"{plugin.Name} didn't start."); }
-            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { return new(false, $"{plugin.Name} couldn't start: {ex.Message}"); }
+            try { if (!process.Start()) return Done(new(false, $"{plugin.Name} didn't start."), "not-started"); }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                PlaybackDiagnostics.Failed("acquisition-start-failed", ex, new { plugin = plugin.Id }, message: true);
+                return Done(new(false, $"{plugin.Name} couldn't start: {ex.Message}"), "start-failed");
+            }
             var output = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
             var errors = process.StandardError.ReadToEndAsync(CancellationToken.None);
             try { await process.StandardInput.WriteAsync(json); process.StandardInput.Close(); }
@@ -355,10 +373,10 @@ public static class ContentAcquisition
             {
                 // A plugin that exits at this very moment makes stopping it fail in any of these ways.
                 try { process.Kill(entireProcessTree: true); } catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) { }
-                ct.ThrowIfCancellationRequested();
-                return new(false, $"{plugin.Name} didn't finish within {plugin.TimeoutSeconds} seconds.");
+                if (ct.IsCancellationRequested) { Done(new(false, ""), "stopped"); ct.ThrowIfCancellationRequested(); }
+                return Done(new(false, $"{plugin.Name} didn't finish within {plugin.TimeoutSeconds} seconds."), "timeout");
             }
-            return Result(plugin, process.ExitCode, await output, await errors);
+            return Done(Result(plugin, process.ExitCode, await output, await errors), "exited", process.ExitCode);
         }
         finally { try { File.Delete(requestFile); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { } }
     }
@@ -375,7 +393,7 @@ public static class ContentAcquisition
                     || status.Equals("queued", StringComparison.OrdinalIgnoreCase) || status.Equals("started", StringComparison.OrdinalIgnoreCase) : exitCode == 0);
                 return new(success, string.IsNullOrWhiteSpace(response.Message) ? Default(plugin, success, exitCode) : response.Message.Trim(), response.Stage, response.Choices);
             }
-            catch (Exception ex) when (ex is JsonException or InvalidDataException) { }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException) { PlaybackDiagnostics.Failed("acquisition-response-unreadable", ex, new { plugin = plugin.Id }, message: true); }
         }
         var ok = exitCode == 0;
         return new(ok, (ok ? last : Last(errors) ?? last) ?? Default(plugin, ok, exitCode));

@@ -612,8 +612,10 @@ public sealed class PhoneRemoteHost : IDisposable
             if (ice.Candidate is not { Length: > 0 }) return true;
             PhoneRemoteDiagnostics.Count(session.RemoteCandidates, ice.Candidate);
             var line = ice.Candidate.StartsWith("a=", StringComparison.Ordinal) ? ice.Candidate : "a=" + ice.Candidate;
+            // A candidate the native library refuses is one route fewer to the phone; the others still connect.
             try { session.Peer.AddRemoteCandidate(new RtcCandidate { Content = line, Mid = ice.Mid ?? "0" }); }
-            catch (Exception ex) when (ex.GetType().Namespace?.StartsWith("DataChannelDotnet") == true) { }
+            catch (Exception ex) when (ex.GetType().Namespace?.StartsWith("DataChannelDotnet") == true)
+            { PlaybackDiagnostics.Failed("remote-candidate-rejected", ex, new { session = session.LogId }); }
         }
         return true;
     }

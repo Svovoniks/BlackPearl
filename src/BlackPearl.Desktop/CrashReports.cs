@@ -17,7 +17,7 @@ namespace BlackPearl.Desktop;
 // Program.Main starts this before any WPF type loads; nothing here may touch WPF.
 public static class CrashReports
 {
-    private const string OffFile = "crash-reports-off", FileNamesFile = "crash-reports-file-names", CacheFolder = "crash-reports-cache";
+    private const string OffFile = "crash-reports-off", FileNamesFile = "crash-reports-file-names", LogOffFile = "crash-reports-log-off", CacheFolder = "crash-reports-cache";
     // The data folder; checks point it at a folder of their own.
     private static string? dataForCheck;
     private static string Data => dataForCheck ?? Program.DataDirectory;
@@ -36,10 +36,15 @@ public static class CrashReports
     }
     // What a report carries when it names files (see MetadataFailed and MetadataRunEnded).
     private static bool NamesFiles(string envelope) => envelope.Contains("metadata-unmatched-files") || envelope.Contains("\"file\":");
+    // What a report carries when it holds the app's log (WithTrail): Sentry's breadcrumbs, which are otherwise off.
+    private static bool CarriesLog(string envelope) => envelope.Contains("\"breadcrumbs\":");
+    // A report that may not go as it is: it names files with names turned off, or holds the log with the log turned off.
+    private static bool Withheld(string envelope) => !FileNamesAllowed && NamesFiles(envelope) || !LogAllowed && CarriesLog(envelope);
 
     // The SDK's innermost network handler. Reports leave only through it, also those that waited on disk, so it is where
     // turning reports off takes effect at once: while they are off it answers as Sentry would without sending anything, and
-    // the SDK then forgets the report. With file names turned off, a waiting report that names files is dropped the same way.
+    // the SDK then forgets the report. With file names turned off, a waiting report that names files is dropped the same way,
+    // and with the app's log turned off, one that holds the log.
     // A request can wait a while for its connection (Windows retries a refused one for about two seconds), so the choice is
     // checked again once the connection opens: a request that may no longer go fails there, stays on disk, and is dropped by
     // the next attempt.
@@ -64,7 +69,7 @@ public static class CrashReports
             return await base.SendAsync(request, cancellationToken);
         }
         private static async Task<bool> Drops(HttpRequestMessage request, CancellationToken cancellationToken) =>
-            turnedOff || !FileNamesAllowed && request.Content is { } content && NamesFiles(await content.ReadAsStringAsync(cancellationToken));
+            turnedOff || (!FileNamesAllowed || !LogAllowed) && request.Content is { } content && Withheld(await content.ReadAsStringAsync(cancellationToken));
     }
     private static readonly object gate = new();
     private static IDisposable? sdk;
@@ -102,6 +107,22 @@ public static class CrashReports
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         // Waiting reports that name files are not sent once names are turned off.
         if (!allowed) DeleteWaiting(NamesFiles);
+    }
+    // Settings › Updates & about › Send the app's log: errors carry the diagnostics log's latest entries as breadcrumbs
+    // (CrashReportPrivacy.Trail). On unless turned off, and only with reports on.
+    public static bool LogAllowed => !File.Exists(Path.Combine(Data, LogOffFile));
+    public static void SetLogAllowed(bool allowed)
+    {
+        if (allowed == LogAllowed) return;
+        var path = Path.Combine(Data, LogOffFile);
+        try
+        {
+            if (allowed) File.Delete(path);
+            else { Directory.CreateDirectory(Data); File.WriteAllText(path, "Crash reports leave out the app's log (Settings › Updates & about)."); }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        // Waiting reports that hold the log are not sent once it is turned off.
+        if (!allowed) DeleteWaiting(CarriesLog);
     }
 
     // Starts reporting for this process (app, phone-host or follow-check). Disposing it sends what is still queued.
@@ -179,12 +200,22 @@ public static class CrashReports
                 options.TracesSampleRate = environment == "production" ? 0.1 : 1.0;
                 // Every metadata run, so the share of titles left unmatched can be followed; others use the rate above.
                 options.TracesSampler = context => context.TransactionContext.Name == MetadataRunName ? 1.0 : null;
-                options.SetBeforeSend(evt => enabled ? CrashReportPrivacy.Scrub(evt) : null);
+                options.SetBeforeSend(evt => enabled ? WithTrail(CrashReportPrivacy.Scrub(evt)) : null);
                 options.SetBeforeSendTransaction(transaction => enabled ? CrashReportPrivacy.Scrub(transaction) : null);
             });
             SentrySdk.ConfigureScope(scope => scope.SetTag("process", process));
             HookMetadata(true);
         }
+    }
+
+    // Errors and warnings carry what the app recorded in the minutes before, unless the log is turned off: the diagnostics
+    // log's own entries, reduced by CrashReportPrivacy.Trail to their kinds, numbers and fixed codes. Breadcrumbs stay off
+    // otherwise (CrashReportPrivacy.Apply), so these are the only ones. The list of unmatched files (Info) carries none.
+    private static SentryEvent WithTrail(SentryEvent evt)
+    {
+        if (evt.Level is SentryLevel.Debug or SentryLevel.Info || !LogAllowed) return evt;
+        foreach (var crumb in CrashReportPrivacy.Trail(PlaybackDiagnostics.Recent(), Wire.Now)) evt.AddBreadcrumb(crumb);
+        return evt;
     }
 
     // A WPF error the app caught and showed in its "Something went wrong" notice.

@@ -125,6 +125,42 @@ static class CrashReportCacheChecks
                     Thread.Sleep(3000);
                     check(!sentry.Received("cache-check names a file") && !sentry.Received("S01E01.mkv"), "with file names turned off, a waiting report that names a file is never sent");
                 }
+
+                // The app's log: an error carries the diagnostics log's latest entries, reduced to kinds, numbers and codes.
+                BlackPearl.Core.PlaybackDiagnostics.Initialize(Path.Combine(data, "logs"));
+                BlackPearl.Core.PlaybackDiagnostics.Record("room-connect-failed", new { stage = "health", error = "HttpRequestException", path = @"C:\Users\Ann\Videos\Night Show S01E02.mkv", name = "Ann" });
+                // A subtitle file's language, as track detection records it; file names are still off here.
+                BlackPearl.Core.PlaybackDiagnostics.Record("track-language", new { file = true, language = "en", confidence = 0.9 });
+                check(!CrashReports.FileNamesAllowed, "the app's log is checked with file names off");
+                check(CrashReports.LogAllowed, "the app's log goes with crash reports unless it is turned off");
+                SentrySdk.CaptureMessage("cache-check with log", SentryLevel.Error);
+                SentrySdk.CaptureMessage("cache-check info without log");
+                Until(() => Waiting() >= 2, 15);
+                using (var sentry = new FakeSentry(port))
+                {
+                    check(Until(() => sentry.Received("cache-check with log") && sentry.Received("cache-check info without log"), 30), "reports with and without the app's log go out, with file names off and a log entry about a subtitle file");
+                    string Body(string text) { lock (sentry.Bodies) return sentry.Bodies.First(body => body.Contains(text)); }
+                    var withLog = Body("cache-check with log");
+                    check(withLog.Contains("\"breadcrumbs\":") && withLog.Contains("room-connect-failed") && withLog.Contains("\"stage\":\"health\""), "an error report carries the app's log");
+                    check(!withLog.Contains("Night Show") && !withLog.Contains("\"name\":\"Ann\"") && !withLog.Contains("\"path\""), "the app's log leaves out paths and names an entry holds");
+                    check(!Body("cache-check info without log").Contains("\"breadcrumbs\":"), "an informational report carries no log");
+                }
+                // Turned off: a waiting report that holds the log is dropped, and new ones carry none.
+                SentrySdk.CaptureMessage("cache-check log waiting", SentryLevel.Error);
+                Until(() => Waiting() > 0, 15);
+                CrashReports.SetLogAllowed(false);
+                check(!CrashReports.LogAllowed, "the app's log can be turned off");
+                SentrySdk.CaptureMessage("cache-check log off", SentryLevel.Error);
+                Until(() => Waiting() > 0, 15);
+                using (var sentry = new FakeSentry(port))
+                {
+                    check(Until(() => sentry.Received("cache-check log off"), 30), "with the app's log off, error reports still go out");
+                    Thread.Sleep(3000);
+                    check(!sentry.Received("cache-check log waiting"), "with the app's log turned off, a waiting report that holds it is never sent");
+                    lock (sentry.Bodies) check(!sentry.Bodies.Any(body => body.Contains("cache-check log off") && body.Contains("\"breadcrumbs\":")), "with the app's log off, error reports carry no log");
+                }
+                CrashReports.SetLogAllowed(true);
+                check(CrashReports.LogAllowed, "the app's log can be turned back on");
             }
             // Closing the process right after a report: what is queued is still sent, or stays on disk if the 500 ms
             // shutdown runs out, but is never deleted unsent.

@@ -223,6 +223,21 @@ public sealed partial class RoomClient : IAsyncDisposable
     // with persistent off is forgotten once it stays empty.
     public async Task ConnectAsync(string server, string name, string? invitation = null, string? key = null, bool persistent = false, string? roomName = null)
     {
+        try { await EnterAsync(server, name, invitation, key, persistent, roomName); }
+        catch (Exception ex) when (ConnectFailed(ex, invitation is null ? "create" : "enter")) { throw; }
+    }
+    // How far entering got before it failed: checking the address, asking the service's health, opening its socket, or
+    // waiting for the room to let this member in. Neither the address nor the room's code is recorded.
+    private string connectStage = "address";
+    private bool ConnectFailed(Exception error, string action)
+    {
+        // Cancelled by whoever asked to enter, such as the app closing: nothing failed.
+        if (error is OperationCanceledException && lifetime.IsCancellationRequested) return false;
+        PlaybackDiagnostics.Failed("room-connect-failed", error, new { room = diagnosticId, action, stage = connectStage });
+        return false;
+    }
+    private async Task EnterAsync(string server, string name, string? invitation, string? key, bool persistent, string? roomName)
+    {
         server = RoomAddress.ValidateServer(server);
         if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 40 || name.Any(char.IsControl))
             throw new ArgumentException("Enter a display name between 1 and 40 characters in Settings.");
@@ -238,6 +253,7 @@ public sealed partial class RoomClient : IAsyncDisposable
         var builder = new UriBuilder(uri) { Scheme = uri.Scheme == "https" ? "wss" : "ws" };
         key ??= invitation is null ? null : settings?.Setting(RoomSetting(invitation, "guestKey"));
         var first = new WireMessage("enter", Text: name, Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, invitation?.Trim().ToUpperInvariant(), key, this.roomName, invitation is null && !persistent)));
+        connectStage = "health";
         using var probe = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(10) };
         using var health = await probe.GetAsync(server.TrimEnd('/') + "/health", deadline.Token);
         if ((int)health.StatusCode is >= 300 and < 400 || health.Content.Headers.ContentType?.MediaType == "text/html")
@@ -255,6 +271,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                 throw new RoomRejectedException("This room server hasn't been updated for the new rooms yet. Whoever runs it needs to update it, or choose another server in Settings.");
             if (protocol > RoomProtocol.Version) throw new RoomRejectedException("This room server needs a newer BlackPearl. Update the app to use rooms.");
         }
+        connectStage = "socket";
         var socket = new ClientWebSocket();
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
         try { await socket.ConnectAsync(builder.Uri, deadline.Token); }
@@ -263,6 +280,7 @@ public sealed partial class RoomClient : IAsyncDisposable
         await connection.SendAsync(first, lifetime.Token);
         controlTask = ControlLoop(); sendTask = SendLoop(); readTask = ReadLoop();
         pingTask = PingLoop();
+        connectStage = "enter";
         try { await connected.Task.WaitAsync(deadline.Token); }
         catch (OperationCanceledException ex)
         {
@@ -811,7 +829,8 @@ public sealed partial class RoomClient : IAsyncDisposable
                     coordinator.DescribeLibrary(cached.Location, location.Query, clock.Now);
                     PublishHostState();
                 }
-                catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException) { }
+                catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException)
+                { PlaybackDiagnostics.Failed("catalog-view-rejected", ex, new { room = diagnosticId }); }
                 return;
             }
             var entry = Volatile.Read(ref hostedLibrary).FirstOrDefault(x => x.Id == message.Target && x.Available && !x.IsVirtual && !x.IsExtra);
@@ -960,13 +979,16 @@ public sealed partial class RoomClient : IAsyncDisposable
     }
     private async Task MonitorLibraryPeer(string id, PeerTransport peer)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); deadline.CancelAfter(TimeSpan.FromSeconds(35));
         try
         {
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); deadline.CancelAfter(TimeSpan.FromSeconds(35));
             await peer.LibraryReady.WaitAsync(deadline.Token);
             while (!negotiated.ContainsKey(id)) await Task.Delay(20, deadline.Token);
             Post(new("library-opened", id, Transport: peer));
         }
+        // The library channel never opened on a connection that stayed up: browsing that person's library can't work.
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !lifetime.IsCancellationRequested && peer.IsControlOpen)
+        { PlaybackDiagnostics.Record("library-peer-timeout", new { room = diagnosticId, transport = peer.DiagnosticId, negotiated = negotiated.ContainsKey(id) }); }
         catch (Exception) { /* The connection closed first; its replacement reports when it opens. */ }
     }
     private async Task MonitorPeer(string id, PeerTransport peer)

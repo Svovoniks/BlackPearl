@@ -25,6 +25,7 @@ public partial class MainWindow
         SendFileNames.IsChecked = CrashReports.FileNamesAllowed;
         if (!CrashReports.Available) { SendCrashReports.IsEnabled = false; CrashReportsHint.Text = "This build doesn't send crash reports."; }
         SendFileNames.IsEnabled = SendCrashReports.IsChecked == true;
+        ShowAppLog();
         updateDirectory = UpdateLocation.InstallTarget(AppContext.BaseDirectory, RegisteredInstall(),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "BlackPearl"));
         if (updateDirectory is null)
@@ -48,7 +49,18 @@ public partial class MainWindow
         if (CrashReports.Available) CrashReports.SetAllowed(SendCrashReports.IsChecked == true);
         // File names go only with crash reports; the choice itself is kept for when they are turned back on.
         if (SendFileNames is not null) SendFileNames.IsEnabled = SendCrashReports.IsChecked == true;
+        ShowAppLog();
     }
+    // As on the phone, the app's log shows off and can't be changed while crash reports are off; the choice itself is kept.
+    private bool showingAppLog;
+    private void ShowAppLog()
+    {
+        if (SendAppLog is null) return;
+        showingAppLog = true;
+        try { SendAppLog.IsEnabled = SendCrashReports.IsChecked == true; SendAppLog.IsChecked = SendAppLog.IsEnabled && CrashReports.LogAllowed; }
+        finally { showingAppLog = false; }
+    }
+    private void AppLogChanged(object sender, RoutedEventArgs e) { if (!showingAppLog) CrashReports.SetLogAllowed(SendAppLog.IsChecked == true); }
     private void FileNamesChanged(object sender, RoutedEventArgs e) => CrashReports.SetFileNamesAllowed(SendFileNames.IsChecked == true);
     private async void CheckUpdatesClick(object sender, RoutedEventArgs e) => await CheckAppUpdates(true);
     private async Task CheckAppUpdates(bool manual)

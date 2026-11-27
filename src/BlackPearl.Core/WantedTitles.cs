@@ -45,9 +45,16 @@ public static class WantedTitles
     public static string Key(string provider, string type, int id) => type == "movie" ? "wanted-" + LibraryIdentity.Hash($"{provider}:movie:{id}") : "show-" + LibraryIdentity.Hash(provider + ":" + id);
     internal static WantedTitle? Read(string json)
     {
+        // A wanted title whose saved record can't be read is left out of Wanted, and so stops being tracked. Titles are
+        // read often, so the log notes the first few.
         try { return Expire(Wire.Read<WantedTitle>(json)); }
-        catch (Exception ex) when (ex is JsonException or InvalidDataException) { return null; }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException)
+        {
+            if (Interlocked.Increment(ref unreadable) is var count and <= 3) PlaybackDiagnostics.Failed("wanted-unreadable", ex, new { count }, message: true);
+            return null;
+        }
     }
+    private static int unreadable;
     // Text read from TMDB follows the same retention limit as the library; a refresh fills it in again.
     private static WantedTitle Expire(WantedTitle title) => title.Provider == "tmdb" && title.FetchedAt > 0 &&
         Wire.Now - title.FetchedAt > (long)TmdbRetention.MaximumAge.TotalMilliseconds ? title with { Overview = null, OriginalTitle = null } : title;
@@ -91,6 +98,7 @@ public static class WantedTitles
         var watched = title.IsMovie ? seen ? [title.Id] : [] : library.InShow(Placeholder(title, directory))
             .Where(x => x.IsVirtual && x.Season is > 0 && x.Season <= watchedThrough).Select(x => x.Id).ToArray();
         if (watched.Length > 0) library.SetSettings(watched.Select(id => new KeyValuePair<string, string>("watched:" + id, "true")));
+        PlaybackDiagnostics.Record("wanted-added", new { type = title.Type, provider = title.Provider, seasons = title.KnownSeasons?.Length ?? 0, tracked = title.Seasons.Length, watched = watched.Length });
         return title;
     }
 
@@ -148,6 +156,7 @@ public static class WantedTitles
         library.RemoveVirtual(placeholders);
         library.RemoveSettings(placeholders.SelectMany(id => new[] { "watched:" + id, "position:" + id, "played:" + id }));
         library.ForgetWanted(title.Id);
+        PlaybackDiagnostics.Record("wanted-removed", new { type = title.Type, placeholders = placeholders.Length });
     }
 
     // How a show or film already in the library relates to a wanted title: the same provider identity, the same title and
@@ -206,6 +215,9 @@ public static class WantedTitles
             if (candidate != title.Candidate) { library.SaveWanted(title with { Candidate = candidate }); changes++; }
         }
         library.LastWantedArrivals = arrivals.ToArray();
+        // After every scan: logged only when files joined a title or the files offered for one changed.
+        if (changes > 0) PlaybackDiagnostics.Record("wanted-attach", new { titles = wanted.Count, arrived = arrivals.Count, changes,
+            offered = library.Wanted().Count(title => title.Candidate is not null) });
         return changes;
     }
     private static string Arrived(int episodes) => episodes == 1 ? "1 episode arrived" : $"{Math.Max(0, episodes)} episodes arrived";
@@ -233,6 +245,7 @@ public static class WantedTitles
             library.RemoveVirtual([title.Id]);
             library.RemoveSettings(["watched:" + title.Id, "position:" + title.Id, "played:" + title.Id]);
             library.ForgetWanted(title.Id);
+            PlaybackDiagnostics.Record("wanted-linked", new { type = title.Type, files = 1, offered = entries.Length, confirmed });
             return 1;
         }
         foreach (var entry in entries.Where(x => !LibraryIdentity.Locked(x, "ShowId")))
@@ -242,6 +255,7 @@ public static class WantedTitles
         }
         library.SaveWanted(title with { Candidate = null });
         Reconcile(library, directory, library.Wanted(title.Id) ?? title);
+        PlaybackDiagnostics.Record("wanted-linked", new { type = title.Type, files = changes, offered = entries.Length, confirmed });
         return changes;
     }
     // Links the files the user picked from a folder; null when the folder holds no library videos of the title's kind.
@@ -257,7 +271,9 @@ public static class WantedTitles
     {
         if (title.Candidate is not { } candidate) return title;
         var updated = title with { Candidate = null, Rejected = (title.Rejected ?? []).Append(candidate.Key).Distinct().ToArray() };
-        library.SaveWanted(updated); return updated;
+        library.SaveWanted(updated);
+        PlaybackDiagnostics.Record("wanted-rejected", new { type = title.Type, rejected = updated.Rejected.Length });
+        return updated;
     }
 
     // What a wanted title has: episodes on disk and still missing or upcoming in its tracked seasons, and the first
@@ -330,6 +346,7 @@ public static class WantedTitles
             catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or IOException or JsonException or InvalidOperationException or KeyNotFoundException or TaskCanceledException)
             { failed++; MetadataDiagnostics.Failure("wanted", title.Title, title.Provider, ex); }
         }
+        PlaybackDiagnostics.Record("wanted-refresh", new { due = due.Length, refreshed, failed, forced = force, single = only is not null });
         return $"Wanted titles: {refreshed} checked · {failed} failures.";
     }
 }

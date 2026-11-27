@@ -169,7 +169,8 @@ public partial class MainWindow
                     if (identity.Host && source is not null && File.Exists(source.LocalPath))
                     {
                         try { await candidate.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(8), retry.Token); }
-                        catch (Exception ex) when (ex is TimeoutException or IOException) { }
+                        catch (Exception ex) when (ex is TimeoutException or IOException)
+                        { PlaybackDiagnostics.Failed("room-controls-not-ready", ex, new { stage = "reconnect" }); }
                         if (room == candidate && candidate.Snapshot?.Media is null)
                         {
                             if (resumedItem is not null) playingItem = items.FirstOrDefault(item => item.Id == resumedItem.Id) ?? resumedItem;

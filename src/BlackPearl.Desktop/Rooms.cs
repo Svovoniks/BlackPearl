@@ -14,7 +14,7 @@ public partial class MainWindow
     private void LoadSavedRooms()
     {
         try { foreach (var saved in Wire.Read<SavedRoom[]>(library.Setting("rooms") ?? "[]")) savedRooms.Add(saved); }
-        catch (System.Text.Json.JsonException) { }
+        catch (System.Text.Json.JsonException ex) { PlaybackDiagnostics.Failed("rooms-saved-unreadable", ex, new { which = "rooms" }, message: true); }
         SavedRoomsList.ItemsSource = savedRooms;
         SavedRoomsList.ItemContainerGenerator.StatusChanged += (_, _) => MarkLiveRoomPill();
         if (savedRooms.Count > 0) SavedRoomsList.SelectedIndex = 0;
@@ -34,6 +34,8 @@ public partial class MainWindow
         RefreshRoomSettings(); RefreshRoomHero();
     }
     private readonly Dictionary<string, string> savedMemberLists = [];
+    // Saved member lists that couldn't be read, noted in the log once each.
+    private readonly HashSet<string> unreadableMemberLists = [];
     private string SavedRoomSetting(SavedRoom saved, string field) => "room:" + saved.Server + ":" + saved.Code.ToUpperInvariant() + ":" + field;
     private bool ConnectedTo(SavedRoom? saved) => saved is not null && room?.IsConnected == true && room.ServerAddress == saved.Server && room.Identity?.Room == saved.Code;
 
@@ -43,6 +45,7 @@ public partial class MainWindow
     private readonly DispatcherTimer roomPresenceTimer = new() { Interval = TimeSpan.FromSeconds(20) };
     private long roomPresenceAsked = -60000;
     private bool roomPresencePending;
+    private readonly Dictionary<string, string> roomPresenceFailures = [];
     private static string PresenceKey(SavedRoom saved) => saved.Server + "#" + saved.Code.ToUpperInvariant();
     private void InitializeRoomPresence() => roomPresenceTimer.Tick += (_, _) => RefreshRoomPresence(force: true);
     private async void RefreshRoomPresence(bool force = false)
@@ -60,9 +63,15 @@ public partial class MainWindow
                 {
                     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
                     foreach (var pair in await RoomClient.PresenceAsync(group.Key, group.Select(saved => saved.Code), timeout.Token)) found[group.Key + "#" + pair.Key] = pair.Value;
+                    roomPresenceFailures.Remove(group.Key);
                 }
-                // An unreachable or older room service only means nothing is known about its rooms.
-                catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or IOException or OperationCanceledException or System.Text.Json.JsonException or ArgumentException) { }
+                // An unreachable or older room service only means nothing is known about its rooms. The log notes it when
+                // the way it fails changes, not at every ask.
+                catch (Exception ex) when (ex is System.Net.Http.HttpRequestException or IOException or OperationCanceledException or System.Text.Json.JsonException or ArgumentException)
+                {
+                    var detail = PlaybackDiagnostics.Describe(ex);
+                    if (roomPresenceFailures.GetValueOrDefault(group.Key) != detail) { roomPresenceFailures[group.Key] = detail; PlaybackDiagnostics.Failed("room-presence-failed", ex, new { rooms = group.Count() }); }
+                }
             }
             if (closing) return;
             var changed = found.Count != roomPresence.Count || found.Any(pair => !roomPresence.TryGetValue(pair.Key, out var before) || before.Name != pair.Value.Name || !before.People.SequenceEqual(pair.Value.People));
@@ -129,7 +138,9 @@ public partial class MainWindow
                 var json = Wire.Serialize(members);
                 if (members.Length > 0 && savedMemberLists.GetValueOrDefault(key) != json) { library.Setting(key, json); savedMemberLists[key] = json; }
             }
-            else try { members = Wire.Read<AdmittedGuest[]>(library.Setting(key) ?? "[]"); } catch (System.Text.Json.JsonException) { }
+            else try { members = Wire.Read<AdmittedGuest[]>(library.Setting(key) ?? "[]"); }
+                catch (System.Text.Json.JsonException ex) when (unreadableMemberLists.Add(key)) { PlaybackDiagnostics.Failed("rooms-saved-unreadable", ex, new { which = "members" }, message: true); }
+                catch (System.Text.Json.JsonException) { }
         }
         var rows = new List<RoomGuestRow>();
         if (connected)

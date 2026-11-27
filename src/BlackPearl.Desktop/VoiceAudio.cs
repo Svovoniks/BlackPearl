@@ -43,7 +43,7 @@ internal sealed class VoiceAudio : IAsyncDisposable
     {
         using var devices = new MMDeviceEnumerator();
         MMDevice? device = null;
-        if (output is not null) try { device = devices.GetDevice(output); } catch (COMException) { }
+        if (output is not null) try { device = devices.GetDevice(output); } catch (COMException ex) { PlaybackDiagnostics.Failed("voice-device-fallback", ex, new { which = "output", stage = "sound" }, message: true); }
         device ??= devices.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
         using (device)
         {
@@ -216,8 +216,13 @@ internal sealed class VoiceAudio : IAsyncDisposable
     private static MMDevice? Find(MMDeviceEnumerator enumerator, DataFlow flow, string? id)
     {
         if (id is not null)
-            try { var chosen = enumerator.GetDevice(id); if (chosen.State == DeviceState.Active) return chosen; chosen.Dispose(); }
-            catch (COMException) { }
+            try
+            {
+                var chosen = enumerator.GetDevice(id); if (chosen.State == DeviceState.Active) return chosen;
+                PlaybackDiagnostics.Record("voice-device-fallback", new { which = flow == DataFlow.Capture ? "input" : "output", state = chosen.State.ToString() });
+                chosen.Dispose();
+            }
+            catch (COMException ex) { PlaybackDiagnostics.Failed("voice-device-fallback", ex, new { which = flow == DataFlow.Capture ? "input" : "output" }, message: true); }
         // A chosen device that is unplugged falls back to the Windows default until it returns.
         return enumerator.TryGetDefaultAudioEndpoint(flow, Role.Console, out var fallback) ? fallback : null;
     }

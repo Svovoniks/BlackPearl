@@ -45,11 +45,16 @@ public partial class MainWindow
         if (guests.Length == 0) return;
         WireMessage[] messages;
         try { messages = QueueSharing.Messages(queueShareRevision = Math.Max(queueShareRevision + 1, Wire.Now), SharedQueueState()); }
-        catch (InvalidDataException ex) { SetStatus(ex.Message); return; }
+        catch (InvalidDataException ex)
+        {
+            PlaybackDiagnostics.Record("queue-share-failed", new { reason = "too-large", queues = savedQueues.Count, entries = savedQueues.Sum(saved => saved.MediaIds.Length) });
+            SetStatus(ex.Message); return;
+        }
         foreach (var guest in guests)
         {
             queueSharePeers.Add(guest);
-            // A guest whose connection is not ready yet receives the queues once its library channel opens.
+            // A guest whose connection is not ready yet receives the queues once its library channel opens, which is
+            // usual as a room starts: not worth a log entry (a connection that breaks later logs itself).
             try { foreach (var message in messages) SendToPeer(guest, message); }
             catch (Exception ex) when (ex is IOException or InvalidDataException) { }
         }
@@ -77,12 +82,19 @@ public partial class MainWindow
         if (client.Identity?.Host == true) { ReceiveGuestQueueEdit(client, sender, message); return; }
         // Every member is connected to every other; only whoever holds the streaming role shares its queues.
         if (sender != HostPeerId()) return;
-        if (message.Type == QueueSharing.ErrorMessage) { ShowQueueFeedback(message.Text ?? "That queue change could not be made."); return; }
+        // The host's reason is its own words, which name its queues: only that it refused goes in the log.
+        if (message.Type == QueueSharing.ErrorMessage)
+        {
+            PlaybackDiagnostics.Record("queue-edit-refused", new { pending = queueConfirmation is not null });
+            ShowQueueFeedback(message.Text ?? "That queue change could not be made."); return;
+        }
         if (message.Type != QueueSharing.StateMessage) return;
         SharedQueues? state;
         try { state = queueAssembler.Add(message); }
-        catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException or ArgumentException) { return; }
+        catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException or ArgumentException) { PlaybackDiagnostics.Failed("queue-state-unreadable", ex); return; }
         if (state is null) return;
+        PlaybackDiagnostics.Record("queue-state-received", new { queues = state.Queues.Length, entries = state.Queues.Sum(shared => shared.MediaIds.Length), media = state.Media.Length,
+            playing = state.ActiveIndex >= 0 });
         hostQueues = state;
         hostQueueList = state.Queues.Select(shared => new SavedQueue(shared.Id, shared.Name, shared.MediaIds)).ToList();
         hostQueueMedia = [];
@@ -97,19 +109,33 @@ public partial class MainWindow
     {
         if (message.Type != QueueSharing.EditMessage) return;
         var guest = client.Snapshot?.People.FirstOrDefault(person => person.Id == sender && person.Approved && !person.IsHost);
-        if (guest is null) return;
-        string? problem;
+        if (guest is null) { PlaybackDiagnostics.Record("queue-guest-edit", new { result = "refused", reason = "not-admitted" }); return; }
+        string? problem; string action = "unknown";
         try
         {
             var edit = Wire.Read<QueueEdit>(message.Data ?? "");
-            problem = QueueSharing.Problem(edit) ?? ApplyGuestQueueEdit(edit, guest.Name);
+            action = edit.Action is "order" or "add" or "create" ? edit.Action : "unknown";
+            queueEditor = "guest";
+            try { problem = QueueSharing.Problem(edit) ?? ApplyGuestQueueEdit(edit, guest.Name); }
+            finally { queueEditor = "local"; }
         }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or ArgumentException or NotSupportedException) { problem = "That queue change was not understood."; }
+        PlaybackDiagnostics.Record("queue-guest-edit", new { action, result = problem is null ? "applied" : "refused", reason = problem is null ? null : QueueProblemCode(problem) });
         if (problem is null) return;
         // The guest's view may be out of date: send the reason and the current queues.
         try { SendToPeer(sender, new(QueueSharing.ErrorMessage, Text: problem)); } catch (Exception ex) when (ex is IOException or InvalidDataException) { }
         ShareQueues(sender);
     }
+    // The guest's reason as a fixed code for the log; the text itself names the host's queue.
+    private static string QueueProblemCode(string problem) => problem switch
+    {
+        "That queue no longer exists." => "missing-queue",
+        "The queue changed before your change arrived. Try again." => "stale",
+        "Those videos are not available in that library right now." => "unavailable",
+        "Those videos could not be added." => "invalid-add",
+        _ when problem.StartsWith("Queue names need", StringComparison.Ordinal) => "invalid-name",
+        _ => "not-understood",
+    };
     private string? ApplyGuestQueueEdit(QueueEdit edit, string guest)
     {
         var byId = MediaById();
@@ -144,9 +170,15 @@ public partial class MainWindow
     // Guest side: changes go to the host, which shares the updated queues back.
     private bool SendQueueEdit(QueueEdit edit)
     {
-        if (room is not { IsConnected: true }) return false;
-        try { SendToPeer(HostPeerId(), new(QueueSharing.EditMessage, Data: Wire.Serialize(edit))); return true; }
-        catch (Exception ex) when (ex is IOException or InvalidDataException) { ShowQueueFeedback(ex.Message); return false; }
+        if (room is not { IsConnected: true }) { RecordQueueRefused(edit.Action, "not-connected"); return false; }
+        try
+        {
+            SendToPeer(HostPeerId(), new(QueueSharing.EditMessage, Data: Wire.Serialize(edit)));
+            PlaybackDiagnostics.Record("queue-edit-sent", new { action = edit.Action, videos = edit.MediaIds?.Length ?? 0, entries = edit.Order?.Length ?? 0 });
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException)
+        { PlaybackDiagnostics.Failed("queue-edit-send-failed", ex, new { action = edit.Action }); ShowQueueFeedback(ex.Message); return false; }
     }
     private void SendQueueOrder(SavedQueue saved, int[] order)
     {

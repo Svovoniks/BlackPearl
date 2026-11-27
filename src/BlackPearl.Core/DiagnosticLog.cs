@@ -13,6 +13,10 @@ public sealed class DiagnosticLog : IAsyncDisposable
     private readonly long maximumBytes;
     private readonly int retainedFiles;
     private long dropped;
+    // The latest entries are also kept in memory, for crash reports; CrashReportPrivacy.Trail decides what of them may leave.
+    public const int RecentCapacity = 256;
+    private readonly string?[] recent = new string?[RecentCapacity];
+    private long recentCount;
     public string DirectoryPath { get; }
     public DiagnosticLog(string directory, long maximumBytes = 5 * 1024 * 1024, int retainedFiles = 4)
     {
@@ -27,9 +31,19 @@ public sealed class DiagnosticLog : IAsyncDisposable
             var json = JsonSerializer.Serialize(new { kind, monoMs = Environment.TickCount64, utcMs = Wire.Now,
                 process = Environment.ProcessId, dropped = Interlocked.Read(ref dropped), data }, Wire.Json);
             if (System.Text.Encoding.UTF8.GetByteCount(json) + 1 > maximumBytes) { Interlocked.Increment(ref dropped); return; }
+            Volatile.Write(ref recent[(Interlocked.Increment(ref recentCount) - 1) % RecentCapacity], json);
             if (!entries.Writer.TryWrite(new(json))) Interlocked.Increment(ref dropped);
         }
         catch { Interlocked.Increment(ref dropped); }
+    }
+    // The latest entries recorded in this process, oldest first; two recorded at the same moment may swap places.
+    public string[] Recent()
+    {
+        var end = Interlocked.Read(ref recentCount);
+        var lines = new List<string>(RecentCapacity);
+        for (var index = Math.Max(0, end - RecentCapacity); index < end; index++)
+            if (Volatile.Read(ref recent[index % RecentCapacity]) is { } line) lines.Add(line);
+        return lines.ToArray();
     }
     public async Task FlushAsync()
     {
