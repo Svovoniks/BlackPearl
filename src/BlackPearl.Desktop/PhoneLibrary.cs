@@ -377,13 +377,15 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var qualities = new List<string> { StreamQuality.OriginalId };
         PhoneStream stream = new(item, file);
         string? note = null;
+        // The file is already as small as the conversion would be: asked again with convertAnyway, the PC converts it.
+        var convertible = false;
         long durationMs = (long)((item.DurationSeconds ?? 0) * 1000);
         if (wanted != StreamQuality.OriginalId && !(wanted == "auto" && home) && !item.IsMusic)
         {
-            var (converted, why) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), qualities);
+            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), qualities, Flag(message, "convertAnyway"));
             if (current() != remote) { converted?.Dispose(); return; }
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
-            else note = why;
+            else (note, convertible) = (why, smaller);
         }
         else if (ffmpeg is not null && await Probe(ffmpeg, item, TimeSpan.FromSeconds(2)) is { } probe)
             qualities.AddRange(StreamQuality.For(probe.ClassHeight).Select(q => q.Id));
@@ -414,7 +416,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 previous = back, next = forward, first = start, tracks, queue,
                 audioTracks = stream.AudioTracks.Select((a, index) => new { index, language = a.Language, title = a.Title, codec = a.Codec, layout = a.Layout }), audioTrack = stream.Audio }
             : (object)new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "file", resource = "file/" + item.Id,
-                length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note,
+                length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note, convertible,
                 previous = back, next = forward, first = start, tracks, queue });
     }
 
@@ -576,21 +578,22 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     }
 
     // A conversion of the video at the quality asked for, or why there is none: no converter, a file that can't be read,
-    // or a file already smaller than the conversion would be. It carries one audio track: the one the phone asked for, or
-    // the one the PC's player would start with.
-    private async Task<(PhoneStream? Stream, string? Why)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, List<string> qualities)
+    // or a file already smaller than the conversion would be (Smaller), unless anyway: the phone asks for that when it
+    // can't play the file itself, so it gets the picture converted though that saves no data. It carries one audio
+    // track: the one the phone asked for, or the one the PC's player would start with.
+    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, List<string> qualities, bool anyway)
     {
-        if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.");
+        if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.", false);
         var probe = await Probe(ffmpeg, item, null);
-        if (probe is null) return (null, "This file can't be converted, so the phone plays it as it is.");
+        if (probe is null) return (null, "This file can't be converted, so the phone plays it as it is.", false);
         qualities.AddRange(StreamQuality.For(probe.ClassHeight).Select(q => q.Id));
         var quality = StreamQuality.Find(qualityId) is { } found && qualities.Contains(found.Id) ? found : StreamQuality.For(probe.ClassHeight).Last();
         var plan = StreamQuality.Plan(probe, file.Media.Length, quality, false);
-        if (!plan.Smaller) return (null, $"This file is already smaller than {quality.Name} would be, so the phone plays it as it is.");
+        if (!plan.Smaller && !anyway) return (null, $"This file is already smaller than {quality.Name} would be, so the phone plays it as it is.", true);
         var directory = Path.Combine(StreamCacheDirectory, "phone-" + Guid.NewGuid().ToString("N"));
         var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
         var store = SegmentStore.TryCreate(directory, segments);
-        if (store is null) return (null, "There is no room on the PC's disk to convert the video, so the phone plays the file as it is.");
+        if (store is null) return (null, "There is no room on the PC's disk to convert the video, so the phone plays the file as it is.", false);
         var stream = new RoomStream(Guid.NewGuid().ToString("N"), item.Id, plan.Quality.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
         // Languages as the PC's player knows them: a Matroska track ffmpeg calls English without the file saying so is
         // unknown, or the language identified while it played here. The header is a few kilobytes off a drive the probe woke.
@@ -599,8 +602,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var tracks = ProbedAudio.WithContainerLanguages(probe.Audio, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, true, id)));
         var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(tracks, AudioLanguages());
         var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, audio, null), stream, store);
-        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = plan.VideoKbps, segments, audio, audioTracks = tracks.Length });
-        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = tracks, Audio = audio }, null);
+        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = plan.VideoKbps, segments, audio, audioTracks = tracks.Length, anyway = !plan.Smaller });
+        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = tracks, Audio = audio }, null, false);
     }
 
     // The video's description, or null when the converter can't read it: it failed, took longer than its own 30 seconds

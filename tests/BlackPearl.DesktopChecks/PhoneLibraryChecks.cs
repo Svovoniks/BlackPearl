@@ -57,6 +57,7 @@ static class PhoneLibraryChecks
             var dual = await DualAudioVideo(data);
             store.Save(new MediaItem("dual-audio", dual, "Dual Audio", "Movie", 2025));
             store.Save(new MediaItem("untagged-audio", UntaggedCopy(dual), "Untagged Audio", "Movie", 2025));
+            store.Save(new MediaItem("small-xvid", await SmallXvid(data), "Small XviD", "Movie", 2007));
             IReadOnlyList<MediaItem> items = store.All();
             var hostKey = PersistentRooms.NewKey();
 
@@ -148,6 +149,7 @@ static class PhoneLibraryChecks
             library.SaveNoQueueHandOver();
             Check(store.Setting("queuePosition") == "-1", "a video handed to the PC outside a queue plays on its own, not from the queue it was last in");
             await ConvertedSound(store, phone, data);
+            await ConvertAnyway(phone);
             phone.Send(new { type = "watch", request = 16, id = "night-signal", quality = StreamQuality.OriginalId, network = "home" });
             await phone.Next("stream", 15000);
 
@@ -239,6 +241,46 @@ static class PhoneLibraryChecks
         var path = Path.Combine(Path.GetDirectoryName(tagged)!, "Untagged Audio (2025).mkv");
         File.WriteAllBytes(path, bytes);
         return path;
+    }
+
+    // An old DVD-sized XviD AVI with B-frames, at a bitrate below what a 480p conversion takes.
+    static async Task<string> SmallXvid(string data)
+    {
+        var path = Path.Combine(data, "Small XviD (2007).avi");
+        var (made, errors) = await RunFfmpeg(["-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=640x480:rate=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+            "-t", "8", "-c:v", "mpeg4", "-vtag", "XVID", "-bf", "2", "-b:v", "400k", "-c:a", "libmp3lame", "-b:a", "96k", "-ac", "1", path]);
+        Check(made == 0 && File.Exists(path), "a small XviD sample is made" + (made == 0 ? "" : ": " + errors));
+        return path;
+    }
+
+    // A file already smaller than the quality asked for plays as it is, and says it can be converted anyway; asked so,
+    // the PC converts it, for a phone that can't play the file itself.
+    static async Task ConvertAnyway(FakePhone phone)
+    {
+        phone.Send(new { type = "watch", request = 36, id = "small-xvid", quality = "480p", network = "away" });
+        var declined = await phone.Next("stream", 60000);
+        Check(declined?.GetProperty("kind").GetString() == "file" && declined?.GetProperty("convertible").GetBoolean() == true &&
+            declined?.GetProperty("note").GetString()?.Contains("already smaller") == true,
+            "a file already smaller than 480p plays as it is, and the answer says it can be converted anyway");
+        phone.Send(new { type = "watch", request = 37, id = "small-xvid", quality = "480p", network = "away", convertAnyway = true });
+        var converted = await phone.Next("stream", 60000);
+        Check(converted?.GetProperty("kind").GetString() == "hls" && converted?.GetProperty("quality").GetString() == "480p" && converted?.GetProperty("audioTrack").GetInt32() == 0,
+            "asked to convert anyway, the PC converts a file already smaller than 480p, with its sound");
+        var resource = "stream/" + converted?.GetProperty("streamId").GetString() + "/0";
+        var piece = default((long Length, string? Error));
+        for (var tries = 0; tries < 60; tries++)
+        {
+            var read = await phone.Read(resource, 0, 188);
+            piece = (read.Length, read.Error);
+            if (read.Error is null) break;
+            await Task.Delay(500);
+        }
+        Check(piece.Error is null && piece.Length > 0, $"the forced conversion's first piece is read ({piece.Error})");
+        phone.Send(new { type = "watch", request = 38, id = "small-xvid", quality = StreamQuality.OriginalId, network = "home" });
+        var original = await phone.Next("stream", 15000);
+        Check(original?.GetProperty("kind").GetString() == "file" && original?.GetProperty("convertible").GetBoolean() == false,
+            "the original file asked for is not offered as convertible");
     }
 
     static async Task<(int ExitCode, string Errors)> RunFfmpeg(string[] arguments)
