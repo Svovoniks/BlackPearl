@@ -44,6 +44,20 @@ public static class PhoneLinkReports
     /// this often; one with reads, or the one that ends a link, always.</summary>
     public static readonly TimeSpan IdleInterval = TimeSpan.FromHours(1);
     private static long idleSent = long.MinValue;
+    /// <summary>A setup that ended without the phone's hello goes once per reason this often.</summary>
+    public static readonly TimeSpan FailureInterval = TimeSpan.FromMinutes(30);
+    private static readonly Dictionary<string, long> failedAt = [];
+    internal static bool MayReportFailure(string outcome)
+    {
+        var now = Stopwatch.GetTimestamp();
+        lock (failedAt)
+        {
+            if (failedAt.TryGetValue(outcome, out var last) && Stopwatch.GetElapsedTime(last, now) < FailureInterval) return false;
+            failedAt[outcome] = now;
+            return true;
+        }
+    }
+    internal static void ForgetFailures() { lock (failedAt) failedAt.Clear(); }
     internal static bool MayReportIdle(long now)
     {
         lock (typeof(PhoneLinkReports))

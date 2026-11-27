@@ -129,6 +129,7 @@ static class PhoneRemoteFixture
         PhoneLinkReports.Connects = connects.Enqueue;
         PhoneLinkReports.WindowStarting = () => new object();
         PhoneLinkReports.Windows = windows.Enqueue;
+        PhoneLinkReports.ForgetFailures();
         host.Start();
         check(await Until(() => host.ServerReady, 10000), "the PC connects to the room server for phones");
         check(await early.Next("remote-online") is not null, "a waiting phone hears when its PC comes online");
@@ -251,6 +252,8 @@ static class PhoneRemoteFixture
         }
         check(connects.Count(c => c.Outcome == "greeted") == 2 && connects.Any(c => c.Outcome == "unreadable-offer"),
             "only the links that reached a phone's hello report as greeted, and one that failed says why");
+        check(PhoneLinkReports.MayReportFailure("check-reason") && !PhoneLinkReports.MayReportFailure("check-reason") && PhoneLinkReports.MayReportFailure("other-check-reason"),
+            "a setup that failed for the same reason goes once a half hour; another reason still goes");
         // A copy of this library running elsewhere, with the same host key, takes the phone remote over. The first one
         // says why and waits, rather than the two replacing each other every second.
         using (var twin = new PhoneRemoteHost(new PhoneRemoteOptions { Server = url, HostKey = hostKey, PcName = "Copy", AppVersion = "0.0.0-test", Store = new MemoryStore() }))

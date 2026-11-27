@@ -276,6 +276,8 @@ internal static class PhoneRemoteDiagnostics
         var trace = session.ConnectTrace;
         session.ConnectTrace = null;
         if (trace is null || PhoneLinkReports.Connects is not { } sink) return;
+        // A phone that keeps failing to link up would send one per try: the same reason goes once a half hour.
+        if (outcome != "greeted" && !PhoneLinkReports.MayReportFailure(outcome)) return;
         var report = new PhoneConnectReport(outcome, session.SignalAs == "pair", session.Via, session.Path, session.App,
             Candidates(session.LocalCandidates), Candidates(session.RemoteCandidates), trace);
         PhoneLinkReports.Safe(() => sink(report));
@@ -394,13 +396,20 @@ public sealed class PhoneRemoteHost : IDisposable
     private Timer? pinger;
     private void Measure()
     {
-        PhoneRemoteSession[] open;
-        lock (gate) open = sessions.Values.Where(s => s.Open).ToArray();
-        foreach (var session in open)
+        // Pings are only for the reports: none while crash reports are off, or in a build that sends none.
+        if (PhoneLinkReports.Windows is null) return;
+        try
         {
-            if (session.AnswersPings) Send(session, Wire.Serialize(new { type = "ping", number = session.Stats.PingSent(System.Diagnostics.Stopwatch.GetTimestamp()) }));
-            if (System.Diagnostics.Stopwatch.GetElapsedTime(session.Stats.WindowStarted) >= PhoneLinkReports.Window) PhoneRemoteDiagnostics.WindowEnded(session, "open", start: true);
+            PhoneRemoteSession[] open;
+            lock (gate) open = sessions.Values.Where(s => s.Open).ToArray();
+            foreach (var session in open)
+            {
+                if (session.AnswersPings) Send(session, Wire.Serialize(new { type = "ping", number = session.Stats.PingSent(System.Diagnostics.Stopwatch.GetTimestamp()) }));
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(session.Stats.WindowStarted) >= PhoneLinkReports.Window) PhoneRemoteDiagnostics.WindowEnded(session, "open", start: true);
+            }
         }
+        // A timer's exception would end the process; a missed ping or window costs nothing.
+        catch (Exception ex) { PlaybackDiagnostics.Record("remote-measure-failed", new { error = ex.GetType().Name }); }
     }
 
     // A new one-use pairing link, valid for ten minutes; the previous one stops working.
