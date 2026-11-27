@@ -286,15 +286,18 @@ internal static class PhoneRemoteDiagnostics
     {
         PhoneLinkWindow window;
         bool measured;
+        long now;
         lock (session.ReportGate)
         {
             // The ping timer's turn came as the session closed: the close reports its window.
             if (start && Volatile.Read(ref session.ClosedLogged) != 0) return;
-            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            now = System.Diagnostics.Stopwatch.GetTimestamp();
             measured = session.Stats.Measured;
             window = session.Stats.Take(now, session.Path, session.Via, session.App, end, TimeSpan.FromMilliseconds(session.Age), session.WindowTrace);
             session.WindowTrace = start ? PhoneLinkReports.Start(PhoneLinkReports.WindowStarting) : null;
         }
+        // Only pings, as with a phone connected in the background all day: once an hour (PhoneLinkReports.IdleInterval).
+        if (measured && end == "open" && window.Reads == 0 && !PhoneLinkReports.MayReportIdle(now)) return;
         if (measured && window.Trace is not null && PhoneLinkReports.Windows is { } sink) PhoneLinkReports.Safe(() => sink(window));
     }
 

@@ -240,6 +240,9 @@ static class PhoneRemoteFixture
             check(await Until(() => windows.Sum(w => w.Reads) >= 3 && windows.Sum(w => w.MediaBytes) == 262144 + 10 && windows.Sum(w => w.Busy) >= 1 && windows.Any(w => w.ReadWaitMedian >= 0), 8000),
                 $"the PC's link reports count the reads it answered, their bytes, and the ones it was too busy for ({string.Join("; ", windows.Select(w => $"{w.Reads} reads {w.MediaBytes} bytes {w.Busy} busy"))})");
             check(windows.All(w => w.Measurements.Count <= PhoneLinkWindow.MeasurementLimit), "a link report sets no more measurements than Sentry keeps");
+            // Windows of 2 seconds here, so a dozen have passed: those with only pings go once an hour.
+            await Task.Delay(3000);
+            check(windows.Count(w => w is { End: "open", Reads: 0 }) <= 1, $"stretches with only pings are reported once an hour ({windows.Count(w => w is { End: "open", Reads: 0 })} sent)");
             // The pairing link closing counted too; this counts only the paired phone's.
             Interlocked.Exchange(ref disconnected, 0);
             host.Forget(phoneId);

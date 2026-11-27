@@ -37,8 +37,22 @@ public static class PhoneLinkReports
 {
     /// <summary>A paired link is reported in stretches this long, so one that stays open all day still says how it went.</summary>
     public static TimeSpan Window { get; set; } = TimeSpan.FromMinutes(10);
-    /// <summary>How often the PC pings a phone that answers pings.</summary>
-    public static TimeSpan PingInterval { get; set; } = TimeSpan.FromSeconds(10);
+    /// <summary>How often the PC pings a phone that answers pings: twenty round trips a window, and little for a locked phone
+    /// to wake for.</summary>
+    public static TimeSpan PingInterval { get; set; } = TimeSpan.FromSeconds(30);
+    /// <summary>A window with no reads in it (only pings, as with a phone left connected in the background all day) goes at most
+    /// this often; one with reads, or the one that ends a link, always.</summary>
+    public static readonly TimeSpan IdleInterval = TimeSpan.FromHours(1);
+    private static long idleSent = long.MinValue;
+    internal static bool MayReportIdle(long now)
+    {
+        lock (typeof(PhoneLinkReports))
+        {
+            if (idleSent != long.MinValue && Stopwatch.GetElapsedTime(idleSent, now) < IdleInterval) return false;
+            idleSent = now;
+            return true;
+        }
+    }
     /// <summary>A ping not answered within this long counts as unanswered; an answer after it counts for nothing.</summary>
     public static readonly TimeSpan PongWait = TimeSpan.FromSeconds(10);
 
