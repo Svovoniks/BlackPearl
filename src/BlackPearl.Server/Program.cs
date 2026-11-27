@@ -26,20 +26,38 @@ var builder = WebApplication.CreateBuilder(args);
 // One line per event. Under systemd the journal timestamps each line and reads its level from the <N> prefix the systemd
 // format starts it with, so `journalctl -p warning` works; elsewhere each line carries its own UTC time. ASP.NET's own
 // per-request lines are left out: two to five for every request, with the server's domain in each. These are only
-// defaults: Logging__* settings in the service's environment replace them (deploy/README.md, "Logs").
-var journal = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("JOURNAL_STREAM"));
+// defaults: Logging__* settings in the service's environment replace them (deploy/README.md, "Logs"). They are set on
+// Microsoft rather than Microsoft.AspNetCore because systemd ignores an environment variable whose name has a dot, so
+// Logging__LogLevel__Microsoft is the one that can bring the request lines back.
+var journal = WritesToJournal();
 builder.Configuration.Sources.Insert(0, new Microsoft.Extensions.Configuration.Memory.MemoryConfigurationSource
 {
     InitialData = new Dictionary<string, string?>
     {
         ["Logging:LogLevel:Default"] = "Information",
-        ["Logging:LogLevel:Microsoft.AspNetCore"] = "Warning",
+        ["Logging:LogLevel:Microsoft"] = "Warning",
+        ["Logging:LogLevel:Microsoft.Hosting.Lifetime"] = "Information",
         ["Logging:Console:FormatterName"] = journal ? "systemd" : "simple",
         ["Logging:Console:FormatterOptions:SingleLine"] = "true",
         ["Logging:Console:FormatterOptions:UseUtcTimestamp"] = "true",
         ["Logging:Console:FormatterOptions:TimestampFormat"] = journal ? null : "yyyy-MM-dd HH:mm:ss.fff ",
     },
 });
+// systemd sets JOURNAL_STREAM to the device and inode of the journal socket it gave the service as stdout or stderr.
+// Processes started from such a service, such as a terminal in a desktop session, inherit the variable, so the journal
+// format is used only while this process's own output still is that socket (systemd.exec(5)). Where /proc can't say,
+// the variable decides.
+static bool WritesToJournal()
+{
+    var stream = Environment.GetEnvironmentVariable("JOURNAL_STREAM");
+    if (string.IsNullOrEmpty(stream)) return false;
+    if (!Directory.Exists("/proc/self/fd")) return true;
+    var socket = "socket:[" + stream[(stream.IndexOf(':') + 1)..] + "]";
+    foreach (var output in new[] { "/proc/self/fd/1", "/proc/self/fd/2" })
+        try { if (new FileInfo(output).LinkTarget == socket) return true; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    return false;
+}
 // Errors go to Sentry when the server sets BLACKPEARL_SENTRY_DSN; without it nothing is sent. CrashReportPrivacy (Core)
 // decides what reports leave out: addresses, request details beyond the path, breadcrumbs, and paths and ids in error text.
 if (builder.Configuration[AppEnvironment.Prefix + "SENTRY_DSN"] is { Length: > 0 } sentryDsn)
@@ -148,7 +166,7 @@ _ = Task.Run(async () =>
 });
 foreach (var saved in persistentRooms.All())
 {
-    var restored = new Room(saved.Code, true) { Name = saved.Name, OwnerHash = saved.HostKeyHash, SharedControls = saved.SharedControls };
+    var restored = new Room(saved.Code, true) { Name = saved.Name, OwnerHash = saved.HostKeyHash, SharedControls = saved.SharedControls, Unopened = true };
     foreach (var guest in saved.Guests ?? []) restored.Members[guest.Id] = guest.Name;
     // Rooms saved before members had names list only their ids.
     foreach (var id in saved.ApprovedGuests ?? []) restored.Members.TryAdd(id, "Guest");
@@ -237,13 +255,13 @@ async Task ServeHosted(HttpContext context, WebSocket socket, CancellationTokenS
         if (empty) ServerLog.RoomEmpty(roomLog, room.Tag, room.Kind);
     });
     var sender = member.SendLoop();
-    string role; int entering; long emptyFor = -1;
+    string role; int entering; long emptyFor = -1; var unopened = false;
     lock (room.Gate)
     {
         // The sweep removes rooms under this lock; never admit a member into a removed room.
         if (!rooms.TryGetValue(room.Code, out var live) || live != room) throw new InvalidDataException("Invitation is invalid or expired");
         if (room.People.Count > 0) throw new InvalidDataException("The people in this room use a newer BlackPearl. Update the app to join them.");
-        if (!room.Occupied && first.Type != "create") emptyFor = (Wire.Now - room.EmptySince) / 1000;
+        if (!room.Occupied && first.Type != "create") { emptyFor = (Wire.Now - room.EmptySince) / 1000; unopened = room.Unopened; room.Unopened = false; }
         var session = room.Hosted ??= new();
         if (session.People.Count >= 9) throw new InvalidDataException("Room is full");
         if (host && session.People.Values.Any(x => x.Host)) throw new InvalidDataException("The host is already connected to this room");
@@ -257,7 +275,8 @@ async Task ServeHosted(HttpContext context, WebSocket socket, CancellationTokenS
         if (host) foreach (var guest in session.People.Values.Where(x => !x.Host && x.Approved)) member.Send(new("connect", Target: guest.Id));
         role = host ? "host" : member.Approved ? "a guest who belongs to the room" : "a guest waiting for the host"; entering = session.People.Count;
     }
-    if (emptyFor >= 0) ServerLog.RoomOpened(roomLog, member.LogId, room.Tag, emptyFor);
+    if (unopened) ServerLog.RoomOpenedSinceStart(roomLog, member.LogId, room.Tag, emptyFor);
+    else if (emptyFor >= 0) ServerLog.RoomOpened(roomLog, member.LogId, room.Tag, emptyFor);
     ServerLog.Entered(roomLog, member.LogId, member.Who, room.Tag, role, 1, entering);
     // Token bucket: the host's burst covers resume signaling for every guest; sustained floods still disconnect.
     var (burst, perSecond) = host ? (400.0, 160.0) : (120.0, 80.0);
@@ -396,7 +415,7 @@ async Task ServeRoom(HttpContext context, WebSocket socket, CancellationTokenSou
         if (empty) ServerLog.RoomEmpty(roomLog, room.Tag, room.Kind);
     });
     var sender = member.SendLoop();
-    var replaced = new List<string>(); long emptyFor = -1; int count; string role;
+    var replaced = new List<string>(); long emptyFor = -1; var unopened = false; int count; string role;
     lock (room.Gate)
     {
         // The sweep removes rooms under this lock; never let a member into a removed room.
@@ -404,7 +423,7 @@ async Task ServeRoom(HttpContext context, WebSocket socket, CancellationTokenSou
         if (room.Hosted is { People.Count: > 0 }) throw new InvalidDataException("The people in this room use an older BlackPearl. Once they update, you can all join together.");
         if (room.Banned.ContainsKey(member.Hash)) throw new InvalidDataException("You were removed from this room. Its creator can let you back in.");
         member.Owner = member.Hash == room.OwnerHash;
-        if (!created && !room.Occupied) emptyFor = (Wire.Now - room.EmptySince) / 1000;
+        if (!created && !room.Occupied) { emptyFor = (Wire.Now - room.EmptySince) / 1000; unopened = room.Unopened; room.Unopened = false; }
         // Someone entering again replaces their earlier connection: usually one the network dropped before the
         // service noticed. Refusing instead would lock them out until that connection timed out.
         foreach (var earlier in room.People.Values.Where(x => x.Hash == member.Hash).ToArray())
@@ -425,7 +444,8 @@ async Task ServeRoom(HttpContext context, WebSocket socket, CancellationTokenSou
         room.Snapshot();
         role = (member.Owner ? "its creator" : "a member") + (room.HostId == member.Id ? ", holding the streaming role" : ""); count = room.People.Count;
     }
-    if (emptyFor >= 0) ServerLog.RoomOpened(roomLog, member.LogId, room.Tag, emptyFor);
+    if (unopened) ServerLog.RoomOpenedSinceStart(roomLog, member.LogId, room.Tag, emptyFor);
+    else if (emptyFor >= 0) ServerLog.RoomOpened(roomLog, member.LogId, room.Tag, emptyFor);
     foreach (var earlier in replaced) ServerLog.Replaced(roomLog, member.LogId, member.Who, room.Tag, earlier);
     ServerLog.Entered(roomLog, member.LogId, member.Who, room.Tag, role, RoomProtocol.Version, count);
     // Token bucket: the burst covers signaling with every other member at once; sustained floods still disconnect.
@@ -486,14 +506,33 @@ async Task ServeRoom(HttpContext context, WebSocket socket, CancellationTokenSou
     }
 }
 // Why a socket's connection was cancelled. A receive that is cancelled aborts the socket, which also cancels the request,
-// so the service's own time limits are asked first. A missed keep-alive aborts the socket under a pending receive, which
-// Kestrel reports as ConnectionAbortedException.
-Ending Cancelled(Exception? error, bool silent, CancellationTokenSource limit) =>
+// so the service's own time limits are asked first. A send that failed first ends the connection by cancelling it.
+Ending Cancelled(Exception? error, bool silent, CancellationTokenSource limit, Connection? connection, WebSocket socket) =>
     app.Lifetime.ApplicationStopping.IsCancellationRequested ? new("the server is stopping", LogLevel.Information)
     : silent ? new("sent nothing within 10 s of connecting", LogLevel.Warning)
     : limit.IsCancellationRequested ? new("reached the 6-hour connection limit; the app connects again", LogLevel.Information)
-    : error is Microsoft.AspNetCore.Connections.ConnectionAbortedException ? new("no answer to the service's keep-alive pings for 30 s", LogLevel.Warning)
-    : Ending.Cut;
+    : MissedKeepAlive(error, socket) ? Ending.MissedKeepAlive
+    : connection?.SendFailed ?? Ending.Cut;
+// A missed keep-alive aborts the socket under its pending receive, which then throws Kestrel's ConnectionAbortedException
+// or, as often, the plain cancellation of the request it also aborts: whichever reaches it first. The socket remembers why
+// it was aborted, though: using it again throws with the keep-alive timeout, a Faulted WebSocketException, inside. An
+// aborted socket fails a receive before it starts, so this never waits.
+static bool MissedKeepAlive(Exception? error, WebSocket socket)
+{
+    if (error is Microsoft.AspNetCore.Connections.ConnectionAbortedException) return true;
+    if (socket.State != WebSocketState.Aborted) return false;
+    Exception? failure;
+    try
+    {
+        var probe = socket.ReceiveAsync(new ArraySegment<byte>(new byte[1]), CancellationToken.None);
+        if (!probe.IsCompleted) return false;
+        failure = probe.Exception;
+    }
+    catch (Exception ex) { failure = ex; }
+    for (var e = failure; e is not null; e = e is AggregateException { InnerExceptions.Count: 1 } single ? single.InnerExceptions[0] : e.InnerException)
+        if (e is WebSocketException { WebSocketErrorCode: WebSocketError.Faulted }) return true;
+    return false;
+}
 // Both kinds of socket: read the first message within 10 seconds, hand the socket to serve, and once it ends, tell an app
 // that was turned away why, take the connection out of wherever it entered, and log how it ended.
 async Task ServeSocket(HttpContext context, ILogger log, Func<HttpContext, WebSocket, CancellationTokenSource, WireMessage?, string, Action<Connection, Action<Ending>>, Task> serve)
@@ -514,7 +553,7 @@ async Task ServeSocket(HttpContext context, ILogger log, Func<HttpContext, WebSo
             first = await SocketMessages.ReadAsync(socket, reading.Token);
         waiting = false;
         await serve(context, socket, lifetime, first, id, (entered, leaving) => { connection = entered; leave = leaving; });
-        ending = lifetime.IsCancellationRequested ? Cancelled(null, false, limit) : Ending.ClosedByApp;
+        ending = lifetime.IsCancellationRequested ? Cancelled(null, false, limit, connection, socket) : Ending.ClosedByApp;
     }
     catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException or FormatException)
     {
@@ -529,8 +568,8 @@ async Task ServeSocket(HttpContext context, ILogger log, Func<HttpContext, WebSo
             catch (Exception) { }
         }
     }
-    catch (OperationCanceledException ex) { ending = Cancelled(ex, waiting && handshake.IsCancellationRequested, limit); }
-    catch (Exception ex) when (ex is WebSocketException or IOException) { ending = Ending.Lost(ex); }
+    catch (OperationCanceledException ex) { ending = Cancelled(ex, waiting && handshake.IsCancellationRequested, limit, connection, socket); }
+    catch (Exception ex) when (ex is WebSocketException or IOException) { ending = MissedKeepAlive(ex, socket) ? Ending.MissedKeepAlive : Ending.Lost(ex); }
     finally
     {
         // The service's own reason, such as a replacement or a removal, explains what the socket did next.
@@ -651,6 +690,8 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
     private Ending? ended;
     public Ending? Ended => Volatile.Read(ref ended);
     public void Mark(Ending why) => Interlocked.CompareExchange(ref ended, why, null);
+    private Ending? sendFailed;
+    public Ending? SendFailed => Volatile.Read(ref sendFailed);
     public void End(Ending why) { Mark(why); End(); }
     // Ends the connection. Its handler disposes the token once it returns, and tasks such as the send loop and other
     // members' messages can still reach this connection after that, when there is nothing left to end.
@@ -707,8 +748,10 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
         }
         catch (Exception ex)
         {
-            // Once the connection is ending for another reason, its sends fail too; only a send that failed first says why.
-            if (!lifetime.IsCancellationRequested) Mark(new($"sending failed ({ex.GetType().Name})", LogLevel.Warning));
+            // Once the connection is ending for another reason, its sends fail too; only a send that failed first can say
+            // why. Even then a socket that died under both reading and sending is better explained by the read, so this
+            // is only the reason when the read was merely cancelled by it (Cancelled).
+            if (!lifetime.IsCancellationRequested) Volatile.Write(ref sendFailed, new($"sending failed ({ex.GetType().Name})", LogLevel.Warning));
             End();
         }
     }
@@ -762,6 +805,9 @@ sealed class Room(string code, bool persistent = false)
     public string? HostId; public long Epoch;
     public long Expires { get; } = persistent ? long.MaxValue : Wire.Now + 6 * 3600000;
     public long EmptySince = Wire.Now, Arrivals;
+    // A saved room loaded at startup that nobody has entered since: EmptySince is when the service started, not when the
+    // room was last left.
+    public bool Unopened;
     public Dictionary<string, Member> People { get; } = new();
     // Set while people on protocol 1 apps are in the room; People is empty then.
     public HostedSession? Hosted;

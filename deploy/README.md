@@ -87,7 +87,7 @@ What a leaving line's reason means:
 - `the app stopped reading`: 128 messages waited to be sent to it, so it was cut off.
 - `reached the 6-hour connection limit`: by design; the app connects again on its own.
 
-Levels and format are set with `Logging__*` settings in `/etc/blackpearl/blackpearl.env`, followed by a restart. `Logging__LogLevel__BlackPearl=Debug` adds a line for every signal relayed or dropped, which is busy during connection setup. `Logging__Console__FormatterName=json` writes JSON lines with each value as a named field, for tools such as `jq`; the journal then shows every line at the same priority. ASP.NET's own lines are limited to warnings by default; `Logging__LogLevel__Microsoft.AspNetCore=Information` brings back its line for every request, which includes the server's address.
+Levels and format are set with `Logging__*` settings in `/etc/blackpearl/blackpearl.env`, followed by a restart. `Logging__LogLevel__BlackPearl=Debug` adds a line for every signal relayed or dropped, which is busy during connection setup. `Logging__Console__FormatterName=json` writes JSON lines with each value as a named field, for tools such as `jq`; the journal then shows every line at the same priority. ASP.NET's own lines are limited to warnings by default, apart from its startup lines; `Logging__LogLevel__Microsoft=Information` brings back its lines for every request, which include the server's address. Name a setting without dots: systemd ignores an environment variable whose name has one, such as `Logging__LogLevel__Microsoft.AspNetCore`, and logs "Ignoring invalid environment assignment" when the service starts.
 
 ## Operations
 

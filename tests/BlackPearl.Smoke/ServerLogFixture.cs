@@ -110,8 +110,45 @@ static class ServerLogFixture
             }
             finally { await File.WriteAllLinesAsync(Path.Combine(directory, "events.log"), service.Lines); }
         }
+        await Restarted(sdk, serverDll, directory, check);
         await Journal(sdk, serverDll, directory, check);
         await Session(sdk, serverDll, directory, check);
+    }
+
+    // A saved room after the service restarts: its first opening counts from the start, not from when it was last left.
+    // The restart also brings back ASP.NET's request lines the way deploy/README.md says, with a setting systemd accepts.
+    static async Task Restarted(string sdk, string serverDll, string directory, Action<bool, string> check)
+    {
+        var data = Path.Combine(directory, "restarted");
+        var json = new Dictionary<string, string> { ["Logging__Console__FormatterName"] = "json" };
+        string code, key;
+        await using (var before = await Service.Start(sdk, serverDll, data, json))
+        {
+            var (socket, reply) = await Open(before.Url, "/room", new("enter", Text: "Ann Logcheck", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, null, null, null, Temporary: false))));
+            var welcome = Wire.Read<Welcome>(reply.Data!); code = welcome.Room; key = welcome.GuestKey!;
+            await Close(socket);
+            check(await before.Next(e => e.EventId == 10 && e.Value("Kind") == "saved") is not null, "creating a saved room is logged as saved");
+        }
+        await using var after = await Service.Start(sdk, serverDll, data, new(json) { ["Logging__LogLevel__Microsoft"] = "Information" });
+        try
+        {
+            check(await after.Next(e => e.EventId == 1) is { } starting && starting.Value("Saved") == "1", "the service says how many saved rooms it loaded");
+            await Task.Delay(1200);
+            var (socket, _) = await Open(after.Url, "/room", new("enter", Text: "Ann Logcheck", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, code, key, null, Temporary: false))));
+            var first = await after.Next(e => e.EventId is 11 or 23 && e.Value("Room") == ServerLog(code));
+            check(first is { EventId: 23, Level: "Information" } && long.Parse(first.Value("StartedSeconds")) >= 1,
+                $"a saved room's first opening after a restart says it counts from the start ({first?.Message})");
+            await Close(socket);
+            await after.Next(e => e.EventId == 12 && e.Value("Room") == ServerLog(code));
+            var (again, _) = await Open(after.Url, "/room", new("enter", Text: "Ann Logcheck", Data: Wire.Serialize(new EnterRequest(RoomProtocol.Version, code, key, null, Temporary: false))));
+            check(await after.Next(e => e.EventId == 11 && e.Value("Room") == ServerLog(code)) is not null, "after that it is logged opened after how long it stood empty");
+            await Close(again);
+            check(await after.Next(e => e.Category.StartsWith("Microsoft.AspNetCore", StringComparison.Ordinal) && e.Level == "Information") is not null,
+                "Logging__LogLevel__Microsoft=Information brings back ASP.NET's request lines");
+            var text = string.Join('\n', after.Lines);
+            check(!text.Contains(code, StringComparison.OrdinalIgnoreCase) && !text.Contains(key, StringComparison.OrdinalIgnoreCase), "the restarted service's log holds neither the invitation nor the key");
+        }
+        finally { await File.WriteAllLinesAsync(Path.Combine(directory, "restarted.log"), after.Lines); }
     }
 
     static ClientWebSocket Socket(string? address = null)

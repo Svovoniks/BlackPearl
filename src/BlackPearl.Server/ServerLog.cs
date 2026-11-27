@@ -53,6 +53,8 @@ static partial class ServerLog
     public static partial void Claimed(ILogger logger, string connection, string room, long epoch);
     [LoggerMessage(EventId = 22, Level = LogLevel.Debug, Message = "[{Connection}] Dropped a signal in room {Room}: {Reason}")]
     public static partial void RoomSignalDropped(ILogger logger, string connection, string room, string reason);
+    [LoggerMessage(EventId = 23, Level = LogLevel.Information, Message = "[{Connection}] Saved room {Room} opened, the first time since the service started {StartedSeconds} s ago")]
+    public static partial void RoomOpenedSinceStart(ILogger logger, string connection, string room, long startedSeconds);
 
     // Sockets that end before they enter a room or reach a PC: turned away (Warning), or closed or lost on the way.
     [LoggerMessage(EventId = 30, Message = "[{Connection}] {Path} connection ended before entering, after {Seconds} s: {Reason}")]
@@ -86,6 +88,8 @@ sealed record Ending(string Reason, LogLevel Level)
     // people leave, and an app that quits or crashes looks the same. A network that drops without a word shows as a missed
     // keep-alive instead.
     public static readonly Ending Cut = new("the app cut the connection without a WebSocket close", LogLevel.Information);
+    // The app or its network went quiet without closing: a sleeping laptop, a lost Wi-Fi link.
+    public static readonly Ending MissedKeepAlive = new("no answer to the service's keep-alive pings for 30 s", LogLevel.Warning);
     // The socket failed under the service.
     public static Ending Lost(Exception error) => error switch
     {
