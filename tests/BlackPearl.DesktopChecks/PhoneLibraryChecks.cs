@@ -57,6 +57,7 @@ static class PhoneLibraryChecks
             var dual = await DualAudioVideo(data);
             store.Save(new MediaItem("dual-audio", dual, "Dual Audio", "Movie", 2025));
             store.Save(new MediaItem("untagged-audio", UntaggedCopy(dual), "Untagged Audio", "Movie", 2025));
+            store.Save(new MediaItem("small-xvid", await SmallXvid(data), "Small XviD", "Movie", 2007));
             IReadOnlyList<MediaItem> items = store.All();
             var hostKey = PersistentRooms.NewKey();
 
@@ -148,6 +149,7 @@ static class PhoneLibraryChecks
             library.SaveNoQueueHandOver();
             Check(store.Setting("queuePosition") == "-1", "a video handed to the PC outside a queue plays on its own, not from the queue it was last in");
             await ConvertedSound(store, phone, data);
+            await ConvertAnyway(phone, data);
             phone.Send(new { type = "watch", request = 16, id = "night-signal", quality = StreamQuality.OriginalId, network = "home" });
             await phone.Next("stream", 15000);
 
@@ -239,6 +241,58 @@ static class PhoneLibraryChecks
         var path = Path.Combine(Path.GetDirectoryName(tagged)!, "Untagged Audio (2025).mkv");
         File.WriteAllBytes(path, bytes);
         return path;
+    }
+
+    // An old DVD-sized XviD AVI with B-frames, at a bitrate below what a 480p conversion takes.
+    static async Task<string> SmallXvid(string data)
+    {
+        var path = Path.Combine(data, "Small XviD (2007).avi");
+        var (made, errors) = await RunFfmpeg(["-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=640x480:rate=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+            "-t", "8", "-c:v", "mpeg4", "-vtag", "XVID", "-bf", "2", "-b:v", "400k", "-c:a", "libmp3lame", "-b:a", "96k", "-ac", "1", path]);
+        Check(made == 0 && File.Exists(path), "a small XviD sample is made" + (made == 0 ? "" : ": " + errors));
+        return path;
+    }
+
+    // A file already smaller than the quality asked for plays as it is, and says it can be converted anyway; asked so,
+    // the PC converts it, for a phone that can't play the file itself.
+    static async Task ConvertAnyway(FakePhone phone, string data)
+    {
+        // The picture's rate: a file worth converting gets the quality's; one converted anyway no more than the file
+        // takes, and never so little that it turns to blocks. NVIDIA's encoder and x264 stop below the rate on their
+        // own, so the size of the pieces below only shows this where the PC's encoder aims at the rate.
+        var q480 = StreamQuality.Find("480p")!;
+        Check(PhoneLibrary.ConvertedKbps(new(q480, 480, 3000, 1400)) == 1400 && PhoneLibrary.ConvertedKbps(new(q480, 480, 496, 1400)) == 496 &&
+            PhoneLibrary.ConvertedKbps(new(q480, 480, 120, 1400)) == 300, "a conversion asked for anyway takes no more than the file does, and at least 300 kbps");
+        phone.Send(new { type = "watch", request = 36, id = "small-xvid", quality = "480p", network = "away" });
+        var declined = await phone.Next("stream", 60000);
+        Check(declined?.GetProperty("kind").GetString() == "file" && declined?.GetProperty("convertible").GetBoolean() == true &&
+            declined?.GetProperty("note").GetString()?.Contains("already smaller") == true,
+            "a file already smaller than 480p plays as it is, and the answer says it can be converted anyway");
+        phone.Send(new { type = "watch", request = 37, id = "small-xvid", quality = "480p", network = "away", convertAnyway = true });
+        var converted = await phone.Next("stream", 60000);
+        Check(converted?.GetProperty("kind").GetString() == "hls" && converted?.GetProperty("quality").GetString() == "480p" && converted?.GetProperty("audioTrack").GetInt32() == 0,
+            "asked to convert anyway, the PC converts a file already smaller than 480p, with its sound");
+        // Its pieces, together no larger than the file by more than the AAC sound adds: the quality's own rate would
+        // have made it several times the file's size.
+        long total = 0; string? error = null;
+        for (var index = 0; index < converted?.GetProperty("segments").GetInt32(); index++)
+        {
+            var resource = "stream/" + converted?.GetProperty("streamId").GetString() + "/" + index;
+            for (var tries = 0; tries < 60; tries++)
+            {
+                var read = await phone.Read(resource, 0, 188);
+                error = read.Error;
+                if (read.Error is null) { total += read.Length; break; }
+                await Task.Delay(500);
+            }
+        }
+        var file = new FileInfo(Path.Combine(data, "Small XviD (2007).avi")).Length;
+        Check(error is null && total > 0 && total < file * 1.5, $"the forced conversion's pieces are read, and take about what the file does ({total} bytes for a {file}-byte file{(error is null ? "" : ", " + error)})");
+        phone.Send(new { type = "watch", request = 38, id = "small-xvid", quality = StreamQuality.OriginalId, network = "home" });
+        var original = await phone.Next("stream", 15000);
+        Check(original?.GetProperty("kind").GetString() == "file" && original?.GetProperty("convertible").GetBoolean() == false,
+            "the original file asked for is not offered as convertible");
     }
 
     static async Task<(int ExitCode, string Errors)> RunFfmpeg(string[] arguments)
