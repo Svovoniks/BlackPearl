@@ -149,7 +149,7 @@ static class PhoneLibraryChecks
             library.SaveNoQueueHandOver();
             Check(store.Setting("queuePosition") == "-1", "a video handed to the PC outside a queue plays on its own, not from the queue it was last in");
             await ConvertedSound(store, phone, data);
-            await ConvertAnyway(phone);
+            await ConvertAnyway(phone, data);
             phone.Send(new { type = "watch", request = 16, id = "night-signal", quality = StreamQuality.OriginalId, network = "home" });
             await phone.Next("stream", 15000);
 
@@ -256,8 +256,14 @@ static class PhoneLibraryChecks
 
     // A file already smaller than the quality asked for plays as it is, and says it can be converted anyway; asked so,
     // the PC converts it, for a phone that can't play the file itself.
-    static async Task ConvertAnyway(FakePhone phone)
+    static async Task ConvertAnyway(FakePhone phone, string data)
     {
+        // The picture's rate: a file worth converting gets the quality's; one converted anyway no more than the file
+        // takes, and never so little that it turns to blocks. NVIDIA's encoder and x264 stop below the rate on their
+        // own, so the size of the pieces below only shows this where the PC's encoder aims at the rate.
+        var q480 = StreamQuality.Find("480p")!;
+        Check(PhoneLibrary.ConvertedKbps(new(q480, 480, 3000, 1400)) == 1400 && PhoneLibrary.ConvertedKbps(new(q480, 480, 496, 1400)) == 496 &&
+            PhoneLibrary.ConvertedKbps(new(q480, 480, 120, 1400)) == 300, "a conversion asked for anyway takes no more than the file does, and at least 300 kbps");
         phone.Send(new { type = "watch", request = 36, id = "small-xvid", quality = "480p", network = "away" });
         var declined = await phone.Next("stream", 60000);
         Check(declined?.GetProperty("kind").GetString() == "file" && declined?.GetProperty("convertible").GetBoolean() == true &&
@@ -267,16 +273,22 @@ static class PhoneLibraryChecks
         var converted = await phone.Next("stream", 60000);
         Check(converted?.GetProperty("kind").GetString() == "hls" && converted?.GetProperty("quality").GetString() == "480p" && converted?.GetProperty("audioTrack").GetInt32() == 0,
             "asked to convert anyway, the PC converts a file already smaller than 480p, with its sound");
-        var resource = "stream/" + converted?.GetProperty("streamId").GetString() + "/0";
-        var piece = default((long Length, string? Error));
-        for (var tries = 0; tries < 60; tries++)
+        // Its pieces, together no larger than the file by more than the AAC sound adds: the quality's own rate would
+        // have made it several times the file's size.
+        long total = 0; string? error = null;
+        for (var index = 0; index < converted?.GetProperty("segments").GetInt32(); index++)
         {
-            var read = await phone.Read(resource, 0, 188);
-            piece = (read.Length, read.Error);
-            if (read.Error is null) break;
-            await Task.Delay(500);
+            var resource = "stream/" + converted?.GetProperty("streamId").GetString() + "/" + index;
+            for (var tries = 0; tries < 60; tries++)
+            {
+                var read = await phone.Read(resource, 0, 188);
+                error = read.Error;
+                if (read.Error is null) { total += read.Length; break; }
+                await Task.Delay(500);
+            }
         }
-        Check(piece.Error is null && piece.Length > 0, $"the forced conversion's first piece is read ({piece.Error})");
+        var file = new FileInfo(Path.Combine(data, "Small XviD (2007).avi")).Length;
+        Check(error is null && total > 0 && total < file * 1.5, $"the forced conversion's pieces are read, and take about what the file does ({total} bytes for a {file}-byte file{(error is null ? "" : ", " + error)})");
         phone.Send(new { type = "watch", request = 38, id = "small-xvid", quality = StreamQuality.OriginalId, network = "home" });
         var original = await phone.Next("stream", 15000);
         Check(original?.GetProperty("kind").GetString() == "file" && original?.GetProperty("convertible").GetBoolean() == false,

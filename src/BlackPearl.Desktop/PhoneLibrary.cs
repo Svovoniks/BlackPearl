@@ -594,7 +594,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var segments = (int)((probe.DurationMs + StreamConverter.SegmentMs - 1) / StreamConverter.SegmentMs);
         var store = SegmentStore.TryCreate(directory, segments);
         if (store is null) return (null, "There is no room on the PC's disk to convert the video, so the phone plays the file as it is.", false);
-        var stream = new RoomStream(Guid.NewGuid().ToString("N"), item.Id, plan.Quality.Id, plan.Height, plan.VideoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
+        var videoKbps = ConvertedKbps(plan);
+        var stream = new RoomStream(Guid.NewGuid().ToString("N"), item.Id, plan.Quality.Id, plan.Height, videoKbps, probe.DurationMs, StreamConverter.SegmentMs, segments);
         // Languages as the PC's player knows them: a Matroska track ffmpeg calls English without the file saying so is
         // unknown, or the language identified while it played here. The header is a few kilobytes off a drive the probe woke.
         var container = await Task.Run(() => SubtitleText.Tracks(item.Path));
@@ -602,9 +603,17 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var tracks = ProbedAudio.WithContainerLanguages(probe.Audio, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, true, id)));
         var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(tracks, AudioLanguages());
         var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, audio, null), stream, store);
-        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = plan.VideoKbps, segments, audio, audioTracks = tracks.Length, anyway = !plan.Smaller });
+        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = videoKbps, segments, audio, audioTracks = tracks.Length, anyway = !plan.Smaller });
         return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = tracks, Audio = audio }, null, false);
     }
+
+    // The least a conversion asked for anyway gets for its picture, however little the file takes: below this H.264 at
+    // DVD size turns to blocks.
+    private const int AnywayFloorKbps = 300;
+    // The most a conversion's picture takes. Converted anyway, no more than the whole file does: Intel's, AMD's and
+    // Windows' encoders aim at the quality's own rate, which would send a 400 kbps XviD at three times its size, and
+    // the point is a picture the phone can play, not a different size.
+    internal static int ConvertedKbps(StreamPlan plan) => plan.Smaller ? plan.VideoKbps : (int)Math.Clamp(plan.FileKbps, AnywayFloorKbps, plan.VideoKbps);
 
     // The video's description, or null when the converter can't read it: it failed, took longer than its own 30 seconds
     // (a sleeping drive, or security software holding ffmpeg), or longer than wait. Read once per file.
