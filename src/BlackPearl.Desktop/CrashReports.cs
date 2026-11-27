@@ -9,7 +9,7 @@ using Sentry.Protocol;
 
 namespace BlackPearl.Desktop;
 
-// Errors, crashes and timings of startup and playback go to Sentry when the build carries a DSN and the person has not
+// Errors, crashes, and timings of startup, playback and phone links go to Sentry when the build carries a DSN and the person has not
 // turned crash reports off in Settings › Updates & about. Release builds get the DSN from CI (BLACKPEARL_DESKTOP_SENTRY_DSN
 // at build time); BLACKPEARL_SENTRY_DSN sets one at run time, which reports as "development". Builds without either send
 // nothing, so checks and local builds never report. CrashReportPrivacy (Core) decides what reports leave out.
@@ -198,8 +198,9 @@ public static class CrashReports
                 CrashReportPrivacy.Apply(options);
                 // Every trace while developing; a tenth of them from people's apps.
                 options.TracesSampleRate = environment == "production" ? 0.1 : 1.0;
-                // Every metadata run, so the share of titles left unmatched can be followed; others use the rate above.
-                options.TracesSampler = context => context.TransactionContext.Name == MetadataRunName ? 1.0 : null;
+                // Every metadata run, so the share of titles left unmatched can be followed, and every phone link's setup and
+                // stretches, which are few; others use the rate above.
+                options.TracesSampler = context => context.TransactionContext.Name is MetadataRunName or PhoneConnectName or PhoneLinkName ? 1.0 : null;
                 options.SetBeforeSend(evt => enabled ? WithTrail(CrashReportPrivacy.Scrub(evt)) : null);
                 options.SetBeforeSendTransaction(transaction => enabled ? CrashReportPrivacy.Scrub(transaction) : null);
             });
@@ -280,6 +281,77 @@ public static class CrashReports
         MetadataReports.Abandoned = on ? (trace, failed) => (trace as ITransactionTracer)?.Finish(failed ? SpanStatus.InternalError : SpanStatus.Cancelled) : null;
         MetadataReports.Failures = on ? MetadataFailed : null;
         MetadataReports.Runs = on ? MetadataRunEnded : null;
+        HookPhoneLink(on);
+    }
+
+    // Phone links (PHONE-REMOTE.md, "Measuring the link"): one trace for each link's setup, from the phone's offer to its hello,
+    // and one for each stretch of a paired link with its round trips and reads. Every one is sent (see TracesSampler): a PC
+    // has a few links a day.
+    private const string PhoneConnectName = "phone.connect", PhoneLinkName = "phone.link";
+    private static readonly string[] PhoneConnectStages = ["ice", "channel", "hello"];
+    private sealed class PhoneConnectTrace(ITransactionTracer transaction)
+    {
+        public readonly ITransactionTracer Transaction = transaction;
+        public ISpan Stage = transaction.StartChild("phone.connect.stage", PhoneConnectStages[0]);
+        public int Index;
+    }
+    private static void HookPhoneLink(bool on)
+    {
+        PhoneLinkReports.Connecting = on ? () => enabled ? new PhoneConnectTrace(SentrySdk.StartTransaction(PhoneConnectName, PhoneConnectName)) : null : null;
+        PhoneLinkReports.ConnectStage = on ? PhoneConnectStage : null;
+        PhoneLinkReports.Connects = on ? PhoneConnectEnded : null;
+        PhoneLinkReports.WindowStarting = on ? () => enabled ? SentrySdk.StartTransaction(PhoneLinkName, PhoneLinkName) : null : null;
+        PhoneLinkReports.Windows = on ? PhoneLinkWindowEnded : null;
+    }
+    // ICE connecting ends the "ice" stage and the data channel opening the "channel" one; the hello is the rest. Native threads
+    // can tell them out of order, so a later stage ends every one before it.
+    private static void PhoneConnectStage(object trace, string stage)
+    {
+        if (trace is not PhoneConnectTrace connect) return;
+        var index = stage switch { "connected" => 1, "channel" => 2, _ => -1 };
+        lock (connect)
+        {
+            if (index <= connect.Index) return;
+            connect.Stage.Finish(SpanStatus.Ok);
+            connect.Index = index;
+            connect.Stage = connect.Transaction.StartChild("phone.connect.stage", PhoneConnectStages[index]);
+        }
+    }
+    private static void PhoneConnectEnded(PhoneConnectReport report)
+    {
+        if (report.Trace is not PhoneConnectTrace connect || !enabled) return;
+        var status = report.Outcome switch
+        {
+            "greeted" => SpanStatus.Ok,
+            "failed" or "disconnected" => SpanStatus.Unavailable,
+            "replaced" or "stopped" or "removed" => SpanStatus.Cancelled,
+            "protocol" => SpanStatus.FailedPrecondition,
+            "unreadable-offer" => SpanStatus.InvalidArgument,
+            _ => SpanStatus.Aborted,
+        };
+        var transaction = connect.Transaction;
+        transaction.SetTag("phone.outcome", report.Outcome);
+        transaction.SetTag("phone.pairing", report.Pairing ? "yes" : "no");
+        transaction.SetTag("phone.via", report.Via);
+        transaction.SetTag("phone.path", report.Path);
+        if (report.PhoneApp is { } app) transaction.SetTag("phone.app", app);
+        transaction.SetData("candidates.local", report.Local);
+        transaction.SetData("candidates.remote", report.Remote);
+        lock (connect) connect.Stage.Finish(status);
+        transaction.Finish(status);
+    }
+    private static void PhoneLinkWindowEnded(PhoneLinkWindow window)
+    {
+        if (window.Trace is not ITransactionTracer trace || !enabled) return;
+        trace.SetTag("phone.path", window.Path);
+        trace.SetTag("phone.via", window.Via);
+        trace.SetTag("phone.end", window.End);
+        if (window.PhoneApp is { } app) trace.SetTag("phone.app", app);
+        foreach (var (name, value, unit) in window.Measurements)
+            trace.SetMeasurement(name, value, unit switch { "ms" => MeasurementUnit.Duration.Millisecond, "byte" => MeasurementUnit.Information.Byte, _ => MeasurementUnit.None });
+        trace.SetData("link.age_s", (long)window.LinkAge.TotalSeconds);
+        trace.SetData("pongs", window.Pongs);
+        trace.Finish(SpanStatus.Ok);
     }
 
     // One report per kind of failure an hour: a provider that is down fails every title, and one report says so.

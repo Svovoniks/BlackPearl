@@ -161,6 +161,44 @@ static class CrashReportCacheChecks
                 }
                 CrashReports.SetLogAllowed(true);
                 check(CrashReports.LogAllowed, "the app's log can be turned back on");
+
+                // Phone links (PHONE-REMOTE.md, "Measuring the link"): a link's setup and its stretches go out as traces, with
+                // their stages and numbers and nothing that names the phone or the PC.
+                using (var sentry = new FakeSentry(port))
+                {
+                    var connect = BlackPearl.Core.PhoneLinkReports.Connecting?.Invoke();
+                    check(connect is not null && BlackPearl.Core.PhoneLinkReports.WindowStarting is not null && BlackPearl.Core.PhoneLinkReports.Windows is not null,
+                        "phone link reports are hooked up while crash reports are on");
+                    BlackPearl.Core.PhoneLinkReports.ConnectStage!(connect!, "connected");
+                    BlackPearl.Core.PhoneLinkReports.ConnectStage!(connect!, "channel");
+                    BlackPearl.Core.PhoneLinkReports.Connects!(new("greeted", false, "server", "relay", "0.13.0", "host:2 srflx:1 prflx:0 relay:1", "host:1 srflx:1 prflx:0 relay:1", connect));
+                    // Native threads can tell the data channel opening before ICE connecting: the "ice" stage then covers both.
+                    var early = BlackPearl.Core.PhoneLinkReports.Connecting!.Invoke()!;
+                    BlackPearl.Core.PhoneLinkReports.ConnectStage!(early, "channel");
+                    BlackPearl.Core.PhoneLinkReports.ConnectStage!(early, "connected");
+                    BlackPearl.Core.PhoneLinkReports.Connects!(new("failed", true, "lan", "direct", null, "", "", early));
+                    var window = BlackPearl.Core.PhoneLinkReports.WindowStarting!.Invoke();
+                    BlackPearl.Core.PhoneLinkReports.Windows!(new("relay", "server", "0.13.0", "removed", TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(25),
+                        60, 58, 2, 48.5, 91.2, 300, 5_000_000, 20, 1, 12, 40, window));
+                    check(Until(() => sentry.Received("\"transaction\":\"phone.connect\"") && sentry.Received("\"transaction\":\"phone.link\""), 30), "a phone link's setup and stretches go out as traces");
+                    string Body(string text) { lock (sentry.Bodies) return sentry.Bodies.First(body => body.Contains(text)); }
+                    check(Until(() => sentry.Received("\"phone.outcome\":\"failed\""), 30), "a link that failed before its hello goes out too");
+                    string[] Stages(string body) => System.Text.RegularExpressions.Regex.Matches(body, "\"op\":\"phone.connect.stage\",\"description\":\"([a-z]+)\"").Select(m => m.Groups[1].Value).ToArray();
+                    var setup = Body("\"phone.outcome\":\"greeted\"");
+                    var failed = Body("\"phone.outcome\":\"failed\"");
+                    check(setup.Contains("\"phone.path\":\"relay\"") && setup.Contains("\"phone.via\":\"server\"") && setup.Contains("\"phone.app\":\"0.13.0\"") && Stages(setup).SequenceEqual(["ice", "channel", "hello"]),
+                        $"a link's setup goes with its path, the phone app's version, and a span for each stage ({string.Join(",", Stages(setup))})");
+                    check(Stages(failed).SequenceEqual(["ice", "hello"]) && failed.Contains("\"status\":\"unavailable\"") && failed.Contains("\"phone.pairing\":\"yes\""),
+                        $"a setup whose stages came out of order keeps them in order, and a failed one says so ({string.Join(",", Stages(failed))})");
+                    var link = Body("\"transaction\":\"phone.link\"");
+                    check(link.Contains("\"rtt\":{\"value\":48.5,\"unit\":\"millisecond\"}") && link.Contains("\"media_bytes\":{\"value\":5000000,\"unit\":\"byte\"}") &&
+                        link.Contains("\"pings_unanswered\":{\"value\":2") && link.Contains("\"phone.end\":\"removed\""),
+                        $"a link's stretch goes with its round trips, reads and bytes as measurements ({System.Text.RegularExpressions.Regex.Match(link, "\"measurements\":\\{[^}]*\\}[^}]*\\}").Value})");
+                }
+                CrashReports.SetAllowed(false);
+                check(BlackPearl.Core.PhoneLinkReports.Connecting is null && BlackPearl.Core.PhoneLinkReports.Windows is null, "turning crash reports off unhooks phone link reports");
+                CrashReports.SetAllowed(true);
+                check(BlackPearl.Core.PhoneLinkReports.Connecting is not null, "turning them back on hooks them up again");
             }
             // Closing the process right after a report: what is queued is still sent, or stays on disk if the 500 ms
             // shutdown runs out, but is never deleted unsent.

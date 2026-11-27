@@ -96,6 +96,14 @@ sealed class FakePhone : IAsyncDisposable
         {
             var message = JsonDocument.Parse(text.Text).RootElement.Clone();
             if (message.GetProperty("type").GetString() == "welcome") result.welcome.TrySetResult(message);
+            // The PC's own pings, sent to phones whose hello lists `ping` (PHONE-REMOTE.md, "Measuring the link"): answered
+            // at once, as BlackPearl Mobile does, and kept out of the messages checks wait for.
+            if (message.GetProperty("type").GetString() == "ping")
+            {
+                Interlocked.Increment(ref result.pcPings);
+                if (result.AnswerPings) result.channel.Send(Wire.Serialize(new { type = "pong", number = message.GetProperty("number").GetInt64() }));
+                return;
+            }
             result.messages.Writer.TryWrite(message);
         };
         result.media = result.peer.CreateDataChannel(new RtcCreateDataChannelArgs { Label = PhoneRemoteProtocol.MediaLabel });
@@ -144,6 +152,10 @@ sealed class FakePhone : IAsyncDisposable
     }
 
     public string Session => session;
+    // Whether it answers the PC's pings, and how many it got.
+    public bool AnswerPings { get; set; } = true;
+    int pcPings;
+    public int PcPings => Volatile.Read(ref pcPings);
     public void Send(object message) => channel.Send(Wire.Serialize(message));
     public void SendText(string text) => channel.Send(text);
     public async Task<bool> MediaOpened(int milliseconds = 10000) => await Task.WhenAny(mediaOpen.Task, Task.Delay(milliseconds)) == mediaOpen.Task;
