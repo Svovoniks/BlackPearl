@@ -231,6 +231,8 @@ public sealed partial class RoomClient : IAsyncDisposable
     private string connectStage = "address";
     private bool ConnectFailed(Exception error, string action)
     {
+        // Cancelled by whoever asked to enter, such as the app closing: nothing failed.
+        if (error is OperationCanceledException && lifetime.IsCancellationRequested) return false;
         PlaybackDiagnostics.Failed("room-connect-failed", error, new { room = diagnosticId, action, stage = connectStage });
         return false;
     }

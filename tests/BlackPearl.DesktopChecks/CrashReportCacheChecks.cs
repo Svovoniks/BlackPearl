@@ -129,13 +129,16 @@ static class CrashReportCacheChecks
                 // The app's log: an error carries the diagnostics log's latest entries, reduced to kinds, numbers and codes.
                 BlackPearl.Core.PlaybackDiagnostics.Initialize(Path.Combine(data, "logs"));
                 BlackPearl.Core.PlaybackDiagnostics.Record("room-connect-failed", new { stage = "health", error = "HttpRequestException", path = @"C:\Users\Ann\Videos\Night Show S01E02.mkv", name = "Ann" });
+                // A subtitle file's language, as track detection records it; file names are still off here.
+                BlackPearl.Core.PlaybackDiagnostics.Record("track-language", new { file = true, language = "en", confidence = 0.9 });
+                check(!CrashReports.FileNamesAllowed, "the app's log is checked with file names off");
                 check(CrashReports.LogAllowed, "the app's log goes with crash reports unless it is turned off");
                 SentrySdk.CaptureMessage("cache-check with log", SentryLevel.Error);
                 SentrySdk.CaptureMessage("cache-check info without log");
                 Until(() => Waiting() >= 2, 15);
                 using (var sentry = new FakeSentry(port))
                 {
-                    check(Until(() => sentry.Received("cache-check with log") && sentry.Received("cache-check info without log"), 30), "reports with and without the app's log go out");
+                    check(Until(() => sentry.Received("cache-check with log") && sentry.Received("cache-check info without log"), 30), "reports with and without the app's log go out, with file names off and a log entry about a subtitle file");
                     string Body(string text) { lock (sentry.Bodies) return sentry.Bodies.First(body => body.Contains(text)); }
                     var withLog = Body("cache-check with log");
                     check(withLog.Contains("\"breadcrumbs\":") && withLog.Contains("room-connect-failed") && withLog.Contains("\"stage\":\"health\""), "an error report carries the app's log");

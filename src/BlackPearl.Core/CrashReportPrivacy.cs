@@ -73,7 +73,9 @@ public static partial class CrashReportPrivacy
     }
     private static string? TrailValue(string key, System.Text.Json.JsonElement value)
     {
-        if (!System.Text.RegularExpressions.Regex.IsMatch(key, "^[A-Za-z][A-Za-z0-9]{0,39}$")) return null;
+        // A "file" field marks a report that names files, which the desktop app holds back while file names are off.
+        // The log's own "file" fields are only true/false, but sending one would hold back the whole report.
+        if (key == "file" || !System.Text.RegularExpressions.Regex.IsMatch(key, "^[A-Za-z][A-Za-z0-9]{0,39}$")) return null;
         switch (value.ValueKind)
         {
             case System.Text.Json.JsonValueKind.Number: return value.GetRawText();

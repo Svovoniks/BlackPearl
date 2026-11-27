@@ -1330,7 +1330,7 @@ public partial class MainWindow : Window
         // Without it, the video starts without knowing whether someone else was already playing.
         try { await client.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(8), lifetime.Token); }
         catch (Exception ex) when (ex is TimeoutException or IOException or OperationCanceledException)
-        { PlaybackDiagnostics.Failed("room-controls-not-ready", ex, new { stage = "host-video", current = room == client }); }
+        { if (!lifetime.IsCancellationRequested) PlaybackDiagnostics.Failed("room-controls-not-ready", ex, new { stage = "host-video", current = room == client }); }
         if (room != client || !ConfirmTakeOver()) return;
         queuePosition = -1;
         await StartHostedVideo(item);

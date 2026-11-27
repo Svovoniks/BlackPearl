@@ -326,7 +326,8 @@ public static class ContentAcquisition
         {
             PlaybackDiagnostics.Record("acquisition-run", new { plugin = plugin.Id, scope = request.Scope, content = request.ContentType, action = request.Action ?? "get",
                 episodes = request.Episodes.Length, selected = request.SelectedReleases?.Length ?? 0, interactive = plugin.Interactive, outcome, exit, success = result.Success,
-                stage = result.Stage, choices = result.Choices?.Length ?? 0, ms = started.ElapsedMilliseconds });
+                // The plugin writes its stage; only the documented ones (PLUGINS.md) are recorded as they are.
+                stage = result.Stage is null or "shows" or "releases" ? result.Stage : "other", choices = result.Choices?.Length ?? 0, ms = started.ElapsedMilliseconds });
             return result;
         }
         var json = Wire.Serialize(request);

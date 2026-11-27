@@ -84,6 +84,9 @@ static class CrashReportFixture
         var leaks = new[] { "Ann", "Night", "Show", "private-host", "192.168", "peer-7731", "ab12cd34", "5f3a9c1e", "Pixel", "mediaId", "m-881", "QWERTY", "0123456789abcdef", "Users", "message", "path", "title" }
             .Where(text => all.Contains(text, StringComparison.OrdinalIgnoreCase)).ToArray();
         check(leaks.Length == 0, "the app's log leaves out titles, paths, names, ids, addresses, messages and nested values (found: " + string.Join(", ", leaks) + ")");
+        var subtitle = CrashReportPrivacy.Trail([Line("track-language", new { file = true, confidence = 0.9 }, now - 100)], now);
+        check(subtitle.Count == 1 && subtitle[0].Data!.GetValueOrDefault("confidence") == "0.9" && !subtitle[0].Data!.ContainsKey("file"),
+            "the app's log leaves out \"file\" fields, which would hold the whole report back while file names are off");
         var many = Enumerable.Range(0, 300).Select(index => Line($"check-kind{index % 15}", new { index }, now - 300 + index)).ToList();
         var latest = CrashReportPrivacy.Trail(many, now);
         check(latest.Count == CrashReportPrivacy.TrailEntries && latest[0].Data!["index"] == "100" && latest[^1].Data!["index"] == "299", "the app's log sends its latest 200 entries at most");
