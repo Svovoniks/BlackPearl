@@ -64,6 +64,31 @@ Use two Windows computers on different internet connections (for example home br
 
 The current architecture sends one copy per viewer, even through TURN, so a relay does not reduce the streamer's upload requirements. Every member also holds a connection to every other member for voice. Cloudflare bills relayed traffic beyond its free allowance; monitor usage in the Cloudflare dashboard.
 
+## Logs
+
+The service writes one line per event to the journal: rooms created, opened, emptied and closed, everyone entering and leaving with the reason and how long they stayed, removals and people let back in, a second window replacing an earlier one, phones asking for their PC, PCs coming online and going offline, and every connection turned away with the error the app was given. Under systemd each line starts with its journal priority, so the journal keeps the level and adds the time. Pings and playback never log, so a room that is only watching writes nothing; a typical evening of two people in a room and a phone remote is about a dozen lines.
+
+```sh
+journalctl -u blackpearl -f                          # follow (the Watchroom install's unit is watchroom)
+journalctl -u blackpearl -p warning --since today    # only connections turned away or lost, and errors
+journalctl -u blackpearl -g '\[3f2a9c1b\]'           # every line about one connection
+journalctl -u blackpearl -g 'room 5f2494'            # everything about one room
+journalctl -u blackpearl -o short-iso-precise        # timestamps to the microsecond
+```
+
+Every line about a connection starts with its connection id, eight hex digits in brackets that the service picks when the socket opens. The log never holds display or room names, invitation codes, keys, member, phone or PC ids, signal contents, or client addresses. A room, a person or a PC is named by a tag instead: the first six hex digits of the SHA-256 of its invitation code, member id or PC id, the same on every line and every connection. To find the tag for an invitation code or a PC id you have, `printf %s 0123456789ABCDEF01234567 | sha256sum | cut -c1-6`, with the code or id in capitals.
+
+What a leaving line's reason means:
+
+- `closed by the app`, or `the app cut the connection without a WebSocket close`: the app left. BlackPearl cuts its room connection when it leaves, so the second is the usual one; an app that quits or crashes looks the same.
+- `no answer to the service's keep-alive pings for 30 s`: the app or its network went quiet without closing the connection, such as a sleeping laptop or a lost Wi-Fi link. The service pings every 20 seconds and ends the connection within about a minute.
+- `replaced by connection …` or `removed by …`: someone entered again from another window, or the room's creator removed them.
+- `refused: …`: the service turned the app away with that error, such as a message flood or an invalid invitation.
+- `the app stopped reading`: 128 messages waited to be sent to it, so it was cut off.
+- `reached the 6-hour connection limit`: by design; the app connects again on its own.
+
+Levels and format are set with `Logging__*` settings in `/etc/blackpearl/blackpearl.env`, followed by a restart. `Logging__LogLevel__BlackPearl=Debug` adds a line for every signal relayed or dropped, which is busy during connection setup. `Logging__Console__FormatterName=json` writes JSON lines with each value as a named field, for tools such as `jq`; the journal then shows every line at the same priority. ASP.NET's own lines are limited to warnings by default, apart from its startup lines; `Logging__LogLevel__Microsoft=Information` brings back its lines for every request, which include the server's address. Name a setting without dots: systemd ignores an environment variable whose name has one, such as `Logging__LogLevel__Microsoft.AspNetCore`, and logs "Ignoring invalid environment assignment" when the service starts.
+
 ## Operations
 
 - Cloudflare credentials are fetched at startup and refreshed in the background. Each credential handed to a participant stays valid for at least 12 hours. If Cloudflare is unreachable, participants receive STUN only and the service retries every minute.
