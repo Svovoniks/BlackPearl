@@ -162,9 +162,11 @@ static class StreamQualityFixture
             await Until(() => player.IsPlaying && player.Time > 500);
             check(Math.Abs(player.Length - probe!.DurationMs) < 500 && player.IsSeekable, $"the player shows the video's full length ({player.Length} ms) and can seek");
             // libVLC repeats this stream's time between the moments it moves on (about once a second), and the room's
-            // sync read every repeat as new: up to 750 ms behind, so it changed the speed every few seconds.
+            // sync read every repeat as new: up to 750 ms behind, so it changed the speed every few seconds (it strayed
+            // 838 to 923 ms here). A new time is still seen up to one report (250 ms) late, so the estimate can trail by
+            // that much, plus timer jitter, until an anchor seen right after its change comes round: 14 to 221 ms measured.
             var clock = await MeasureClock(player, 8000);
-            check(clock.Spread < 300, $"the room's estimate of where the converted stream plays keeps to a steady clock (strays {clock.Spread} ms; {clock.Times} times in {clock.Events} reports)");
+            check(clock.Spread < 400, $"the room's estimate of where the converted stream plays keeps to a steady clock (strays {clock.Spread} ms; {clock.Times} times in {clock.Events} reports)");
             player.Time = 18500;
             // The player first reports where the piece it needs begins, refills its buffer, and then plays on from the requested time.
             var sought = Stopwatch.StartNew();
