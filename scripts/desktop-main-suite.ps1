@@ -1,8 +1,8 @@
 #Requires -Version 7.0
 # Runs the main BlackPearl.DesktopChecks suite (release-checks.ps1 and test.ps1 both use this).
 # Its startup gate ("startup library loading keeps processing input") fails when the longest pause in input handling
-# while the library loads reaches 350 ms. The app normally pauses 250-330 ms, so any other load on the machine (a build,
-# an encode, an antivirus scan, a busy CI runner) can push one run over the limit. When that gate alone fails, the
+# while the library loads reaches 350 ms. The app normally pauses 100-200 ms; heavy load from other processes (builds,
+# other release checks, an encode) or a fresh CI runner's cold disk can still push one run over the limit. When that gate alone fails, the
 # suite runs again, up to -Attempts times, and the busiest other processes are listed each time. A real regression
 # fails every attempt. Any other failure stops at once.
 [CmdletBinding()]

@@ -213,8 +213,9 @@ release is verified and local `master` is synchronized, or say exactly which
 step failed.
 
 The main desktop suite's startup gate ("startup library loading keeps processing
-input", 350 ms) fails under load from other processes. The app's normal pause is
-250 to 330 ms. `scripts/desktop-main-suite.ps1` reruns the suite when only that
+input", 350 ms) fails under heavy load from other processes. The app's normal
+pause is 100 to 200 ms; a fresh CI runner's first attempt, on a cold disk, takes
+about 400 ms. `scripts/desktop-main-suite.ps1` reruns the suite when only that
 gate fails, and lists the busiest other processes. A gate that fails on every
 attempt is a real regression. Look at what your change runs on the UI thread at
 startup.
