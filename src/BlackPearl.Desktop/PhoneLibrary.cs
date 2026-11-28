@@ -317,7 +317,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         if (await Task.WhenAny(reading, Task.Delay(SubtitleAnswerWait, ct)) != reading) throw new PhoneResourceBusyException("The subtitles are still being read out of the video.");
         byte[]? bytes;
         try { bytes = await reading; }
-        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or OperationCanceledException) { bytes = null; }
+        // Any failure, so a track that failed once is read out again next time rather than failing until the cache clears.
+        catch (Exception ex) { PlaybackDiagnostics.Record("phone-subtitles", new { state = "failed", error = ex.GetType().Name }); bytes = null; }
         if (bytes is not null) return PhoneResource.FromBytes(bytes);
         subtitleFiles.TryRemove(KeyValuePair.Create(key, reading));
         return Missing(session, "subtitle", "unreadable-subtitle");
@@ -388,6 +389,21 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     // or a conversion of it at a lower bitrate for a slow link.
     private async Task Watch(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message, Action<string, string> fail)
     {
+        // The phone's latest watch is the one it plays: one it asked for before, still preparing (subtitles drawn into the
+        // picture take up to BurnWait), stops there and leaves the newer one's stream alone.
+        using var asked = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        var earlier = latestWatch.GetValueOrDefault(session.PhoneId);
+        latestWatch[session.PhoneId] = asked;
+        try { earlier?.Cancel(); } catch (ObjectDisposedException) { }
+        try { await WatchLatest(remote, session, request, message, fail, asked.Token); }
+        finally { latestWatch.TryRemove(KeyValuePair.Create(session.PhoneId, asked)); }
+    }
+    // By phone id: the watch each phone asked for last, while it is prepared.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> latestWatch = new();
+
+    private async Task WatchLatest(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message, Action<string, string> fail, CancellationToken replaced)
+    {
+        bool Stale() => current() != remote || replaced.IsCancellationRequested;
         var id = Text(message, "id");
         var item = Items().FirstOrDefault(x => x.Id == id && x.Available && !x.IsVirtual);
         if (item is null || !File.Exists(item.Path)) { fail("gone", "That video isn't available on the PC. Its drive may be disconnected."); return; }
@@ -415,8 +431,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         long durationMs = (long)((item.DurationSeconds ?? 0) * 1000);
         if (wanted != StreamQuality.OriginalId && !(wanted == "auto" && home) && !item.IsMusic)
         {
-            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), Number(message, "subtitle"), qualities, Flag(message, "convertAnyway"));
-            if (current() != remote) { converted?.Dispose(); return; }
+            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), Number(message, "subtitle"), qualities, Flag(message, "convertAnyway"), replaced);
+            if (Stale()) { converted?.Dispose(); return; }
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
             else (note, convertible) = (why, smaller);
         }
@@ -434,7 +450,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             tracks = TrackPreferences();
         }
         catch { stream.Dispose(); throw; }
-        if (current() != remote) { stream.Dispose(); return; }
+        if (Stale()) { stream.Dispose(); return; }
         if (streams.TryRemove(session.PhoneId, out var raced)) raced.Dispose();
         stream.Rewatch = startedWatched;
         streams[session.PhoneId] = stream;
@@ -623,7 +639,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     // can't play the file itself, so it gets the picture converted though that saves no data. It carries one audio
     // track: the one the phone asked for, or the one the PC's player would start with. Of the subtitles, the one the
     // phone shows (asked for, -1 for none, or the PC player's choice) is drawn into the picture when it has to be.
-    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, long? subtitleWanted, List<string> qualities, bool anyway)
+    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, long? subtitleWanted, List<string> qualities, bool anyway, CancellationToken replaced)
     {
         if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.", false);
         var probe = await Probe(ffmpeg, item, null);
@@ -652,7 +668,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         StreamSubtitle? burned = null;
         if (shown is { } drawn && burns[drawn])
         {
-            burned = await PrepareBurn(ffmpeg, item.Path, probe, drawn, directory);
+            burned = await PrepareBurn(ffmpeg, item.Path, probe, drawn, directory, replaced);
             // Not drawn in after all: the phone shows none, rather than a track it can't have.
             if (burned is null) shown = null;
         }
@@ -664,9 +680,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
 
     // A subtitle track ready to be drawn into a conversion's picture, or null when it can't be: a text track (with the
     // video's fonts) is read out of the whole video first, which the phone waits for. Past BurnWait it plays without.
-    private async Task<StreamSubtitle?> PrepareBurn(string ffmpeg, string path, VideoProbe probe, int track, string directory)
+    private async Task<StreamSubtitle?> PrepareBurn(string ffmpeg, string path, VideoProbe probe, int track, string directory, CancellationToken replaced)
     {
-        using var limit = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(replaced);
         limit.CancelAfter(BurnWait);
         try { return await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), directory, limit.Token); }
         catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or OperationCanceledException)
