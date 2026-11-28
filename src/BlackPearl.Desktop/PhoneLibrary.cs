@@ -439,7 +439,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         long durationMs = (long)((item.DurationSeconds ?? 0) * 1000);
         if (wanted != StreamQuality.OriginalId && !(wanted == "auto" && home) && !item.IsMusic)
         {
-            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), Number(message, "subtitle"), qualities, Flag(message, "convertAnyway"), replaced);
+            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), Number(message, "subtitle"), TrackHint(message, "audio"), TrackHint(message, "subtitle"), qualities, Flag(message, "convertAnyway"), replaced);
             if (Stale()) { converted?.Dispose(); return; }
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
             else (note, convertible) = (why, smaller);
@@ -621,6 +621,12 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         try { return TrackLanguages.Parse(library.Setting("audioLanguages") ?? ""); } catch (ArgumentException) { return []; }
     }
 
+    // The audio or subtitles (kind) the phone's user picked for an earlier episode of this viewing, as their language and
+    // title: a conversion of the next one starts with the same, ahead of Settings › Playback. Null when the phone names
+    // none. (Subtitles turned off come as subtitle -1, which is the same in every file.)
+    private static ChosenTrack? TrackHint(JsonElement message, string kind) =>
+        TrackLanguages.Normalize(Text(message, kind + "Language")) is { } language ? new(language, ChosenTrack.Title(Text(message, kind + "Title"))) : null;
+
     private (string[] Languages, SubtitleLanguageRule[] Rules) SubtitleLanguages()
     {
         string[] subtitles = [];
@@ -645,9 +651,10 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     // A conversion of the video at the quality asked for, or why there is none: no converter, a file that can't be read,
     // or a file already smaller than the conversion would be (Smaller), unless anyway: the phone asks for that when it
     // can't play the file itself, so it gets the picture converted though that saves no data. It carries one audio
-    // track: the one the phone asked for, or the one the PC's player would start with. Of the subtitles, the one the
-    // phone shows (asked for, -1 for none, or the PC player's choice) is drawn into the picture when it has to be.
-    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, long? subtitleWanted, List<string> qualities, bool anyway, CancellationToken replaced)
+    // track: the one the phone asked for, the one in the language picked for an earlier episode, or the one the PC's player
+    // would start with. Of the subtitles, the one the phone shows (asked for, -1 for none, as picked for an earlier episode,
+    // or the PC player's choice) is drawn into the picture when it has to be.
+    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, long? subtitleWanted, ChosenTrack? audioHint, ChosenTrack? subtitleHint, List<string> qualities, bool anyway, CancellationToken replaced)
     {
         if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.", false);
         var probe = await Probe(ffmpeg, item, null);
@@ -667,12 +674,14 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var container = await Task.Run(() => SubtitleText.Tracks(item.Path));
         var fileKey = LibraryStore.TrackLanguageFile(item.Path);
         var tracks = ProbedAudio.WithContainerLanguages(probe.Audio, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, true, id)));
-        var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(tracks, AudioLanguages());
+        var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value
+            : SessionTracks.Match(tracks.Select((track, index) => new LanguageTrack(index, track.Title ?? "", track.Language)), audioHint) ?? ProbedAudio.Preferred(tracks, AudioLanguages());
         var subtitles = ProbedSubtitle.WithContainerLanguages(probe.Subtitles, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, false, id)));
         var burns = subtitles.Select(track => track.BurnsFor(probe)).ToArray();
         var (subtitleLanguages, rules) = SubtitleLanguages();
         var shown = subtitleWanted is { } asked ? asked >= 0 && asked < subtitles.Length ? (int?)asked : null
-            : ProbedSubtitle.Preferred(subtitles, audio is { } a ? new LanguageTrack(a, tracks[a].Title ?? "", tracks[a].Language) : null, subtitleLanguages, rules);
+            : SessionTracks.Match(subtitles.Select((track, index) => new LanguageTrack(index, track.Title ?? "", track.Language)), subtitleHint, true)
+                ?? ProbedSubtitle.Preferred(subtitles, audio is { } a ? new LanguageTrack(a, tracks[a].Title ?? "", tracks[a].Language) : null, subtitleLanguages, rules);
         StreamSubtitle? burned = null;
         if (shown is { } drawn && burns[drawn])
         {

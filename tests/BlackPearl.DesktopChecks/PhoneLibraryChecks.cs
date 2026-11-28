@@ -379,6 +379,14 @@ static class PhoneLibraryChecks
         phone.Send(new { type = "watch", request = 44, id = "subtitled", quality = "480p", network = "away" });
         var off = await phone.Next("stream", 60000);
         Check(off?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Null, "with subtitles off in Settings › Playback, a conversion starts without them");
+        // Another episode after subtitles were picked by hand on the phone: their language, ahead of Settings › Playback.
+        phone.Send(new { type = "watch", request = 45, id = "subtitled", quality = "480p", network = "away", subtitleLanguage = "ja" });
+        var hinted = await phone.Next("stream", 60000);
+        Check(hinted?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Number && hinted?.GetProperty("subtitleTrack").GetInt32() == 1,
+            "subtitles in the language picked for an earlier episode start the next one's conversion, though Settings › Playback says off");
+        phone.Send(new { type = "watch", request = 46, id = "subtitled", quality = "480p", network = "away", subtitleLanguage = "de" });
+        var unmatched = await phone.Next("stream", 60000);
+        Check(unmatched?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Null, "a language the video has no subtitles in leaves them to Settings › Playback");
         store.Setting("subtitleLanguages", "");
     }
 
@@ -398,10 +406,11 @@ static class PhoneLibraryChecks
     static async Task ConvertedSound(LibraryStore store, FakePhone phone, string data)
     {
         store.Setting("audioLanguages", "en");
-        async Task<(System.Text.Json.JsonElement? Answer, double? Volume)> Watch(int request, int? audio, string id = "dual-audio")
+        async Task<(System.Text.Json.JsonElement? Answer, double? Volume)> Watch(int request, int? audio, string id = "dual-audio", string? language = null)
         {
             phone.Send(audio is { } track
                 ? new { type = "watch", request, id, quality = "480p", network = "away", audio = track }
+                : language is not null ? new { type = "watch", request, id, quality = "480p", network = "away", audioLanguage = language }
                 : (object)new { type = "watch", request, id, quality = "480p", network = "away" });
             var answer = await phone.Next("stream", 60000);
             if (answer is not { } a || a.GetProperty("kind").GetString() != "hls") return (answer, null);
@@ -430,6 +439,11 @@ static class PhoneLibraryChecks
             $"a 480p conversion has sound, in the language Settings › Playback prefers over the file's default (mean {loud} dB)");
         var (picked, quiet) = await Watch(31, 0);
         Check(picked?.GetProperty("audioTrack").GetInt32() == 0 && quiet < -80, $"the phone picks another audio track of a conversion (mean {quiet} dB)");
+        // The next episode of what the phone plays, with the audio picked by hand for the last one: ahead of Settings › Playback.
+        var (hinted, _) = await Watch(40, null, language: "ja");
+        Check(hinted?.GetProperty("audioTrack").GetInt32() == 0, "the next episode's conversion starts in the language picked on the phone for the last one, though Settings › Playback prefers English");
+        var (unknownHint, _) = await Watch(41, null, language: "de");
+        Check(unknownHint?.GetProperty("audioTrack").GetInt32() == 1, "a language the file doesn't have leaves the pick to Settings › Playback");
         var (outOfRange, _) = await Watch(32, 7);
         Check(outOfRange?.GetProperty("audioTrack").GetInt32() == 1, "a track the file doesn't have falls back to the preferred one");
         // A track the file names no language for is English to ffmpeg; the PC's player knows better, and so does this.

@@ -261,6 +261,17 @@ static class Program
             });
             app.Run(); return;
         }
+        if (args.FirstOrDefault() == "--session-tracks")
+        {
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            app.Dispatcher.BeginInvoke(async () =>
+            {
+                try { await SessionTrackChecks.Run(directory); }
+                catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
+                finally { app.Shutdown(); }
+            });
+            app.Run(); return;
+        }
         if (args.FirstOrDefault() == "--language-detection")
         {
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
