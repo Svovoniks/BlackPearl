@@ -36,6 +36,23 @@ static class HomeLibraryFixture
         check(LibraryHome.Browse(items, playback, 7).First(entry => entry.Section == "continue").Card.Media.Id == "film", "the most recently played title leads continue watching");
         playback["played:a3"] = "3000";
         check(LibraryHome.Browse(items, playback, 7).First(entry => entry.Section == "continue").Card.Media.Series == "Started show", "any episode played later moves its show to the front");
+        // Removed from Continue watching by hand: out of the row until one of its videos is played after that.
+        var hiding = new Dictionary<string, string>(playback) { [LibraryHome.HiddenPrefix + "film"] = "2500" };
+        string[] Continuing() => LibraryHome.Browse(items, hiding, 7).Where(entry => entry.Section == "continue").Select(entry => entry.Card.Media.Id).ToArray();
+        check(Continuing() is ["a3"] && LibraryHome.Overview(items, hiding, 7) is var hidden && hidden.Removed == 1 && hidden.Seen.Any(title => title.Card.Media.Id == "film") &&
+            !hidden.Entries.Any(entry => entry.Section is "suggestions" or "unwatched" && entry.Card.Media.Id == "film"),
+            "a film removed from Continue watching leaves the row and stays a started title, not a suggestion");
+        check(SharedLibrary.Browse(items, new LibraryBrowseRequest(Home: true, Seed: 7), playback: hiding).Entries.Where(entry => entry.HomeSection == "continue").Select(entry => entry.Id).SequenceEqual(["a3"]),
+            "a title removed from Continue watching leaves the phone's and the guests' Home too");
+        hiding["played:film"] = "2600";
+        check(LibraryHome.Browse(items, hiding, 7).Where(entry => entry.Section == "continue").Select(entry => (entry.Card.Media.Id, entry.PositionMs)).SequenceEqual([("a3", 45000L), ("film", 60000L)]),
+            "a film played again after it was removed comes back, where it was");
+        hiding[LibraryHome.HiddenPrefix + "a3"] = "3000";
+        check(Continuing() is ["film"], "a show removed from Continue watching leaves the row");
+        hiding["played:a1"] = "3100";
+        check(Continuing() is ["a3", "film"] && LibraryHome.Overview(items, hiding, 7).Removed == 0, "playing any of a removed show's episodes brings it back");
+        hiding[LibraryHome.HiddenPrefix + "film"] = "9000"; hiding["watched:film"] = "true"; hiding["position:film"] = "0";
+        check(LibraryHome.Overview(items, hiding, 7).Removed == 0, "a removed title finished since isn't counted as removed: it would have left the row anyway");
         // Shuffle: an earlier episode left part-way, then a later one played after it.
         playback["position:a2"] = "86000"; playback["played:a2"] = "2500";
         HomeLibraryCard ShowCard() => LibraryHome.Browse(items, playback, 7).Single(entry => entry.Section == "continue" && entry.Card.Media.Series is not null);

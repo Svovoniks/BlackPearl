@@ -322,6 +322,9 @@ public sealed partial class LibraryStore
                     Setting("position:" + replacements[0].Id, position);
                 if (Setting(LibraryWatchProgress.RewatchPrefix + gone.Id) is { } rewatch && replacements.All(x => Setting(LibraryWatchProgress.RewatchPrefix + x.Id) is null))
                     Setting(LibraryWatchProgress.RewatchPrefix + replacements[0].Id, rewatch);
+                // A title removed from Continue watching stays removed when its file is replaced by another release.
+                if (Setting(LibraryHome.HiddenPrefix + gone.Id) is { } hidden && replacements.All(x => Setting(LibraryHome.HiddenPrefix + x.Id) is null))
+                    Setting(LibraryHome.HiddenPrefix + replacements[0].Id, hidden);
                 using var db = Open(); using var command = db.CreateCommand();
                 command.CommandText = "DELETE FROM media WHERE id=$id AND json_extract(json,'$.available')=0"; command.Parameters.AddWithValue("$id", gone.Id);
                 dropped += command.ExecuteNonQuery();
@@ -396,13 +399,20 @@ public sealed partial class LibraryStore
     public Dictionary<string, string> PlaybackSettings()
     {
         using var db = Open(); using var command = db.CreateCommand();
-        command.CommandText = "SELECT key, value FROM settings WHERE key LIKE 'watched:%' OR key LIKE 'position:%' OR key LIKE 'played:%' OR key LIKE 'version:%' OR key LIKE 'added:%' OR key LIKE 'rewatch:%'";
+        command.CommandText = "SELECT key, value FROM settings WHERE key LIKE 'watched:%' OR key LIKE 'position:%' OR key LIKE 'played:%' OR key LIKE 'version:%' OR key LIKE 'added:%' OR key LIKE 'rewatch:%' OR key LIKE 'continue-hidden:%'";
         using var rows = command.ExecuteReader(); var result = new Dictionary<string, string>();
         while (rows.Read()) result[rows.GetString(0)] = rows.GetString(1);
         return result;
     }
     // Marking videos watched or unwatched ends any rewatch of them (LibraryWatchProgress.RewatchPrefix).
     public void ForgetRewatch(IEnumerable<string> ids) => RemoveSettings(ids.Select(id => LibraryWatchProgress.RewatchPrefix + id));
+    // Takes the title a Continue watching card stands on (the video id) out of the row until it is played again
+    // (LibraryHome.HiddenPrefix), or puts it back.
+    public void HideFromContinue(string id, bool hidden = true)
+    {
+        if (hidden) Setting(LibraryHome.HiddenPrefix + id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        else RemoveSettings([LibraryHome.HiddenPrefix + id]);
+    }
     public void Setting(string key, string value)
     {
         using var db = Open(); using var c = db.CreateCommand();
@@ -653,9 +663,10 @@ public sealed partial class LibraryStore
             command.Parameters.AddWithValue("$id", id);
             if (command.ExecuteNonQuery() == 0) continue;
             removed++;
-            command.CommandText = "DELETE FROM settings WHERE key=$position OR key=$watched OR key=$played OR key=$added OR key=$rewatch";
+            command.CommandText = "DELETE FROM settings WHERE key=$position OR key=$watched OR key=$played OR key=$added OR key=$rewatch OR key=$hidden";
             command.Parameters.AddWithValue("$position", "position:" + id);
             command.Parameters.AddWithValue("$rewatch", LibraryWatchProgress.RewatchPrefix + id);
+            command.Parameters.AddWithValue("$hidden", LibraryHome.HiddenPrefix + id);
             command.Parameters.AddWithValue("$watched", "watched:" + id);
             command.Parameters.AddWithValue("$played", "played:" + id);
             command.Parameters.AddWithValue("$added", LibraryAdded.Prefix + id);
