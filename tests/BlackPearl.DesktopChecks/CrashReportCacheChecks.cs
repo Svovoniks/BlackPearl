@@ -1,5 +1,6 @@
 using System.IO;
 using System.Net;
+using System.Net.Http;
 using System.Net.Sockets;
 using System.Text;
 using BlackPearl.Desktop;
@@ -161,6 +162,44 @@ static class CrashReportCacheChecks
                 }
                 CrashReports.SetLogAllowed(true);
                 check(CrashReports.LogAllowed, "the app's log can be turned back on");
+
+                // Metadata lookups (CrashReports.MetadataFailed): one that never reached its provider is reported only while Windows
+                // says the PC has the internet, or can't say; a provider that answered with an error is reported either way.
+                var windows = InternetConnection.Ask();
+                check(windows is not null, $"Windows answers whether this PC has the internet ({(windows is null ? "no answer" : windows.Value ? "online" : "offline")})");
+                static Exception Dns(string text) => new HttpRequestException(HttpRequestError.NameResolutionError, text, new SocketException(11001));
+                var refused = new HttpRequestException(HttpRequestError.ConnectionError, "offline-check refused while offline", new SocketException(10061));
+                var unavailable = new HttpRequestException("offline-check unavailable while offline", null, HttpStatusCode.ServiceUnavailable);
+                var timedOut = new TaskCanceledException("offline-check timed out while offline", new TimeoutException());
+                check(InternetConnection.Unreached(Dns("x")) && InternetConnection.Unreached(refused) && InternetConnection.Unreached(timedOut) &&
+                    !InternetConnection.Unreached(unavailable) && !InternetConnection.Unreached(new System.Text.Json.JsonException("Wikipedia returned an API error")),
+                    "a lookup whose name didn't resolve, whose connection was refused or that timed out never reached its provider; one answered with an error did");
+                using (var sentry = new FakeSentry(port))
+                {
+                    var report = BlackPearl.Core.MetadataReports.Failures;
+                    check(report is not null, "metadata failures are hooked up while crash reports are on");
+                    try
+                    {
+                        InternetConnection.AnswerForCheck = () => false;
+                        report!(new("offline-check-dns", "tmdb", Dns("offline-check dns while offline"), null));
+                        report(new("offline-check-refused", "tvmaze", refused, null));
+                        report(new("offline-check-timeout", "tvmaze", timedOut, null));
+                        report(new("offline-check-status", "tmdb", unavailable, null));
+                        // The same kind of failure once the PC is back online: the report left out above kept no hour for it.
+                        InternetConnection.AnswerForCheck = () => true;
+                        report(new("offline-check-dns", "tmdb", Dns("offline-check dns while online"), null));
+                        InternetConnection.AnswerForCheck = () => null;
+                        report(new("offline-check-unknown", "tmdb", Dns("offline-check dns while unknown"), null));
+                    }
+                    finally { InternetConnection.AnswerForCheck = null; }
+                    check(Until(() => sentry.Received("offline-check unavailable while offline") && sentry.Received("offline-check dns while online") &&
+                        sentry.Received("offline-check dns while unknown"), 30),
+                        "a provider's error while offline, and a failed name while online or when Windows can't say, are reported");
+                    Thread.Sleep(3000);
+                    check(!sentry.Received("offline-check dns while offline") && !sentry.Received("offline-check refused while offline") &&
+                        !sentry.Received("offline-check timed out while offline"),
+                        "a lookup that never reached its provider while the PC is offline is not reported");
+                }
 
                 // Phone links (PHONE-REMOTE.md, "Measuring the link"): a link's setup and its stretches go out as traces, with
                 // their stages and numbers and nothing that names the phone or the PC.
