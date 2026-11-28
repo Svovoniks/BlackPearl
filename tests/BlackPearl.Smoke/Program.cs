@@ -158,6 +158,8 @@ if (args.FirstOrDefault() == "--track-languages")
 if (args.FirstOrDefault() == "--guest-library-peer")
 {
     var count = 0;
+    // Some checks read what the room recorded.
+    PlaybackDiagnostics.Initialize(Path.GetFullPath(Path.Combine("artifacts", "guest-peer-" + Guid.NewGuid().ToString("N"), "logs")));
     await GuestLibraryPeerFixture.RunIsolated(File.Exists(".tools/dotnet/dotnet.exe") ? Path.GetFullPath(".tools/dotnet/dotnet.exe") : "dotnet",
         Path.GetFullPath("src/BlackPearl.Server/bin/Release/net10.0/BlackPearl.Server.dll"),
         Path.Combine("artifacts", "guest-peer-" + Guid.NewGuid().ToString("N")), Path.GetFullPath(args[1]),

@@ -16,8 +16,9 @@ public sealed class PlaybackPosition
     private const long WindowMs = 5000;
     // A new time this far ahead of the estimate is a seek or another video. One behind it by more than a new time can
     // be late means playback slipped, as in a seek, a stall or a hiccup: a stream that repeats its time shows a new one
-    // up to a report late (measured spread 245 ms), a file whose every report is new shows it at once.
-    private const long JumpMs = 1500, RepeatingSlipMs = 400, ExactSlipMs = 100;
+    // up to a report late (measured spread 245 ms), a file whose every report is new shows it at once (measured within
+    // 3 ms, read on a 16 ms clock). A seek's own echo can read some tens of ms ahead of where playback resumes.
+    private const long JumpMs = 1500, RepeatingSlipMs = 400, ExactSlipMs = 40;
     private readonly object gate = new();
     private readonly List<(long Position, long At)> anchors = [];
     private long position = -1, at, intervalMs = 250;
@@ -30,8 +31,8 @@ public sealed class PlaybackPosition
             if (position >= 0 && Math.Abs(milliseconds - position) < RepeatMs) return;
             var gap = monotonicMs - at; var step = milliseconds - position;
             // The usual gap between new times: a longer one counts at once, so a stream that moves on once a second
-            // is not cut short while this learns it.
-            if (position >= 0 && gap is > 0 and < 3000 && step is > 0 and < 3000) intervalMs = Math.Max(gap, (intervalMs * 3 + gap) / 4);
+            // is not cut short while this learns it. Only a gap the time moved on through counts; a stall does not.
+            if (position >= 0 && gap is > 0 and < 3000 && Math.Abs(step - gap * rate) < 400) intervalMs = Math.Max(gap, (intervalMs * 3 + gap) / 4);
             if (position < 0) anchors.Clear();
             else
             {

@@ -196,9 +196,10 @@ public sealed partial class RoomClient : IAsyncDisposable
     private readonly ServerClock clock = new();
     private long pingId;
     private string? clockHost;
-    // When whoever plays the video last answered on the control connection (Environment.TickCount64), read by
-    // media reads off the event loop.
-    private long streamerHeardAt;
+    // Who played the video when it last answered on the control connection, and when (Environment.TickCount64),
+    // read by media reads off the event loop.
+    private sealed record Heard(string Peer, long At);
+    private Heard? streamerHeard;
     public long ServerNowMs => clock.Now;
     public long ServerOffsetMs => clock.OffsetMs;
     public long RecentRttMs => clock.RecentRttMs;
@@ -708,7 +709,7 @@ public sealed partial class RoomClient : IAsyncDisposable
     {
         if (roster.All(p => p.Id != sender)) return;
         Link(sender).HeardAt = Environment.TickCount64;
-        if (sender == hostPeer) Volatile.Write(ref streamerHeardAt, Environment.TickCount64);
+        if (sender == hostPeer) Volatile.Write(ref streamerHeard, new(sender, Environment.TickCount64));
         if (message.Type == "control-hello")
         {
             PlaybackDiagnostics.Record("peer-handshake", new { room = diagnosticId, protocol = message.Number, streamer = Identity?.Host == true });
@@ -1048,7 +1049,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                     await Task.Delay(Math.Min(500, 25 * busy), deadline.Token);
                 }
                 // The second try has its own time, and time left to reconnect after it.
-                catch (TimeoutException) when (!deadline.IsCancellationRequested && SlowRead(peer, ref slow)) { deadline.CancelAfter(TimeSpan.FromSeconds(45)); }
+                catch (TimeoutException) when (!deadline.IsCancellationRequested && SlowRead(hostId, peer, ref slow)) { deadline.CancelAfter(TimeSpan.FromSeconds(45)); }
                 catch (Exception ex) when (!deadline.IsCancellationRequested && (peer.IsInterrupted || ex is TimeoutException))
                 {
                     PlaybackDiagnostics.Record("media-range-retry", new { room = diagnosticId, transport = peer.DiagnosticId, error = ex.GetType().Name });
@@ -1085,7 +1086,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                 return await peer.ReadAsync(resource, offset, count, cancellation.Token);
             }
             catch (PeerBusyException) when (!cancellation.IsCancellationRequested) { await Task.Delay(100, cancellation.Token); }
-            catch (TimeoutException) when (!cancellation.IsCancellationRequested && SlowRead(peer, ref slow)) { }
+            catch (TimeoutException) when (!cancellation.IsCancellationRequested && SlowRead(hostId, peer, ref slow)) { }
             catch (Exception ex) when (!cancellation.IsCancellationRequested && (peer.IsInterrupted || ex is TimeoutException))
             {
                 PlaybackDiagnostics.Record("media-range-retry", new { room = diagnosticId, transport = peer.DiagnosticId, error = ex.GetType().Name });
@@ -1098,9 +1099,9 @@ public sealed partial class RoomClient : IAsyncDisposable
     // link is up and only this read is slow, as on a congested relay. It is asked once more on the same connection.
     // Replacing the connection would also drop voice and resync playback once it is back, while the viewer usually has
     // minutes of video read ahead. A dead control connection is replaced by peer-health within 6 seconds anyway.
-    private bool SlowRead(PeerTransport peer, ref int slow)
+    private bool SlowRead(string streamer, PeerTransport peer, ref int slow)
     {
-        if (peer.IsInterrupted || Environment.TickCount64 - Volatile.Read(ref streamerHeardAt) > 6000 || ++slow > 1) return false;
+        if (peer.IsInterrupted || Volatile.Read(ref streamerHeard) is not { } heard || heard.Peer != streamer || Environment.TickCount64 - heard.At > 6000 || ++slow > 1) return false;
         PlaybackDiagnostics.Record("media-range-slow", new { room = diagnosticId, transport = peer.DiagnosticId });
         return true;
     }

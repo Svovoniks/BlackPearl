@@ -147,6 +147,8 @@ public sealed class PeerTransport : IDisposable
     internal bool IsInterrupted => Volatile.Read(ref disposed) != 0 || Volatile.Read(ref controlClosed) != 0 || Volatile.Read(ref mediaInterrupted) != 0;
     private int disposed;
     public Func<string, IMediaSource?>? ResolveMedia { get; set; }
+    // How long a media read waits for its answer. Checks shorten it to see a slow read handled.
+    internal TimeSpan RangeTimeout { get; set; } = TimeSpan.FromSeconds(25);
     // How fast what this app reads from the other member arrives.
     public TransferMeter Received { get; } = new();
     public event Action<string, string>? Signal;
@@ -473,7 +475,7 @@ public sealed class PeerTransport : IDisposable
         {
             // Old hosts ignore this optional field and return their JSON reply.
             channel!.Send(Wire.Serialize(new WireMessage("read", Data: Wire.Serialize(new RangeRequest(id, media, offset, count, Binary: true)))));
-            var bytes = await range.Completion.Task.WaitAsync(TimeSpan.FromSeconds(25), ct);
+            var bytes = await range.Completion.Task.WaitAsync(RangeTimeout, ct);
             if (bytes.Length != count) throw new IOException("Incomplete peer range");
             return bytes;
         }

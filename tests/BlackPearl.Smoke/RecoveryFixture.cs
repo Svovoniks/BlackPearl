@@ -82,6 +82,13 @@ static class RecoveryFixture
         for (long now = 0; now <= 3000; now += 250) slipped.Observe(now, now);
         slipped.Observe(2950, 3250);
         check(slipped.Estimate(2950, true, 1, 3300) == 3000, "playback that slips back is followed at once, not held up by earlier reports");
+        // A seek's own echo reads a little ahead of where the file then plays on.
+        slipped.Observe(60070, 3500); slipped.Observe(60264, 3750);
+        check(slipped.Estimate(60264, true, 1, 3850) == 60364, "a seek's echo that reads a little ahead does not hold the estimate ahead");
+        for (long now = 4000; now <= 6000; now += 250) slipped.Observe(60264 + now - 3750, now);
+        slipped.Observe(60264 + 6000 - 3750, 8000);
+        for (long now = 8250; now <= 9000; now += 250) slipped.Observe(60264 + 6000 - 3750 + now - 8000, now);
+        check(slipped.Estimate(60264 + 6000 - 3750 + 1000, true, 1, 12000) == 60264 + 6000 - 3750 + 1000 + 500, "a stall does not lengthen how far a file is extrapolated through the next one");
         check(SyncMath.TunedCorrection(0) == 1 && SyncMath.TunedCorrection(10000) == 1.05f && SyncMath.TunedCorrection(-10000) == .95f, "rate correction is neutral when aligned and bounded in both directions");
         check(SyncMath.EstablishedCorrection(99) == 1f && SyncMath.EstablishedCorrection(100) == 1.03f && SyncMath.EstablishedCorrection(-100) == .97f, "established rate policy preserves its deadband and correction limits");
         var rateControl = new PlaybackRateControl();

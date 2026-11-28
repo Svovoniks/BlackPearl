@@ -202,5 +202,40 @@ static class GuestLibraryPeerFixture
             "unexpected loss of the connection to the streamer leaves the viewer in the room while rebuilding it");
         await guest.DirectControlsReady.WaitAsync(TimeSpan.FromSeconds(30));
         check(guest.Snapshot?.Media?.Title == "Returned video", "a viewer automatically repairs a failed connection to the streamer without re-entering the room");
+
+        // A video read that gets no answer while the streamer still answers on the control connection, as on a congested
+        // relay, is asked again on the same connection. A second one in a row replaces the connection.
+        var streamerTransports = (System.Collections.IDictionary)typeof(RoomClient).GetField("peers", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(returning)!;
+        var link = (PeerTransport)transports[returning.Identity!.Peer]!;
+        var serving = (PeerTransport)streamerTransports[guest.Identity!.Peer]!;
+        link.RangeTimeout = TimeSpan.FromSeconds(2);
+        var withheld = 0; var resolve = serving.ResolveMedia!;
+        serving.ResolveMedia = id => resolve(id) is { } found ? new Withholding(found, () => Interlocked.Decrement(ref withheld) >= 0) : null;
+        using var reading = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var source = await guest.GetSourceAsync(guest.Snapshot!.Media!, reading.Token);
+        var file = await File.ReadAllBytesAsync(video);
+        Volatile.Write(ref withheld, 1);
+        var once = await source.ReadAsync(0, 4096, reading.Token);
+        check(once.AsSpan().SequenceEqual(file.AsSpan(0, 4096)) && ReferenceEquals(transports[returning.Identity.Peer], link) && guest.DirectControlsReady.IsCompletedSuccessfully,
+            "a video read that gets no answer while the streamer still answers is asked again on the same connection");
+        check(PlaybackDiagnostics.Recent().Any(line => line.Contains("\"kind\":\"media-range-slow\"")) && !PlaybackDiagnostics.Recent().Any(line => line.Contains("A video read got no answer")),
+            "the slow read is logged and the connection is kept");
+        Volatile.Write(ref withheld, 2);
+        var twice = await source.ReadAsync(4096, 4096, reading.Token);
+        check(twice.AsSpan().SequenceEqual(file.AsSpan(4096, 4096)) && !ReferenceEquals(transports[returning.Identity.Peer], link),
+            "a video read that gets no answer twice replaces the connection, which then delivers it");
+        check(PlaybackDiagnostics.Recent().Any(line => line.Contains("\"kind\":\"peer-departed\"") && line.Contains("A video read got no answer")),
+            "the connection's departure says a video read got no answer");
+    }
+
+    // Holds back the reads it is told to, until the reader gives up on them.
+    private sealed class Withholding(IMediaSource source, Func<bool> withhold) : IMediaSource
+    {
+        public SharedMedia Media => source.Media;
+        public async Task<byte[]> ReadAsync(long offset, int count, CancellationToken ct)
+        {
+            if (withhold()) await Task.Delay(TimeSpan.FromSeconds(30), ct);
+            return await source.ReadAsync(offset, count, ct);
+        }
     }
 }
