@@ -223,8 +223,10 @@ public partial class MainWindow
         // The keyboard goes on from the title that took its place, rather than starting over at the window's top.
         if (!keyboard || currentPage != "Home") return;
         // From the spotlight's own Remove, it stays on Remove, now for the next title.
-        if (place < 0) { if (HomeHero.IsVisible) HomeHeroRemove.Focus(); return; }
-        if (homeContinueAll.Length == 0) { if (HomeHero.IsVisible) HomeHeroResume.Focus(); return; }
+        // With nothing left to continue, it goes on from the top of what Home shows instead.
+        if (!HomeHero.IsVisible) { HomePage.UpdateLayout(); HomePage.MoveFocus(new System.Windows.Input.TraversalRequest(System.Windows.Input.FocusNavigationDirection.First)); return; }
+        if (place < 0) { HomeHeroRemove.Focus(); return; }
+        if (homeContinueAll.Length == 0) { HomeHeroResume.Focus(); return; }
         HomeContinue.UpdateLayout();
         if (HomeContinue.ItemContainerGenerator.ContainerFromIndex(Math.Min(place, HomeContinue.Items.Count - 1)) is DependencyObject container &&
             VisualTreeHelper.GetChildrenCount(container) > 0 && VisualTreeHelper.GetChild(container, 0) is Button pill) pill.Focus();

@@ -52,11 +52,12 @@ static class LibraryVersionsFixture
         var noirStore = new LibraryStore(Path.Combine(directory, "noir-db"));
         await noirStore.ScanAsync([new(shows)]);
         var bwRecord = noirStore.All().Single(x => x.Path == bwFirst.Path); var colourRecord = noirStore.All().Single(x => x.Path == colourFirst.Path);
-        noirStore.Setting("watched:" + bwRecord.Id, "true"); noirStore.Setting("position:" + bwRecord.Id, "123000");
+        noirStore.Setting("watched:" + bwRecord.Id, "true"); noirStore.Setting("position:" + bwRecord.Id, "123000"); noirStore.HideFromContinue(bwRecord.Id);
         File.Delete(bwFirst.Path);
         await noirStore.ScanAsync([new(shows)]);
-        check(noirStore.All().All(x => x.Path != bwFirst.Path) && noirStore.All().Count == 3 && noirStore.Setting("watched:" + colourRecord.Id) == "true" && noirStore.Setting("position:" + colourRecord.Id) == "123000",
-            "a replaced release drops out of the library and hands its watched state and position to the remaining file");
+        check(noirStore.All().All(x => x.Path != bwFirst.Path) && noirStore.All().Count == 3 && noirStore.Setting("watched:" + colourRecord.Id) == "true" && noirStore.Setting("position:" + colourRecord.Id) == "123000" &&
+            noirStore.Setting(LibraryHome.HiddenPrefix + colourRecord.Id) is not null,
+            "a replaced release drops out of the library and hands its watched state, position and removal from Continue watching to the remaining file");
         File.Delete(noir.Single(x => x.Episode == 2 && x.Path.Contains("S01 BW")).Path); File.Delete(noir.Single(x => x.Episode == 2 && x.Path.Contains("S01 Color")).Path);
         await noirStore.ScanAsync([new(shows)]);
         check(noirStore.All().Count(x => x.Episode == 2 && !x.Available) == 2, "an episode whose every file is gone stays listed as unavailable");
