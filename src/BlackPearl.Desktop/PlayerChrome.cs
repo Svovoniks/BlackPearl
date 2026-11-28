@@ -208,14 +208,17 @@ public partial class MainWindow
     {
         QueuePillText.Text = text; QueuePillDetail.Text = detail; QueuePillIcon.Text = icon;
     }
-    private string[]? hintedAudioLanguages;
-    // Runs every playback tick; rebuild the hint only when the preference changes.
+    private (string[]? Languages, bool Carried) hintedAudio;
+    // Runs every playback tick; rebuild the hint only when the preference, or where this video's audio came from, changes.
     private void RefreshAudioPreferenceHint()
     {
-        if (ReferenceEquals(hintedAudioLanguages, audioLanguages)) return;
-        hintedAudioLanguages = audioLanguages;
-        AudioPreferenceHint.Text = audioLanguages.Length == 0 ? "" : "Default picked from Settings › Preferred audio: " + string.Join(", ", audioLanguages);
-        AudioPreferenceHint.Visibility = audioLanguages.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        if (ReferenceEquals(hintedAudio.Languages, audioLanguages) && hintedAudio.Carried == audioTrackCarried) return;
+        hintedAudio = (audioLanguages, audioTrackCarried);
+        var preferred = audioLanguages.Length == 0 ? "" : "Settings › Preferred audio: " + string.Join(", ", audioLanguages);
+        AudioPreferenceHint.Text = audioTrackCarried
+            ? "Started with the audio picked in an earlier episode" + (preferred.Length == 0 ? "" : ", ahead of " + preferred)
+            : preferred.Length == 0 ? "" : "Default picked from " + preferred;
+        AudioPreferenceHint.Visibility = AudioPreferenceHint.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void RefreshSharedControlsChip()

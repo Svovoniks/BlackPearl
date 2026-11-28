@@ -18,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 # Each runs as its own BlackPearl.DesktopChecks process after the main desktop suite.
 $desktopSuites = @(
     '--acquisition-layout', '--home', '--ui-findings', '--ui-experience', '--guest-library-layout', '--host-library-browse',
-    '--player-layout', '--metadata-picker', '--room-playback-status', '--language-detection', '--voice-processing', '--video-frames', '--guest-recovery',
+    '--player-layout', '--metadata-picker', '--room-playback-status', '--language-detection', '--session-tracks', '--voice-processing', '--video-frames', '--guest-recovery',
     '--hostless-rooms', '--stream-quality', '--player-close', '--player-close-pip', '--player-close-fullscreen', '--phone-library', '--crash-report-cache', '--scratch-library')
 
 function Invoke-Check {
