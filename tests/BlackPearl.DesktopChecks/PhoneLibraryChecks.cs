@@ -353,6 +353,28 @@ static class PhoneLibraryChecks
         phone.Send(new { type = "watch", request = 43, id = "subtitled", quality = "480p", network = "away", subtitle = -1 });
         var none = await phone.Next("stream", 60000);
         Check(none?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Null, "the phone asks for no subtitles");
+        // A watch the phone replaced while its subtitles were prepared leaves the newer one's stream alone, and is
+        // answered that it was replaced, so the phone isn't left waiting for it.
+        phone.Send(new { type = "watch", request = 50, id = "subtitled", quality = "480p", network = "away", subtitle = 1 });
+        phone.Send(new { type = "watch", request = 51, id = "subtitled", quality = "480p", network = "away", subtitle = -1 });
+        // The two answers in either order, and then 8 s more for a stream the replaced watch shouldn't send.
+        System.Text.Json.JsonElement? newer = null, replaced = null, older = null;
+        var until = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < until && (newer is null || replaced is null))
+        {
+            if (await phone.Next("", 5000) is not { } answer) continue;
+            var type = answer.GetProperty("type").GetString();
+            var asked = answer.TryGetProperty("request", out var number) ? number.GetInt32() : 0;
+            if (type == "stream" && asked == 51) newer = answer;
+            else if (type == "stream" && asked == 50) older = answer;
+            else if (type == "error" && asked == 50) replaced = answer;
+        }
+        for (var after = DateTime.UtcNow.AddSeconds(8); DateTime.UtcNow < after && older is null;)
+            if (await phone.Next("stream", 1000) is { } late && late.GetProperty("request").GetInt32() == 50) older = late;
+        var piece = await phone.Read("subtitle/" + newer?.GetProperty("streamId").GetString() + "/0", 0, 100);
+        Check(newer?.GetProperty("request").GetInt32() == 51 && older is null && piece.Error is null or "busy",
+            "a watch the phone replaced while its subtitles were prepared leaves the newer stream alone");
+        Check(replaced?.GetProperty("request").GetInt32() == 50 && replaced?.GetProperty("code").GetString() == "replaced", "the replaced watch is answered that it was replaced");
         store.Setting("subtitleLanguages", "off");
         phone.Send(new { type = "watch", request = 44, id = "subtitled", quality = "480p", network = "away" });
         var off = await phone.Next("stream", 60000);

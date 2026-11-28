@@ -403,7 +403,15 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
 
     private async Task WatchLatest(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message, Action<string, string> fail, CancellationToken replaced)
     {
-        bool Stale() => current() != remote || replaced.IsCancellationRequested;
+        // A watch the phone replaced is still answered, with an error it ignores: a phone holds its reads back while a
+        // request of its own waits for an answer.
+        bool Stale()
+        {
+            if (current() != remote) return true;
+            if (!replaced.IsCancellationRequested) return false;
+            fail("replaced", "The phone asked for another video.");
+            return true;
+        }
         var id = Text(message, "id");
         var item = Items().FirstOrDefault(x => x.Id == id && x.Available && !x.IsVirtual);
         if (item is null || !File.Exists(item.Path)) { fail("gone", "That video isn't available on the PC. Its drive may be disconnected."); return; }
@@ -685,7 +693,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(replaced);
         limit.CancelAfter(BurnWait);
         try { return await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), directory, limit.Token); }
-        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or OperationCanceledException)
+        catch (Exception ex)
         {
             PlaybackDiagnostics.Record("phone-subtitles", new { state = "not drawn", error = ex.GetType().Name });
             return null;
