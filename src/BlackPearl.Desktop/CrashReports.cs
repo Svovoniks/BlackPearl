@@ -355,10 +355,14 @@ public static class CrashReports
     }
 
     // One report per kind of failure an hour: a provider that is down fails every title, and one report says so.
+    // A lookup that never reached its provider while Windows says this PC has no internet is not reported: it says nothing about
+    // the provider, and each launch away from a network sent one for every provider and stage. The run's trace still counts it.
+    // A provider whose name fails to resolve while the PC is online, such as one blocked on this network, is still reported.
     private static void MetadataFailed(MetadataFailure failure)
     {
         if (!enabled) return;
         var error = failure.Error;
+        if (InternetConnection.Unreached(error) && !InternetConnection.Online()) return;
         var status = error is System.Net.Http.HttpRequestException { StatusCode: { } code } ? ((int)code).ToString() : null;
         var provider = failure.Provider ?? "unknown";
         string[] fingerprint = ["metadata-failure", failure.Stage, provider, error.GetType().FullName ?? "", status ?? ""];
