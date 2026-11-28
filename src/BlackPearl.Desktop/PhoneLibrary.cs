@@ -18,7 +18,7 @@ namespace BlackPearl.Desktop;
 internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> current, Action<Action> post, CancellationToken lifetime)
 {
     public const int PageSize = 40;
-    public static readonly string[] Features = ["library", "watch", "queues", "unwatched", "mark-watched"];
+    public static readonly string[] Features = ["library", "watch", "queues", "unwatched", "mark-watched", "hide-continue"];
     public static string StreamCacheDirectory => Path.Combine(Path.GetTempPath(), "BlackPearl", "stream-cache");
 
     // The library's videos, read on the dispatcher thread.
@@ -37,6 +37,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     public Func<string, bool>? PlaysHere { get; init; }
     // The window only: shows progress the phone saved. The flag is true for the last report of a viewing.
     public Action<MediaItem, PhoneProgress, bool>? ProgressSaved { get; init; }
+    // The window only: a phone took a title out of Continue watching, or put it back; Home shows it.
+    public Action? ContinueChanged { get; init; }
     // The window only: completes once its library has loaded. Until then Items is empty, and a phone that connected
     // early got an empty Home it kept (it has no reason to ask again), so requests wait for it.
     public Task? Ready { get; init; }
@@ -132,7 +134,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         {
             // Within the phone's 20 seconds for an answer; a library that takes longer is said to be loading. Only the
             // library's own requests wait: every request reaches here, and others (listen) are answered elsewhere.
-            if (Ready is { IsCompleted: false } ready && type is "browse" or "queues" or "watch" or "play" or "progress" or "mark-watched")
+            if (Ready is { IsCompleted: false } ready && type is "browse" or "queues" or "watch" or "play" or "progress" or "mark-watched" or "hide-continue")
             {
                 await Task.WhenAny(ready, Task.Delay(ReadyWait, lifetime));
                 if (current() != remote) return;
@@ -150,6 +152,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 case "watch": await Watch(remote, session, request, message, Fail); break;
                 case "progress": SaveProgress(session, message); break;
                 case "mark-watched": MarkWatchedFor(remote, session, request, message, Fail); break;
+                case "hide-continue": HideContinueFor(remote, session, request, message, Fail); break;
                 case "play":
                     if (!await Play(message, Fail)) break;
                     // The phone hands its video to the PC and stops watching. Its stream ends first: a phone still
@@ -677,6 +680,23 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         if (level is "movie" or "episode") level = item.Series is null ? "movie" : "episode";
         int? season = level == "season" ? (int?)Number(message, "season") ?? -1 : null;
         MarkWatched(item, level, season, flag.ValueKind == JsonValueKind.True);
+        remote.SendMessage(session, new { type = "done", request });
+    }
+
+    // The phone takes a title out of Continue watching, as the PC's own Remove does, until it is played again; or, with
+    // hidden false (its Undo), puts it back. The id is the video its Continue watching entry names.
+    private void HideContinueFor(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message, Action<string, string> fail)
+    {
+        var hidden = true;
+        if (message.TryGetProperty("hidden", out var flag))
+        {
+            if (flag.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) { fail("invalid", "The PC didn't understand that. Update BlackPearl on the PC."); return; }
+            hidden = flag.ValueKind == JsonValueKind.True;
+        }
+        var id = Text(message, "id");
+        if (Items().FirstOrDefault(x => x.Id == id) is not { IsMusic: false } item) { fail("gone", "That title is no longer in the PC's library."); return; }
+        library.HideFromContinue(item.Id, hidden);
+        ContinueChanged?.Invoke();
         remote.SendMessage(session, new { type = "done", request });
     }
 

@@ -396,13 +396,20 @@ public sealed partial class LibraryStore
     public Dictionary<string, string> PlaybackSettings()
     {
         using var db = Open(); using var command = db.CreateCommand();
-        command.CommandText = "SELECT key, value FROM settings WHERE key LIKE 'watched:%' OR key LIKE 'position:%' OR key LIKE 'played:%' OR key LIKE 'version:%' OR key LIKE 'added:%' OR key LIKE 'rewatch:%'";
+        command.CommandText = "SELECT key, value FROM settings WHERE key LIKE 'watched:%' OR key LIKE 'position:%' OR key LIKE 'played:%' OR key LIKE 'version:%' OR key LIKE 'added:%' OR key LIKE 'rewatch:%' OR key LIKE 'continue-hidden:%'";
         using var rows = command.ExecuteReader(); var result = new Dictionary<string, string>();
         while (rows.Read()) result[rows.GetString(0)] = rows.GetString(1);
         return result;
     }
     // Marking videos watched or unwatched ends any rewatch of them (LibraryWatchProgress.RewatchPrefix).
     public void ForgetRewatch(IEnumerable<string> ids) => RemoveSettings(ids.Select(id => LibraryWatchProgress.RewatchPrefix + id));
+    // Takes the title a Continue watching card stands on (the video id) out of the row until it is played again
+    // (LibraryHome.HiddenPrefix), or puts it back.
+    public void HideFromContinue(string id, bool hidden = true)
+    {
+        if (hidden) Setting(LibraryHome.HiddenPrefix + id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        else RemoveSettings([LibraryHome.HiddenPrefix + id]);
+    }
     public void Setting(string key, string value)
     {
         using var db = Open(); using var c = db.CreateCommand();

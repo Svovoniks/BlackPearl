@@ -5,13 +5,17 @@ public record HomeLibraryCard(LibraryCard Card, string Section, long PositionMs 
 // (LibraryAdded), 0 when unknown. Finished: a started title watched to the end, as its watched mark says.
 public record HomeTitle(LibraryCard Card, int Episodes, int? Minutes, long AddedAt = 0, bool Finished = false);
 // Unseen lists the unstarted titles newest first, as the Unwatched row does; Seen the started ones, to draw a rewatch from.
-public record HomeOverview(List<HomeLibraryCard> Entries, HomeTitle[] Unseen, HomeTitle[] Seen);
+// Removed counts the titles taken out of Continue watching by hand and not played since.
+public record HomeOverview(List<HomeLibraryCard> Entries, HomeTitle[] Unseen, HomeTitle[] Seen, int Removed = 0);
 public enum MysteryLength { Any, Short, Evening, LongNight }
 
 public static class LibraryHome
 {
     public static readonly string[] Kinds = ["Anime", "Show", "Movie"];
     public const int ContinueLimit = 20, SuggestionsPerKind = 7, UnwatchedLimit = 30;
+    // Taken out of Continue watching by hand: the video its card stood on, and when (Unix milliseconds). The title stays
+    // out until one of its videos is played after that, and keeps its places and watched marks meanwhile.
+    public const string HiddenPrefix = "continue-hidden:";
     public static List<HomeLibraryCard> Browse(IEnumerable<MediaItem> source, IReadOnlyDictionary<string, string>? playback = null, int seed = 0) =>
         Overview(source, playback, seed).Entries;
     // Row seeds let one category reshuffle its suggestions without moving the others.
@@ -23,6 +27,7 @@ public static class LibraryHome
         long Position(string id) => playback.TryGetValue("position:" + id, out var value) && long.TryParse(value, out var position) ? Math.Max(0, position) : 0;
         long Played(string id) => playback.TryGetValue("played:" + id, out var value) && long.TryParse(value, out var time) ? time : 0;
         long Resume(string id) => LibraryWatchProgress.Resume(key => playback.GetValueOrDefault(key), id, Watched(id));
+        long Hidden(string id) => playback.TryGetValue(HiddenPrefix + id, out var value) && long.TryParse(value, out var time) ? time : long.MinValue;
         // Home suggests things to watch; music lives in its own library tab.
         var all = source.Where(item => !item.IsExtra && !item.IsVirtual && !item.IsMusic).ToArray();
         var titles = LibraryCatalog.WithCurrentVersions(all, LibraryCatalog.Browse(all.Where(item => item.Available)), playback);
@@ -30,6 +35,7 @@ public static class LibraryHome
         var continuing = new List<(HomeLibraryCard Entry, long Played)>();
         var unseen = new List<HomeTitle>();
         var seen = new List<HomeTitle>();
+        var removed = 0;
         foreach (var title in titles)
         {
             var members = groups[LibraryIdentity.TitleKey(title.Media)];
@@ -42,12 +48,16 @@ public static class LibraryHome
                 files.Select(item => LibraryAdded.At(playback, item.Id) ?? 0).DefaultIfEmpty().Max(), finished);
             if (!started) { unseen.Add(Facts(false)); continue; }
             seen.Add(Facts(LibraryWatchProgress.IsWatched(members, title, Watched, Position)));
+            // Removed from Continue watching and not played since: it stays a started title, out of the row.
+            var latest = members.Max(item => Played(item.Id));
+            var hidden = members.Any(item => Hidden(item.Id) >= latest);
+            void Continue(HomeLibraryCard entry) { if (hidden) removed++; else continuing.Add((entry, latest)); }
             // A film continues with a copy left part-way, the one played last; with none, a watched copy means it's done. A
             // watched copy being watched again is part-way too, at its place in the rewatch.
             if (title.Level == "movie")
             {
                 if (members.Where(item => item.Available && Resume(item.Id) >= 10000).MaxBy(item => Played(item.Id)) is { } resume)
-                    continuing.Add((new(resume.Id == title.Media.Id ? title : title with { Media = resume }, "continue", Resume(resume.Id)), members.Max(item => Played(item.Id))));
+                    Continue(new(resume.Id == title.Media.Id ? title : title with { Media = resume }, "continue", Resume(resume.Id)));
                 continue;
             }
             var remaining = files.Where(item => !Completed(item)).OrderBy(item => item.Season ?? int.MaxValue)
@@ -80,7 +90,7 @@ public static class LibraryHome
             }
             var card = next.Series is null ? title : new LibraryCard(next.Series + " · " + next.EpisodeDisplayTitle,
                 next.Caption, LibraryCatalog.EpisodeArtwork(next), next, "episode", next.Season);
-            continuing.Add((new(card, "continue", Resume(next.Id)), members.Max(item => Played(item.Id))));
+            Continue(new(card, "continue", Resume(next.Id)));
         }
         // Most recently played first; titles without a play time keep catalog order.
         var result = continuing.OrderByDescending(entry => entry.Played).Select(entry => entry.Entry).Take(ContinueLimit).ToList();
@@ -99,7 +109,7 @@ public static class LibraryHome
         // apps that don't know it find the other sections where they were.
         var newest = unseen.OrderByDescending(title => title.AddedAt).ThenBy(title => LibraryIdentity.TitleKey(title.Card.Media), StringComparer.Ordinal).ToArray();
         result.AddRange(newest.Take(UnwatchedLimit).Select(title => new HomeLibraryCard(title.Card, "unwatched")));
-        return new(result, newest, seen.ToArray());
+        return new(result, newest, seen.ToArray(), removed);
     }
     public static bool Matches(HomeTitle title, string? kind, MysteryLength length)
     {

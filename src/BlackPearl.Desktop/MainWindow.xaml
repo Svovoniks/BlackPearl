@@ -100,7 +100,8 @@
      </Style>
      <!-- Each title not finished is a Resume pebble: how far it has been watched lights the stone, as on the hero's Resume. -->
      <DataTemplate x:Key="HomePill">
-      <Button Click="OpenHomeCard" Loaded="HomeItemLoaded" Tag="{Binding Progress, Mode=OneWay}" Padding="6,6,12,6" Margin="0,0,12,12" MinHeight="0" HorizontalContentAlignment="Stretch" FontWeight="Normal" local:Pebble.Radius="14" ToolTip="{Binding DisplayTitle}" AutomationProperties.Name="{Binding DisplayTitle}">
+      <Button Click="OpenHomeCard" Loaded="HomeItemLoaded" Tag="{Binding Progress, Mode=OneWay}" Padding="6,6,12,6" Margin="0,0,12,12" MinHeight="0" HorizontalContentAlignment="Stretch" FontWeight="Normal" local:Pebble.Radius="14" ToolTip="{Binding DisplayTitle}" AutomationProperties.Name="{Binding DisplayTitle}"
+              ContextMenuOpening="HomeContinueMenu" PreviewKeyDown="HomeContinueKey"><Button.ContextMenu><ContextMenu/></Button.ContextMenu>
        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
         <Border Width="36" Height="52" CornerRadius="8" local:RoundedClip.Radius="8" Background="{DynamicResource Well}"><Image Source="{Binding Poster, NotifyOnTargetUpdated=True}" TargetUpdated="HomeArtworkUpdated" Stretch="UniformToFill" Loaded="HomeArtworkLoaded"/></Border>
         <StackPanel Grid.Column="1" Margin="10,0,4,0" VerticalAlignment="Center">
@@ -171,7 +172,8 @@
      <TextBlock x:Name="HomeStatus" TextWrapping="Wrap" Margin="0,0,0,14" AutomationProperties.LiveSetting="Polite"><TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource MutedText}"><Style.Triggers><Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
 
      <!-- Hero: the title watched most recently, ready to resume. -->
-     <local:Stone x:Name="HomeHero" Depth="Slab" Height="340" CornerRadius="20" local:RoundedClip.Radius="20" Background="{DynamicResource Surface}" Margin="0,0,0,22" Visibility="Collapsed">
+     <local:Stone x:Name="HomeHero" Depth="Slab" Height="340" CornerRadius="20" local:RoundedClip.Radius="20" Background="{DynamicResource Surface}" Margin="0,0,0,22" Visibility="Collapsed" ContextMenuOpening="HomeContinueMenu">
+      <local:Stone.ContextMenu><ContextMenu/></local:Stone.ContextMenu>
       <Grid>
        <Image Source="{Binding Poster, Converter={StaticResource DetailBackdrop}}" Stretch="UniformToFill" RenderOptions.BitmapScalingMode="LowQuality"/>
        <Image Source="{Binding Poster, NotifyOnTargetUpdated=True}" TargetUpdated="HomeArtworkUpdated" Stretch="UniformToFill" HorizontalAlignment="Right" Width="620" Loaded="HomeArtworkLoaded"/>
@@ -190,6 +192,9 @@
           </DockPanel>
          </Button>
          <Button Content="Details" Click="OpenHomeCard" Height="44" Padding="18,0" Margin="0,0,10,0" AutomationProperties.Name="{Binding DisplayTitle, StringFormat=Details for {0}}"/>
+         <!-- Your own library only: someone else's Continue watching is theirs to change. -->
+         <Button x:Name="HomeHeroRemove" Content="&#xE711;" Click="RemoveHomeContinue" FontFamily="{StaticResource IconFont}" FontSize="13" Width="44" Height="44" MinHeight="44" Padding="0" Margin="0"
+                 ToolTip="Remove from Continue watching" AutomationProperties.Name="{Binding HomeTitle, StringFormat=Remove {0} from Continue watching}"/>
         </StackPanel>
        </StackPanel>
       </Grid>
