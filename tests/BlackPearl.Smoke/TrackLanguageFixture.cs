@@ -2,6 +2,35 @@ using BlackPearl.Core;
 
 static class TrackLanguageFixture
 {
+    // Tracks picked by hand carry on to the show's next episode (SessionTracks), whose file lists its own tracks.
+    static void SessionChecks(Action<bool, string> check)
+    {
+        MediaItem Episode(string series, int episode) => new($"{series}-{episode}", $"{series} {episode}.mkv", series, "episode", Series: series, Season: 1, Episode: episode);
+        var session = new SessionTracks();
+        var show = SessionTracks.Key(Episode("Frieren", 1));
+        check(show is not null && show == SessionTracks.Key(Episode("Frieren", 2)) && show != SessionTracks.Key(Episode("Mushishi", 1)),
+            "episodes of one show share their picked tracks, and another show has its own");
+        check(SessionTracks.Key(new MediaItem("film", "Film.mkv", "Film", "movie")) is null, "a film has no next episode to carry tracks to");
+        session.Remember(show, ChosenTrack.Of(new(2, "Track 2 - [Japanese]", "jpn")), false);
+        session.Remember(show, ChosenTrack.Of(new(5, "Full - [English]", "eng")), true);
+        check(session.Audio(show) == new ChosenTrack("ja", null) && session.Subtitles(show) == new ChosenTrack("en", "Full"),
+            "a picked track is kept as its language and its own title, without VLC's track number");
+        check(session.Audio(SessionTracks.Key(Episode("Mushishi", 1))) is null, "another show keeps its preferences");
+        LanguageTrack[] audio = [new(1, "Track 1 - [English]", "eng"), new(3, "Track 2 - [Japanese]", "jpn")];
+        check(SessionTracks.Match(audio, session.Audio(show)) == 3, "the next episode starts in the picked language, wherever its file lists it");
+        LanguageTrack[] subtitles = [new(7, "Signs & Songs - [English]", "eng"), new(8, "Full - [English]", "eng"), new(9, "Full - [Russian]", "rus")];
+        check(SessionTracks.Match(subtitles, session.Subtitles(show), true) == 8, "of two subtitles in the picked language, the one with the picked title");
+        check(SessionTracks.Match(subtitles[..1], session.Subtitles(show), true) == 7, "without that title, the first in the picked language");
+        check(SessionTracks.Match([new(1, "Track 1 - [German]", "deu")], session.Audio(show)) is null, "a file without the picked language is left to the preferences");
+        session.Remember(show, ChosenTrack.Of(new(-1, "Disable", null)), true);
+        check(SessionTracks.Match(subtitles, session.Subtitles(show), true) == -1, "subtitles turned off stay off");
+        session.Remember(show, ChosenTrack.Of(new(-1, "Disable", null)), false);
+        check(session.Audio(show)?.Language == "ja", "audio has no off to remember");
+        check(SessionTracks.Match([new(4, "Commentary", null), new(6, "Track 6", null)], new ChosenTrack(null, "Commentary")) == 4 &&
+            SessionTracks.Match([new(6, "Track 6", null)], ChosenTrack.Of(new(6, "Track 6", null))) is null,
+            "a track no language is known for is found by its title, and a numbered one not at all");
+    }
+
     public static void Run(Action<bool, string> check)
     {
         var preferences = TrackLanguages.Parse("Japanese, English, Russian");
@@ -16,6 +45,7 @@ static class TrackLanguageFixture
         check(TrackLanguages.Select(tracks, []) is null, "blank preferences leave native track selection unchanged");
         check(TrackLanguages.Select([new(4, "Track 4 [Russian]", null)], ["ru"]) == 4, "track labels identify language when metadata is missing");
         check(TrackLanguages.Select([new(4, "French commentary", "eng")], ["fr"]) is null, "explicit language metadata takes precedence over an ambiguous label");
+        SessionChecks(check);
         var subtitles = TrackLanguages.Parse("English, off, Russian", true);
         check(TrackLanguages.Select(tracks, subtitles, true) == 0, "preferred subtitles are enabled ahead of the off fallback");
         check(TrackLanguages.Select(tracks[1..], subtitles, true) == -1, "off disables subtitles before less preferred languages");

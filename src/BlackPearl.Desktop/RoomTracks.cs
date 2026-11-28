@@ -53,8 +53,11 @@ public partial class MainWindow
         }
         if (room.Snapshot.Tracks is { } tracks && tracks.MediaId == media.Id)
         {
-            if (ResolveRoomTrack(tracks.Audio, audio, false) is { } audioId && player.AudioTrack != audioId) player.SetAudioTrack(audioId);
-            if (assetsReady && ResolveRoomTrack(tracks.Subtitles, subtitles, true) is { } subtitleId && player.Spu != subtitleId) player.SetSpu(subtitleId);
+            // For whoever plays the video, a change from the room is someone sharing the controls picking another track:
+            // the show's next episode starts with it, as with one picked here.
+            var host = room.Identity?.Host == true;
+            if (ResolveRoomTrack(tracks.Audio, audio, false) is { } audioId && player.AudioTrack != audioId && player.SetAudioTrack(audioId) && host) RememberTrack(TrackType.Audio, audioId);
+            if (assetsReady && ResolveRoomTrack(tracks.Subtitles, subtitles, true) is { } subtitleId && player.Spu != subtitleId && player.SetSpu(subtitleId) && host) RememberTrack(TrackType.Text, subtitleId);
         }
         if (room.Identity?.Host == true)
         {

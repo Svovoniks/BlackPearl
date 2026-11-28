@@ -2026,11 +2026,12 @@ public partial class MainWindow : Window
         if (!tracksUpdating && CanChangeRoomTracks && AudioTracks.SelectedItem is TrackChoice t && player?.SetAudioTrack(t.Id) == true)
         {
             audioTrackChosen = true;
+            RememberTrack(TrackType.Audio, t.Id);
             var subtitle = ApplySubtitlesForAudio(t.Id);
             PublishRoomTrack(t.Id, false, subtitle);
         }
     }
-    private void SubtitlesChanged(object sender, SelectionChangedEventArgs e) { if (!tracksUpdating && CanChangeRoomTracks && SubtitleTracks.SelectedItem is TrackChoice t) { subtitleTrackChosen = subtitleTrackManuallyChosen = true; player?.SetSpu(t.Id); PublishRoomTrack(t.Id, true); } }
+    private void SubtitlesChanged(object sender, SelectionChangedEventArgs e) { if (!tracksUpdating && CanChangeRoomTracks && SubtitleTracks.SelectedItem is TrackChoice t) { subtitleTrackChosen = subtitleTrackManuallyChosen = true; player?.SetSpu(t.Id); RememberTrack(TrackType.Text, t.Id); PublishRoomTrack(t.Id, true); } }
     private void LoadSubtitles(object sender, RoutedEventArgs e)
     {
         if (player is null || !ready || room?.Identity?.Host == false) return;

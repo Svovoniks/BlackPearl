@@ -385,7 +385,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         long durationMs = (long)((item.DurationSeconds ?? 0) * 1000);
         if (wanted != StreamQuality.OriginalId && !(wanted == "auto" && home) && !item.IsMusic)
         {
-            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), qualities, Flag(message, "convertAnyway"));
+            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), AudioHint(message), qualities, Flag(message, "convertAnyway"));
             if (current() != remote) { converted?.Dispose(); return; }
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
             else (note, convertible) = (why, smaller);
@@ -565,6 +565,11 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         try { return TrackLanguages.Parse(library.Setting("audioLanguages") ?? ""); } catch (ArgumentException) { return []; }
     }
 
+    // The audio the phone's user picked for an earlier episode of this viewing, as its language and title: a conversion
+    // of the next one starts with the same, ahead of Settings › Playback. Null when the phone names none.
+    private static ChosenTrack? AudioHint(JsonElement message) =>
+        TrackLanguages.Normalize(Text(message, "audioLanguage")) is { } language ? new(language, ChosenTrack.Title(Text(message, "audioTitle"))) : null;
+
     private object TrackPreferences()
     {
         string[] audio = AudioLanguages(), subtitles = [];
@@ -584,7 +589,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     // or a file already smaller than the conversion would be (Smaller), unless anyway: the phone asks for that when it
     // can't play the file itself, so it gets the picture converted though that saves no data. It carries one audio
     // track: the one the phone asked for, or the one the PC's player would start with.
-    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, List<string> qualities, bool anyway)
+    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, ChosenTrack? audioHint, List<string> qualities, bool anyway)
     {
         if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.", false);
         var probe = await Probe(ffmpeg, item, null);
@@ -604,7 +609,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var container = await Task.Run(() => SubtitleText.Tracks(item.Path));
         var fileKey = LibraryStore.TrackLanguageFile(item.Path);
         var tracks = ProbedAudio.WithContainerLanguages(probe.Audio, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, true, id)));
-        var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(tracks, AudioLanguages());
+        var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value
+            : SessionTracks.Match(tracks.Select((track, index) => new LanguageTrack(index, track.Title ?? "", track.Language)), audioHint) ?? ProbedAudio.Preferred(tracks, AudioLanguages());
         var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, audio, null), stream, store);
         PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = videoKbps, segments, audio, audioTracks = tracks.Length, anyway = !plan.Smaller });
         return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = tracks, Audio = audio }, null, false);
