@@ -196,6 +196,10 @@ public sealed partial class RoomClient : IAsyncDisposable
     private readonly ServerClock clock = new();
     private long pingId;
     private string? clockHost;
+    // Who played the video when it last answered on the control connection, and when (Environment.TickCount64),
+    // read by media reads off the event loop.
+    private sealed record Heard(string Peer, long At);
+    private Heard? streamerHeard;
     public long ServerNowMs => clock.Now;
     public long ServerOffsetMs => clock.OffsetMs;
     public long RecentRttMs => clock.RecentRttMs;
@@ -484,7 +488,7 @@ public sealed partial class RoomClient : IAsyncDisposable
                         case "library-opened": LibraryPeerReady?.Invoke(item.Peer!); break;
                         case "opened": SendPeer(item.Peer!, new("control-hello", Number: 3)); break;
                         case "peer": HandlePeer(item.Peer!, item.Message!); break;
-                        case "closed": DepartPeer(item.Peer!); break;
+                        case "closed": DepartPeer(item.Peer!, item.Message?.Text); break;
                         case "timeout":
                             if (!negotiated.ContainsKey(item.Peer!))
                             {
@@ -705,6 +709,7 @@ public sealed partial class RoomClient : IAsyncDisposable
     {
         if (roster.All(p => p.Id != sender)) return;
         Link(sender).HeardAt = Environment.TickCount64;
+        if (sender == hostPeer) Volatile.Write(ref streamerHeard, new(sender, Environment.TickCount64));
         if (message.Type == "control-hello")
         {
             PlaybackDiagnostics.Record("peer-handshake", new { room = diagnosticId, protocol = message.Number, streamer = Identity?.Host == true });
@@ -1020,7 +1025,7 @@ public sealed partial class RoomClient : IAsyncDisposable
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(45));
         PeerTransport? failed = null;
-        var busy = 0;
+        var busy = 0; var slow = 0;
         try
         {
             while (true)
@@ -1043,11 +1048,13 @@ public sealed partial class RoomClient : IAsyncDisposable
                     if (busy == 1) PlaybackDiagnostics.Record("media-range-busy", new { room = diagnosticId, transport = peer.DiagnosticId });
                     await Task.Delay(Math.Min(500, 25 * busy), deadline.Token);
                 }
+                // The second try has its own time, and time left to reconnect after it.
+                catch (TimeoutException) when (!deadline.IsCancellationRequested && SlowRead(hostId, peer, ref slow)) { deadline.CancelAfter(TimeSpan.FromSeconds(45)); }
                 catch (Exception ex) when (!deadline.IsCancellationRequested && (peer.IsInterrupted || ex is TimeoutException))
                 {
                     PlaybackDiagnostics.Record("media-range-retry", new { room = diagnosticId, transport = peer.DiagnosticId, error = ex.GetType().Name });
                     failed = peer;
-                    Post(new("closed", hostId, Transport: peer));
+                    Post(new("closed", hostId, Message: new("reason", Text: MediaReadFailed(ex)), Transport: peer));
                 }
             }
         }
@@ -1060,7 +1067,7 @@ public sealed partial class RoomClient : IAsyncDisposable
     {
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.Token);
         PeerTransport? failed = null;
-        var interruptedAt = 0L;
+        var interruptedAt = 0L; var slow = 0;
         while (true)
         {
             cancellation.Token.ThrowIfCancellationRequested();
@@ -1079,14 +1086,26 @@ public sealed partial class RoomClient : IAsyncDisposable
                 return await peer.ReadAsync(resource, offset, count, cancellation.Token);
             }
             catch (PeerBusyException) when (!cancellation.IsCancellationRequested) { await Task.Delay(100, cancellation.Token); }
+            catch (TimeoutException) when (!cancellation.IsCancellationRequested && SlowRead(hostId, peer, ref slow)) { }
             catch (Exception ex) when (!cancellation.IsCancellationRequested && (peer.IsInterrupted || ex is TimeoutException))
             {
                 PlaybackDiagnostics.Record("media-range-retry", new { room = diagnosticId, transport = peer.DiagnosticId, error = ex.GetType().Name });
                 failed = peer;
-                Post(new("closed", hostId, Transport: peer));
+                Post(new("closed", hostId, Message: new("reason", Text: MediaReadFailed(ex)), Transport: peer));
             }
         }
     }
+    // A read that got no answer in time while whoever plays the video still answers on the control connection: the
+    // link is up and only this read is slow, as on a congested relay. It is asked once more on the same connection.
+    // Replacing the connection would also drop voice and resync playback once it is back, while the viewer usually has
+    // minutes of video read ahead. A dead control connection is replaced by peer-health within 6 seconds anyway.
+    private bool SlowRead(string streamer, PeerTransport peer, ref int slow)
+    {
+        if (peer.IsInterrupted || Volatile.Read(ref streamerHeard) is not { } heard || heard.Peer != streamer || Environment.TickCount64 - heard.At > 6000 || ++slow > 1) return false;
+        PlaybackDiagnostics.Record("media-range-slow", new { room = diagnosticId, transport = peer.DiagnosticId });
+        return true;
+    }
+    private static string MediaReadFailed(Exception ex) => ex is TimeoutException ? "A video read got no answer" : "The video connection was interrupted";
     private static string DiagnosticReason(string reason)
     {
         var safe = System.Text.RegularExpressions.Regex.Replace(reason, @"https?://\S+|[a-fA-F0-9]{24,}", "[redacted]");

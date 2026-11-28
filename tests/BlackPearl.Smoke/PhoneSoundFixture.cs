@@ -70,6 +70,8 @@ static class PhoneSoundFixture
         check(running.Playing && running.PositionMs is >= 1180 and <= 1300, $"a playing player's clock advances from the last report ({running.PositionMs})");
         clock.Report(5000);
         check(clock.Read().PositionMs is >= 5000 and <= 5020, "a new report replaces the guess");
+        await Task.Delay(200); clock.Report(5002);
+        check(clock.Read().PositionMs >= 5180, $"a report repeating the last time, as a converted stream's do, does not set the clock back ({clock.Read().PositionMs})");
         clock.SetRunning(false);
         var stopped = clock.Read().PositionMs;
         await Task.Delay(100);
