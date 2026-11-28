@@ -33,7 +33,21 @@ static class RecoveryFixture
         check(clock.Now == 102200 && clock.OffsetMs == -10000, "server clock survives forward wall-clock jump");
         check(!clock.Receive(2, 900000) && !clock.Receive(123, 900000), "duplicate and uncorrelated clock responses ignored");
         clock.Sent(3); time.Advance(10001); check(!clock.Receive(3, 900000), "expired clock probes ignored");
-        clock.Sent(4); time.Advance(200); check(clock.Receive(4, 113301) && clock.Now == 113401, "clock samples expire and permit new slower measurements");
+        clock.Sent(4); time.Advance(200); check(clock.Receive(4, 113301) && clock.Now == 113401, "a slower measurement that contradicts earlier ones replaces them, as when the streamer's clock moved");
+        // A congested link: after one good measurement, every reply waits three seconds on its way back for a minute.
+        var congested = new ClockTime(); var held = new ServerClock(congested);
+        held.Sent(1); congested.Advance(20); held.Receive(1, congested.Utc - 10);
+        long heldWorst = 0;
+        for (var ping = 2; ping < 32; ping++)
+        {
+            congested.Advance(1980); held.Sent(ping);
+            congested.Advance(20); var stamp = congested.Utc; congested.Advance(3000);
+            held.Receive(ping, stamp);
+            heldWorst = Math.Max(heldWorst, Math.Abs(held.Now - congested.Utc));
+        }
+        check(heldWorst <= 50, $"replies held up on a congested link keep the room clock on its last good measurement (worst {heldWorst} ms off)");
+        held.Sent(40); congested.Advance(60); held.Receive(40, congested.Utc - 30 + 400);
+        check(held.Now == congested.Utc + 400, "a quick measurement that contradicts an old one replaces it");
         var settling = new PlaybackSettling(); settling.Seek(10, 90000, 1000);
         check(settling.Waiting(10, 0, 1250) && settling.Waiting(10, 90000, 1500) && !settling.Waiting(10, 90000, 3000), "seek waits for decoding even when VLC time updates immediately");
         settling.Seek(10, 90000, 1000);
@@ -50,6 +64,24 @@ static class RecoveryFixture
         check(position.Estimate(90000, true, 1.03f, 1250) == 90257, "position estimate advances between native observations at playback rate");
         check(position.Estimate(90000, true, 1f, 3000) == 90500 && position.Estimate(90000, false, 1f, 1250) == 90000, "position estimate is bounded during stalls and never advances paused playback");
         check(position.Estimate(150000, true, 1f, 1250) == 150000, "new native position supersedes old interpolation anchor");
+        // A converted stream as libVLC plays it: a report about every quarter second, repeating (with a few ms of
+        // wobble) a time it takes once a second, so each new time is seen up to a report later.
+        var coarse = new PlaybackPosition(); long coarseWorst = 0, taken = 0;
+        for (long now = 0; now <= 30000; now += 10)
+        {
+            if (now % 1000 == 0) taken = now;
+            if (now % 260 == 0) coarse.Observe(taken + now / 260 % 3 - 1, now);
+            if (now % 250 == 120 && now >= 6000) coarseWorst = Math.Max(coarseWorst, Math.Abs(now - coarse.Estimate(taken, true, 1, now)));
+        }
+        check(coarseWorst <= 150, $"a time repeated between once-a-second changes is not read as playback falling behind (worst {coarseWorst} ms)");
+        check(coarse.Estimate(taken, true, 1, 33000) <= taken + 1500, "a stalled once-a-second clock is not extrapolated indefinitely");
+        // The room reads the position on every tick, paused or not.
+        for (long now = 31000; now <= 36000; now += 250) coarse.Estimate(taken, false, 1, now);
+        check(coarse.Estimate(taken, true, 1, 36100) == taken + 100, "playback paused for a while moves on from where it was, not from before the pause");
+        var slipped = new PlaybackPosition();
+        for (long now = 0; now <= 3000; now += 250) slipped.Observe(now, now);
+        slipped.Observe(2950, 3250);
+        check(slipped.Estimate(2950, true, 1, 3300) == 3000, "playback that slips back is followed at once, not held up by earlier reports");
         check(SyncMath.TunedCorrection(0) == 1 && SyncMath.TunedCorrection(10000) == 1.05f && SyncMath.TunedCorrection(-10000) == .95f, "rate correction is neutral when aligned and bounded in both directions");
         check(SyncMath.EstablishedCorrection(99) == 1f && SyncMath.EstablishedCorrection(100) == 1.03f && SyncMath.EstablishedCorrection(-100) == .97f, "established rate policy preserves its deadband and correction limits");
         var rateControl = new PlaybackRateControl();
