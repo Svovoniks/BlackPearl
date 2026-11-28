@@ -77,13 +77,16 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
     {
         long duration = 0; double start = 0; int width = 0, height = 0, audio = 0; var hdr = false;
         var subtitles = new List<ProbedSubtitle>(); var fonts = new List<int>(); var audioTracks = new List<ProbedAudio>();
-        var inAudio = false;
+        bool inAudio = false, inSubtitle = false;
         foreach (var line in output.Split('\n'))
         {
-            // A title under an audio stream names that track; a title anywhere else (the file's, a chapter's) does not.
-            if (inAudio && TitleLine.Match(line.TrimEnd('\r')) is { Success: true } title)
+            // A title under an audio or subtitle stream names that track; a title anywhere else (the file's, a chapter's)
+            // does not.
+            if ((inAudio || inSubtitle) && TitleLine.Match(line.TrimEnd('\r')) is { Success: true } title)
             {
-                if (audioTracks[^1].Title is null && title.Groups[1].Value.Trim() is { Length: > 0 } named) audioTracks[^1] = audioTracks[^1] with { Title = named };
+                if (title.Groups[1].Value.Trim() is not { Length: > 0 } named) continue;
+                if (inAudio && audioTracks[^1].Title is null) audioTracks[^1] = audioTracks[^1] with { Title = named };
+                if (inSubtitle && subtitles[^1].Title is null) subtitles[^1] = subtitles[^1] with { Title = named };
                 continue;
             }
             if (duration == 0 && DurationLine.Match(line) is { Success: true } time)
@@ -96,11 +99,13 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
             if (StreamLine.Match(line.TrimEnd('\r')) is not { Success: true } stream)
             {
                 // A stream's metadata is indented under it; a line less indented ends the stream.
-                if (!line.StartsWith("    ", StringComparison.Ordinal)) inAudio = false;
+                if (!line.StartsWith("    ", StringComparison.Ordinal)) inAudio = inSubtitle = false;
                 continue;
             }
             inAudio = stream.Groups[2].Value == "Audio";
+            inSubtitle = stream.Groups[2].Value == "Subtitle";
             var index = int.Parse(stream.Groups[1].Value, CultureInfo.InvariantCulture); var codec = stream.Groups[3].Value; var rest = stream.Groups[4].Value;
+            var language = stream.Groups["language"].Value is { Length: > 0 } tag && tag != "und" ? tag : null;
             switch (stream.Groups[2].Value)
             {
                 // Cover art is a video stream too; the film is the first one that is not.
@@ -110,10 +115,11 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
                     break;
                 case "Audio":
                     audio++;
-                    var language = stream.Groups["language"].Value is { Length: > 0 } tag && tag != "und" ? tag : null;
                     audioTracks.Add(new(language, null, codec, Layout.Match(rest) is { Success: true } layout ? layout.Groups[1].Value.Trim() : null, rest.Contains("(default)")));
                     break;
-                case "Subtitle": subtitles.Add(new(codec, ImageSubtitles.Contains(codec))); break;
+                case "Subtitle":
+                    subtitles.Add(new(codec, ImageSubtitles.Contains(codec)) { Language = language, Default = rest.Contains("(default)"), Forced = rest.Contains("(forced)") });
+                    break;
                 case "Attachment" when Fonts.Contains(codec): fonts.Add(index); break;
             }
         }
@@ -127,7 +133,48 @@ public sealed record VideoProbe(long DurationMs, double StartSeconds, int Width,
         return Parse(text, sound);
     }
 }
-public sealed record ProbedSubtitle(string Codec, bool Image);
+// A subtitle track, in the order "-map 0:s:<n>" counts them: its codec, whether it is pictures (PGS, VobSub), and its
+// language tag (null when untagged), title, and whether the file marks it as the one to show or as forced.
+public sealed record ProbedSubtitle(string Codec, bool Image)
+{
+    public string? Language { get; init; }
+    public string? Title { get; init; }
+    public bool Default { get; init; }
+    public bool Forced { get; init; }
+
+    // A phone's conversion carries subtitles in one of two ways (PHONE-REMOTE.md, "Watching on the phone"): as a file the
+    // phone's player draws, or drawn into the picture. Pictures can only be drawn here. So can styled subtitles that
+    // bring their own fonts, which the phone doesn't have: their signs and karaoke would show in another typeface, out
+    // of place. Plain text, and ASS that uses no fonts of its own, go as a file, which the phone turns on and off at once.
+    public bool BurnsFor(VideoProbe probe) => Image || Styled && probe.FontStreams.Length > 0;
+    public bool Styled => Codec is "ass" or "ssa";
+
+    // The track to start with for audio in audioLanguage: the PC's player's choice, by the subtitle priorities of
+    // Settings › Playback (a rule for the audio's language first). "off" first, or none that matches and no track the
+    // file marks: none (null).
+    public static int? Preferred(IReadOnlyList<ProbedSubtitle> tracks, LanguageTrack? audio, IReadOnlyList<string> preferences, IReadOnlyList<SubtitleLanguageRule> rules)
+    {
+        if (tracks.Count == 0) return null;
+        var picked = TrackLanguages.Select(tracks.Select((track, i) => new LanguageTrack(i, track.Title ?? "", track.Language)), TrackLanguages.SubtitlePreferences(audio, preferences, rules), true);
+        if (picked is { } chosen) return chosen < 0 ? null : chosen;
+        for (var i = 0; i < tracks.Count; i++) if (tracks[i].Default) return i;
+        return null;
+    }
+
+    // As ProbedAudio.WithContainerLanguages: a subtitle track has the language the file gives it, or the one identified
+    // while it played on the PC, rather than the English ffmpeg calls an untagged Matroska track.
+    public static ProbedSubtitle[] WithContainerLanguages(ProbedSubtitle[] subtitles, IReadOnlyList<ContainerTrack> container, Func<int, string?> detected)
+    {
+        var positions = container.Select((track, id) => (track, id)).Where(entry => entry.track.Type == ContainerTrackType.Subtitle).ToArray();
+        if (positions.Length != subtitles.Length) return subtitles;
+        return subtitles.Select((track, n) => track with
+        {
+            Language = !positions[n].track.Untagged ? positions[n].track.Language : detected(positions[n].id) is { Length: > 0 } found ? found : null,
+            Title = track.Title ?? positions[n].track.Name,
+            Forced = track.Forced || positions[n].track.Forced,
+        }).ToArray();
+    }
+}
 // An audio track: its language tag ("jpn"; null when untagged), title, codec, channel layout ("5.1(side)", "stereo"),
 // and whether the file marks it as the one to play.
 public sealed record ProbedAudio(string? Language, string? Title, string Codec, string? Layout, bool Default)
@@ -236,6 +283,30 @@ public static class Ffmpeg
             return null;
         }
         return new(extracted, fonts, null);
+    }
+
+    // A text subtitle track as a file for a phone's player to draw (PHONE-REMOTE.md, "Watching on the phone"): ASS as the
+    // video has it, any other text as SubRip. Without -copyts its times count from where the video starts, as the
+    // player's clock does once it has moved the conversion's first timestamp to 0:00. Null when it can't be read out.
+    public static async Task<byte[]?> SubtitleFileAsync(string ffmpeg, string path, ProbedSubtitle track, int index, string directory, CancellationToken ct)
+    {
+        Directory.CreateDirectory(directory);
+        var file = Path.Combine(directory, "subtitle-" + Guid.NewGuid().ToString("N") + (track.Styled ? ".ass" : ".srt"));
+        try
+        {
+            var (exit, errors) = await RunAsync(ffmpeg, ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-i", path,
+                "-map", "0:s:" + index.ToString(CultureInfo.InvariantCulture), "-c:s", track.Styled ? "copy" : "srt", "-f", track.Styled ? "ass" : "srt", file], null, TimeSpan.FromMinutes(15), ct);
+            if (exit != 0 || !File.Exists(file) || new FileInfo(file).Length == 0)
+            {
+                PlaybackDiagnostics.Record("phone-subtitles", new { state = "failed", codec = track.Codec, exit, error = Tail(errors) });
+                return null;
+            }
+            return await File.ReadAllBytesAsync(file, ct);
+        }
+        finally
+        {
+            try { File.Delete(file); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     internal static string Tail(string text) => text.Length <= 400 ? text.Trim() : text[^400..].Trim();
