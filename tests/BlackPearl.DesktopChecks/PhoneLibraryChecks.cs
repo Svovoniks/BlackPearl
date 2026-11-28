@@ -58,6 +58,7 @@ static class PhoneLibraryChecks
             store.Save(new MediaItem("dual-audio", dual, "Dual Audio", "Movie", 2025));
             store.Save(new MediaItem("untagged-audio", UntaggedCopy(dual), "Untagged Audio", "Movie", 2025));
             store.Save(new MediaItem("small-xvid", await SmallXvid(data), "Small XviD", "Movie", 2007));
+            store.Save(new MediaItem("subtitled", await SubtitledVideo(data), "Subtitled", "Movie", 2026));
             IReadOnlyList<MediaItem> items = store.All();
             var hostKey = PersistentRooms.NewKey();
 
@@ -150,6 +151,7 @@ static class PhoneLibraryChecks
             Check(store.Setting("queuePosition") == "-1", "a video handed to the PC outside a queue plays on its own, not from the queue it was last in");
             await ConvertedSound(store, phone, data);
             await ConvertAnyway(phone, data);
+            await ConvertedSubtitles(store, phone);
             phone.Send(new { type = "watch", request = 16, id = "night-signal", quality = StreamQuality.OriginalId, network = "home" });
             await phone.Next("stream", 15000);
 
@@ -293,6 +295,99 @@ static class PhoneLibraryChecks
         var original = await phone.Next("stream", 15000);
         Check(original?.GetProperty("kind").GetString() == "file" && original?.GetProperty("convertible").GetBoolean() == false,
             "the original file asked for is not offered as convertible");
+    }
+
+    // A 720p film with English SubRip subtitles (one line from 2 to 4 seconds), and a Japanese ASS track whose file
+    // brings its own font. (ffmpeg can't make picture subtitles from text; drawing those in is the rooms' own.)
+    static async Task<string> SubtitledVideo(string data)
+    {
+        var srt = Path.Combine(data, "subtitled.srt");
+        File.WriteAllText(srt, "1\n00:00:02,000 --> 00:00:04,000\nHello from the PC\n");
+        var ass = Path.Combine(data, "subtitled.ass");
+        File.WriteAllText(ass, "[Script Info]\nScriptType: v4.00+\nPlayResX: 1280\nPlayResY: 720\n\n[V4+ Styles]\n" +
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n" +
+            "Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n\n[Events]\n" +
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,{\\pos(640,100)}Sign\n");
+        var font = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf");
+        var path = Path.Combine(data, "Subtitled (2026).mkv");
+        var (made, errors) = await RunFfmpeg(["-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24,format=yuv420p", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-i", srt, "-i", ass,
+            "-t", "8", "-map", "0:v", "-map", "1:a", "-map", "2:s", "-map", "3:s", "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "5M", "-maxrate", "5M", "-bufsize", "10M", "-g", "48",
+            "-c:a", "aac", "-c:s:0", "srt", "-c:s:1", "ass", "-attach", font, "-metadata:s:t", "mimetype=application/x-truetype-font",
+            "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=Full", "-metadata:s:s:1", "language=jpn",
+            "-disposition:s:0", "0", "-disposition:s:1", "0", path]);
+        Check(made == 0 && File.Exists(path), "a sample film with text and styled subtitles is made" + (made == 0 ? "" : ": " + errors));
+        return path;
+    }
+
+    // A conversion for the phone lists the file's subtitles: text goes as a file the phone draws, timed from the start of
+    // the video; pictures, and styled subtitles with fonts of their own, are drawn into the picture by the PC.
+    static async Task ConvertedSubtitles(LibraryStore store, FakePhone phone)
+    {
+        store.Setting("subtitleLanguages", "en");
+        phone.Send(new { type = "watch", request = 40, id = "subtitled", quality = "480p", network = "away" });
+        var preferred = await phone.Next("stream", 60000);
+        var tracks = preferred?.GetProperty("subtitleTracks").EnumerateArray()
+            .Select(t => (t.GetProperty("index").GetInt32(), t.GetProperty("language").GetString(), t.GetProperty("codec").GetString(), t.GetProperty("burn").GetBoolean())).ToArray() ?? [];
+        Check(preferred?.GetProperty("kind").GetString() == "hls" && tracks.SequenceEqual([(0, "eng", "subrip", false), (1, "jpn", "ass", true)]),
+            "a conversion lists the file's subtitles, and which of them the PC draws into the picture: " + string.Join(", ", tracks));
+        Check(preferred?.GetProperty("subtitleTrack").GetInt32() == 0 && preferred?.GetProperty("subtitleTracks")[0].GetProperty("title").GetString() == "Full",
+            "the conversion starts with the subtitles Settings › Playback prefers");
+
+        // The file, asked for until the PC has read it out of the video.
+        var resource = "subtitle/" + preferred?.GetProperty("streamId").GetString() + "/0";
+        (byte[] Bytes, long Length, string? Error) read = default;
+        for (var tries = 0; tries < 60; tries++)
+        {
+            read = await phone.Read(resource, 0, 65536);
+            if (read.Error != "busy") break;
+            await Task.Delay(500);
+        }
+        var text = read.Error is null && read.Bytes is { } bytes ? System.Text.Encoding.UTF8.GetString(bytes) : "";
+        Check(text.Contains("00:00:02,000 --> 00:00:04,000") && text.Contains("Hello from the PC"), $"the phone reads text subtitles as SubRip, timed from the start of the video ({read.Error ?? text.Trim()})");
+        Check((await phone.Read("subtitle/" + preferred?.GetProperty("streamId").GetString() + "/1", 0, 100)).Error == "gone", "subtitles the PC draws into the picture aren't sent as a file");
+
+        phone.Send(new { type = "watch", request = 41, id = "subtitled", quality = "480p", network = "away", subtitle = 1 });
+        var drawn = await phone.Next("stream", 60000);
+        Check(drawn?.GetProperty("subtitleTrack").GetInt32() == 1, "the phone asks for styled subtitles with their own font, and the PC draws them into the picture");
+        phone.Send(new { type = "watch", request = 43, id = "subtitled", quality = "480p", network = "away", subtitle = -1 });
+        var none = await phone.Next("stream", 60000);
+        Check(none?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Null, "the phone asks for no subtitles");
+        // A watch the phone replaced while its subtitles were prepared leaves the newer one's stream alone, and is
+        // answered that it was replaced, so the phone isn't left waiting for it.
+        phone.Send(new { type = "watch", request = 50, id = "subtitled", quality = "480p", network = "away", subtitle = 1 });
+        phone.Send(new { type = "watch", request = 51, id = "subtitled", quality = "480p", network = "away", subtitle = -1 });
+        // The two answers in either order, and then 8 s more for a stream the replaced watch shouldn't send.
+        System.Text.Json.JsonElement? newer = null, replaced = null, older = null;
+        var until = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < until && (newer is null || replaced is null))
+        {
+            if (await phone.Next("", 5000) is not { } answer) continue;
+            var type = answer.GetProperty("type").GetString();
+            var asked = answer.TryGetProperty("request", out var number) ? number.GetInt32() : 0;
+            if (type == "stream" && asked == 51) newer = answer;
+            else if (type == "stream" && asked == 50) older = answer;
+            else if (type == "error" && asked == 50) replaced = answer;
+        }
+        for (var after = DateTime.UtcNow.AddSeconds(8); DateTime.UtcNow < after && older is null;)
+            if (await phone.Next("stream", 1000) is { } late && late.GetProperty("request").GetInt32() == 50) older = late;
+        var piece = await phone.Read("subtitle/" + newer?.GetProperty("streamId").GetString() + "/0", 0, 100);
+        Check(newer?.GetProperty("request").GetInt32() == 51 && older is null && piece.Error is null or "busy",
+            "a watch the phone replaced while its subtitles were prepared leaves the newer stream alone");
+        Check(replaced?.GetProperty("request").GetInt32() == 50 && replaced?.GetProperty("code").GetString() == "replaced", "the replaced watch is answered that it was replaced");
+        store.Setting("subtitleLanguages", "off");
+        phone.Send(new { type = "watch", request = 44, id = "subtitled", quality = "480p", network = "away" });
+        var off = await phone.Next("stream", 60000);
+        Check(off?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Null, "with subtitles off in Settings › Playback, a conversion starts without them");
+        // Another episode after subtitles were picked by hand on the phone: their language, ahead of Settings › Playback.
+        phone.Send(new { type = "watch", request = 45, id = "subtitled", quality = "480p", network = "away", subtitleLanguage = "ja" });
+        var hinted = await phone.Next("stream", 60000);
+        Check(hinted?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Number && hinted?.GetProperty("subtitleTrack").GetInt32() == 1,
+            "subtitles in the language picked for an earlier episode start the next one's conversion, though Settings › Playback says off");
+        phone.Send(new { type = "watch", request = 46, id = "subtitled", quality = "480p", network = "away", subtitleLanguage = "de" });
+        var unmatched = await phone.Next("stream", 60000);
+        Check(unmatched?.GetProperty("subtitleTrack").ValueKind == System.Text.Json.JsonValueKind.Null, "a language the video has no subtitles in leaves them to Settings › Playback");
+        store.Setting("subtitleLanguages", "");
     }
 
     static async Task<(int ExitCode, string Errors)> RunFfmpeg(string[] arguments)

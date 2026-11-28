@@ -13,17 +13,23 @@ public sealed class PlaybackClock
     // the position less this, the moment on screen.
     public const int PictureLagMs = 60;
     private readonly object gate = new();
-    private long positionMs, at = Stopwatch.GetTimestamp();
+    private long positionMs, reported = -1, at = Stopwatch.GetTimestamp();
     private bool running;
     private string? source;
 
     // The video playing, as the phone's sound stream names it; null when nothing plays.
     public string? Source { get { lock (gate) return source; } set { lock (gate) source = value; } }
 
-    // A position libVLC reported (its TimeChanged event, from its own thread).
+    // A position libVLC reported (its TimeChanged event, from its own thread). A room's converted stream repeats its
+    // time every quarter second and moves it on once a second (PlaybackPosition): a repeat, within a few milliseconds,
+    // says nothing new and must not set the clock back to when that time was taken.
     public void Report(long timeMs)
     {
-        lock (gate) { positionMs = timeMs; at = Stopwatch.GetTimestamp(); }
+        lock (gate)
+        {
+            if (Math.Abs(timeMs - reported) < 50) return;
+            reported = timeMs; positionMs = timeMs; at = Stopwatch.GetTimestamp();
+        }
     }
 
     // Playback started or stopped advancing, where it is now.

@@ -345,7 +345,9 @@ seconds without control replies from whoever is playing the video also starts
 recovery (twelve for the other members, whose connections carry only voice),
 checked every two seconds. A viewer retains its video input and cache, continues already
 running playback from buffered data for up to the active buffer setting after
-recovery starts, and retries interrupted media ranges for up to 45 seconds.
+recovery starts, and retries interrupted media ranges for up to 45 seconds. A range that
+gets no answer in 25 seconds while control replies still arrive is asked once more on
+the same connection instead of replacing it, which would also drop voice.
 Playback pauses sooner if the native input starves, fails or ends, or if Pause
 is pending; a paused input never starts merely because recovery begins. Restored connections
 resynchronize playback and report readiness again. A failed native player input

@@ -161,6 +161,12 @@ static class StreamQualityFixture
             check(player.Play(media), "the player opens the converted stream");
             await Until(() => player.IsPlaying && player.Time > 500);
             check(Math.Abs(player.Length - probe!.DurationMs) < 500 && player.IsSeekable, $"the player shows the video's full length ({player.Length} ms) and can seek");
+            // libVLC repeats this stream's time between the moments it moves on (about once a second), and the room's
+            // sync read every repeat as new: up to 750 ms behind, so it changed the speed every few seconds (it strayed
+            // 838 to 923 ms here). A new time is still seen up to one report (250 ms) late, so the estimate can trail by
+            // that much, plus timer jitter, until an anchor seen right after its change comes round: 14 to 221 ms measured.
+            var clock = await MeasureClock(player, 8000);
+            check(clock.Spread < 400, $"the room's estimate of where the converted stream plays keeps to a steady clock (strays {clock.Spread} ms; {clock.Times} times in {clock.Events} reports)");
             player.Time = 18500;
             // The player first reports where the piece it needs begins, refills its buffer, and then plays on from the requested time.
             var sought = Stopwatch.StartNew();
@@ -168,6 +174,17 @@ static class StreamQualityFixture
             check(player.IsPlaying && sought.ElapsedMilliseconds < 1000 + 6000, $"a seek continues from the requested time ({player.Time} ms, {sought.ElapsedMilliseconds} ms after asking for 18500)");
         }
         finally { player.Stop(); }
+        using (var local = new Media(vlc, video, FromType.FromPath))
+        {
+            try
+            {
+                check(player.Play(local), "the player opens the video itself");
+                await Until(() => player.IsPlaying && player.Time > 500);
+                var own = await MeasureClock(player, 6000);
+                check(own.Spread < 100, $"the room's estimate of where a video file plays keeps to a steady clock (strays {own.Spread} ms; {own.Times} times in {own.Events} reports)");
+            }
+            finally { player.Stop(); }
+        }
 
         // The pieces are the viewer's to keep: a stream that is closed and opened again, as after a reconnect to the
         // room, starts with everything that was downloaded and asks for none of it again.
@@ -359,6 +376,33 @@ static class StreamQualityFixture
             ProbedAudio.Preferred(tracks.Audio.Select(a => a with { Default = a.Codec == "aac" }).ToArray(), []) == 2 &&
             ProbedAudio.Preferred(tracks.Audio.Select(a => a with { Default = false }).ToArray(), ["fr"]) == 0 && ProbedAudio.Preferred([], ["en"]) is null,
             "a converted stream starts with the first preferred language a track has, else the file's default track, else its first");
+        // Each subtitle track's language, title and flags, for the phone's Subtitles menu, and which of them a phone's
+        // conversion draws into the picture: pictures, and ASS when the video brings fonts of its own.
+        var subtitled = VideoProbe.Parse("""
+              Duration: 00:24:00.00, start: 0.000000, bitrate: 4000 kb/s
+              Stream #0:0: Video: h264 (High), yuv420p(progressive), 1920x1080, 23.98 fps (default)
+              Stream #0:1(jpn): Audio: aac (LC), 48000 Hz, stereo, fltp (default)
+              Stream #0:2(eng): Subtitle: subrip (srt) (default)
+                Metadata:
+                  title           : Full
+              Stream #0:3(eng): Subtitle: ass (ssa) (forced)
+                Metadata:
+                  title           : Signs
+              Stream #0:4(und): Subtitle: hdmv_pgs_subtitle (pgssub)
+              Stream #0:5: Attachment: ttf
+                Metadata:
+                  filename        : font.ttf
+            """);
+        check(subtitled?.Subtitles is [{ Codec: "subrip", Language: "eng", Title: "Full", Default: true, Forced: false, Image: false },
+                { Codec: "ass", Language: "eng", Title: "Signs", Default: false, Forced: true }, { Image: true, Language: null, Title: null }] &&
+            tracks.Subtitles is [{ Language: "eng", Title: "Signs" }],
+            "each subtitle track's language, title and default and forced marks are read");
+        check(subtitled!.Subtitles.Select(t => t.BurnsFor(subtitled)).SequenceEqual([false, true, true]) && !tracks.Subtitles[0].BurnsFor(tracks),
+            "a phone's conversion draws in pictures and styled subtitles with their own fonts, and sends other text as a file");
+        check(ProbedSubtitle.Preferred(subtitled.Subtitles, null, ["en"], []) == 0 && ProbedSubtitle.Preferred(subtitled.Subtitles, null, ["off", "en"], []) is null &&
+            ProbedSubtitle.Preferred(subtitled.Subtitles, new(0, "", "jpn"), ["en"], [new("ja", ["off"])]) is null &&
+            ProbedSubtitle.Preferred(subtitled.Subtitles, null, ["fr"], []) == 0 && ProbedSubtitle.Preferred(subtitled.Subtitles.Select(t => t with { Default = false }).ToArray(), null, ["fr"], []) is null,
+            "a phone's conversion starts with the subtitles Settings › Playback prefers for the audio's language, else the file's default, else none");
         var phone = VideoProbe.Parse("""
               Duration: 00:01:05.77, start: 3595.827000, bitrate: 7036 kb/s
               Stream #0:0[0x100](und): Video: hevc (Main 10) (HEVC / 0x43564548), yuv420p10le(tv, bt2020nc/bt2020/smpte2084), 3840x2160 [SAR 1:1 DAR 16:9], 59.94 fps, 90k tbn, start 3595.827000
@@ -483,6 +527,33 @@ static class StreamQualityFixture
         using var frame = new MemoryStream(); await process.StandardOutput.BaseStream.CopyToAsync(frame);
         await process.WaitForExitAsync(); File.Delete(file);
         return frame.Length == 0 ? -1 : frame.ToArray().Average(value => (double)value);
+    }
+
+    // What a room's sync sees of the player: its time events fed to PlaybackPosition, read on the app's 250 ms tick.
+    // The player plays at 1x, so a right estimate keeps one offset to a steady clock. Spread is how far it strays from
+    // that, 5th to 95th percentile, after a first second for the player to settle.
+    internal static async Task<(int Events, int Times, long Spread)> MeasureClock(MediaPlayer player, int milliseconds)
+    {
+        var position = new PlaybackPosition(); var events = 0; var times = new HashSet<long>();
+        void Observe(object? sender, MediaPlayerTimeChangedEventArgs e)
+        {
+            position.Observe(e.Time, Environment.TickCount64);
+            lock (times) { events++; times.Add(e.Time); }
+        }
+        player.TimeChanged += Observe;
+        var offsets = new List<long>();
+        try
+        {
+            var start = Environment.TickCount64;
+            while (Environment.TickCount64 - start < milliseconds)
+            {
+                await Task.Delay(250); var now = Environment.TickCount64;
+                if (now - start >= 1000) offsets.Add(position.Estimate(player.Time, player.IsPlaying, player.Rate, now) - now);
+            }
+        }
+        finally { player.TimeChanged -= Observe; }
+        offsets.Sort();
+        lock (times) return (events, times.Count, offsets[(int)(offsets.Count * .95)] - offsets[(int)(offsets.Count * .05)]);
     }
 
     private static async Task Until(Func<bool> condition)
