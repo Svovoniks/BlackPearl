@@ -57,12 +57,28 @@ static class PluginCatalogFixture
         check(catalog.State(alpha, plugins) == CatalogPluginState.Installed && File.ReadAllText(Path.Combine(plugins, "runtime", "run.ps1")) == "'runtime v1'"
             && File.ReadAllText(Path.Combine(plugins, "alpha", "settings.json")).Contains("qbittorrent"), "updating replaces shipped files and keeps the plugin's settings");
 
+        // Another program, such as an antivirus scanning a script just written, can have a file open just as it is replaced or
+        // removed. Windows refuses to replace an open file, and Directory.Delete leaves a folder whose file is still open.
+        void HeldFor(FileStream held, int milliseconds) => _ = Task.Run(async () => { await Task.Delay(milliseconds); held.Dispose(); });
+        // A failed removal check lists what is left in the plugins folder.
+        void Removal(bool passed, string name) => check(passed, passed ? name
+            : $"{name} (left: {string.Join(", ", Directory.EnumerateFileSystemEntries(plugins, "*", SearchOption.AllDirectories).Select(x => Path.GetRelativePath(plugins, x)))})");
+        File.WriteAllText(Path.Combine(plugins, "runtime", "run.ps1"), "'runtime v0'");
+        HeldFor(new FileStream(Path.Combine(plugins, "runtime", "run.ps1"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete), 300);
+        catalog.Install(alpha, plugins);
+        check(File.ReadAllText(Path.Combine(plugins, "runtime", "run.ps1")) == "'runtime v1'", "an update replaces a file another program has open once it lets go");
+
         catalog.Install(betaPlugin, plugins);
         PluginCatalog.Remove(alpha, plugins);
-        check(!Directory.Exists(Path.Combine(plugins, "alpha")) && Directory.Exists(Path.Combine(plugins, "runtime")) && catalog.State(betaPlugin, plugins) == CatalogPluginState.Installed,
+        Removal(!Directory.Exists(Path.Combine(plugins, "alpha")) && Directory.Exists(Path.Combine(plugins, "runtime")) && catalog.State(betaPlugin, plugins) == CatalogPluginState.Installed,
             "removing a plugin keeps support folders another installed plugin still uses");
         PluginCatalog.Remove(betaPlugin, plugins);
-        check(!Directory.Exists(Path.Combine(plugins, "beta")) && !Directory.Exists(Path.Combine(plugins, "runtime")), "removing the last plugin that uses a support folder removes it too");
+        Removal(!Directory.Exists(Path.Combine(plugins, "beta")) && !Directory.Exists(Path.Combine(plugins, "runtime")), "removing the last plugin that uses a support folder removes it too");
+        catalog.Install(alpha, plugins);
+        HeldFor(new FileStream(Path.Combine(plugins, "runtime", "lib", "helpers.ps1"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite), 300);
+        PluginCatalog.Remove(alpha, plugins);
+        Removal(!Directory.Exists(Path.Combine(plugins, "alpha")) && !Directory.Exists(Path.Combine(plugins, "runtime")),
+            "removing a plugin whose support folder has a file another program has open removes it once it lets go");
 
         // A checkout of the repository works as a catalog too, for trying plugins before they're published.
         var checkout = Path.Combine(directory, "catalog-checkout");

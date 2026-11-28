@@ -155,7 +155,7 @@ public sealed partial class PluginCatalog
                 var target = Target(pluginsDirectory, folder, path);
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                try { File.WriteAllBytes(temporary, contents); File.Move(temporary, target, true); }
+                try { File.WriteAllBytes(temporary, contents); FileWrites.Replace(temporary, target); }
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }
     }
@@ -164,7 +164,7 @@ public sealed partial class PluginCatalog
     public static void Remove(CatalogPlugin plugin, string pluginsDirectory)
     {
         var own = Target(pluginsDirectory, plugin.Folder, null);
-        if (Directory.Exists(own)) Directory.Delete(own, true);
+        FileWrites.DeleteFolder(own);
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var folder in Directory.Exists(pluginsDirectory) ? Directory.GetDirectories(pluginsDirectory) : [])
         {
@@ -176,7 +176,7 @@ public sealed partial class PluginCatalog
             catch (Exception ex) when (ex is JsonException or InvalidDataException or IOException or UnauthorizedAccessException) { return; }
         }
         foreach (var support in plugin.Folders.Skip(1).Where(x => !used.Contains(x)))
-            if (Target(pluginsDirectory, support, null) is var path && Directory.Exists(path)) Directory.Delete(path, true);
+            FileWrites.DeleteFolder(Target(pluginsDirectory, support, null));
     }
 
     private static string Target(string pluginsDirectory, string folder, string? path)

@@ -192,7 +192,7 @@ public static class LocalMetadata
         if (existing is not null && existing.Name == root.Name)
             foreach (var child in existing.Elements().Where(e => !root.Elements(e.Name).Any())) root.Add(new XElement(child));
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try { new XDocument(root).Save(temporary); File.Move(temporary, path, true); }
+        try { new XDocument(root).Save(temporary); FileWrites.Replace(temporary, path); }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 }

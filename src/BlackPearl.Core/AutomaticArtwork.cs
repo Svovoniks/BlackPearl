@@ -490,7 +490,7 @@ public static class AutomaticArtwork
         Directory.CreateDirectory(folder);
         var path = stem + (jpeg ? ".jpg" : ".png");
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try { await File.WriteAllBytesAsync(temp, bytes, ct); File.Move(temp, path, true); } finally { if (File.Exists(temp)) File.Delete(temp); }
+        try { await File.WriteAllBytesAsync(temp, bytes, ct); FileWrites.Replace(temp, path); } finally { if (File.Exists(temp)) File.Delete(temp); }
         return path;
     }
 }

@@ -196,7 +196,7 @@ public sealed class GitHubUpdates(HttpClient http, string repository)
                 }
                 if (length != file.Size || !Convert.ToHexString(hash.GetHashAndReset()).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Installer verification failed. Nothing was installed.");
             }
-            System.IO.File.Move(partial, destination, true); return destination;
+            FileWrites.Replace(partial, destination); return destination;
         }
         finally { if (System.IO.File.Exists(partial)) System.IO.File.Delete(partial); }
     }

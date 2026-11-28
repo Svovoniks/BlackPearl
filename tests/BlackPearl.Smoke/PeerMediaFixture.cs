@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Reflection;
 using System.Threading.Channels;
 using DataChannelDotnet;
 using DataChannelDotnet.Data;
@@ -53,6 +54,49 @@ static class PeerMediaFixture
             check(bytes.SequenceEqual(source.Bytes(123, 32768)), newHost ? "new host preserves legacy JSON media replies" : "new guest accepts legacy JSON media replies");
             check(!modern.UsesIsolatedMedia, "legacy peers do not require the optional isolated connection");
             cancellation.Cancel(); await pump;
+        }
+        await SendWhileDisposed(check);
+    }
+    // A send can pass the open check just before another thread disposes the transport, as when the room drops a member
+    // while the app is sending them library pages. The channel then throws ObjectDisposedException, which callers such as
+    // the desktop's queue sharing don't expect; they handle a lost connection as IOException. The channel here is
+    // disposed right after its open check, so the race is hit every time.
+    private static async Task SendWhileDisposed(Action<bool, string> check)
+    {
+        using var offerer = new PeerTransport([]); using var answerer = new PeerTransport([]);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var signals = Channel.CreateUnbounded<Action>();
+        offerer.Signal += (type, data) => signals.Writer.TryWrite(() => answerer.ReceiveSignal(type, data));
+        answerer.Signal += (type, data) => signals.Writer.TryWrite(() => offerer.ReceiveSignal(type, data));
+        var pump = Task.Run(async () => { try { await foreach (var action in signals.Reader.ReadAllAsync(cancellation.Token)) action(); } catch (OperationCanceledException) { } });
+        offerer.StartOffer();
+        await Task.WhenAll(offerer.ControlReady, answerer.ControlReady).WaitAsync(cancellation.Token);
+        var field = typeof(PeerTransport).GetField("controls", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var controls = (IRtcDataChannel)field.GetValue(offerer)!;
+        field.SetValue(offerer, DisposedAfterOpenCheck.Wrap(controls));
+        Exception? error = null;
+        try { offerer.SendControl(new("playback")); } catch (Exception ex) { error = ex; }
+        check(error is IOException { InnerException: ObjectDisposedException }, $"a control send that races the transport's disposal fails as a lost connection ({error?.GetType().Name ?? "no error"})");
+        field.SetValue(offerer, controls);
+        cancellation.Cancel(); await pump;
+    }
+    // Answers the open check from the real channel, then disposes it before anything else reaches it.
+    public class DisposedAfterOpenCheck : DispatchProxy
+    {
+        private IRtcDataChannel inner = null!;
+        public static IRtcDataChannel Wrap(IRtcDataChannel inner)
+        {
+            var proxy = Create<IRtcDataChannel, DisposedAfterOpenCheck>();
+            ((DisposedAfterOpenCheck)(object)proxy).inner = inner;
+            return proxy;
+        }
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            object? result;
+            try { result = method!.Invoke(inner, args); }
+            catch (TargetInvocationException ex) { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(ex.InnerException!); throw; }
+            if (method.Name == "get_IsOpen") inner.Dispose();
+            return result;
         }
     }
     private record Request(string Id, string Media, long Offset, int Count);

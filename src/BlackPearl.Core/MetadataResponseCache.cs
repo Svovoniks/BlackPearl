@@ -58,7 +58,7 @@ internal sealed class MetadataResponseCache(string? directory = null, bool fresh
                 {
                     Directory.CreateDirectory(directory!);
                     await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(saved), ct);
-                    File.Move(temp, path, true);
+                    FileWrites.Replace(temp, path);
                     if (Interlocked.Increment(ref writes) % 64 == 1) Prune();
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

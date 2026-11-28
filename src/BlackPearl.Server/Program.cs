@@ -287,9 +287,9 @@ async Task ServeHosted(HttpContext context, WebSocket socket, CancellationTokenS
         member.Messages++;
         var now = Wire.Now; tokens = Math.Min(burst, tokens + (now - refilled) * perSecond / 1000); refilled = now;
         if (--tokens < 0) throw new InvalidDataException("Message rate limit exceeded");
+        if (message.Type == "ping") { await member.ReplyAsync(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
         lock (room.Gate)
         {
-            if (message.Type == "ping") { member.Send(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
             if (!member.Approved || room.Hosted is not { } session || !session.People.ContainsKey(member.Id))
             {
                 if (message.Type == "signal") { member.Dropped++; ServerLog.RoomSignalDropped(roomLog, member.LogId, room.Tag, member.Approved ? "the sender is no longer in the room" : "the sender is waiting for the host"); }
@@ -457,9 +457,9 @@ async Task ServeRoom(HttpContext context, WebSocket socket, CancellationTokenSou
         member.Messages++;
         var now = Wire.Now; tokens = Math.Min(Burst, tokens + (now - refilled) * PerSecond / 1000); refilled = now;
         if (--tokens < 0) throw new InvalidDataException("Message rate limit exceeded");
+        if (message.Type == "ping") { await member.ReplyAsync(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
         lock (room.Gate)
         {
-            if (message.Type == "ping") { member.Send(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
             // A connection that was replaced or removed keeps its socket for a moment; it no longer acts in the room.
             if (!room.People.ContainsKey(member.Id))
             {
@@ -707,6 +707,20 @@ class Connection(WebSocket socket, CancellationTokenSource lifetime)
     private readonly Channel<(WireMessage Message, TaskCompletionSource? Sent, bool Last)> outgoing = Channel.CreateBounded<(WireMessage, TaskCompletionSource?, bool)>(128);
     private static readonly Ending Backlog = new("the app stopped reading: 128 messages waited to be sent", LogLevel.Warning);
     public void Send(WireMessage message) { if (!outgoing.Writer.TryWrite((message, null, false))) End(Backlog); }
+    // Answers a message the app sent, such as a ping, from the connection's own read loop. A full queue here does not mean
+    // the app stopped reading: the read loop handles messages that already arrived without waiting, and on a busy server
+    // it answered 128 pings in a burst before the send loop got to run and send any. So the answer waits for room, and
+    // the loop reads nothing more meanwhile; only a queue that stays full for ReplyWait means the app stopped reading.
+    // Ten seconds is far beyond any wait for a thread, and well within the keep-alive's 50 s, which would end a connection
+    // that reads nothing anyway, with a reason that says less.
+    public async ValueTask ReplyAsync(WireMessage message)
+    {
+        if (outgoing.Writer.TryWrite((message, null, false))) return;
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); waiting.CancelAfter(ReplyWait);
+        try { await outgoing.Writer.WriteAsync((message, null, false), waiting.Token); }
+        catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { End(Backlog); }
+    }
+    private static readonly TimeSpan ReplyWait = TimeSpan.FromSeconds(10);
     // Turns the app away with the reason, for its handler once nothing else reads the socket. As in Close, the reason is
     // the last thing sent and a proper close follows; this waits up to two seconds for the app to close its side, since
     // the connection reset that follows cutting it can discard the reason before the app has read it. A refused member

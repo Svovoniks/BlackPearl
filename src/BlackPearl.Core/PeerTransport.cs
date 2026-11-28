@@ -394,9 +394,10 @@ public sealed class PeerTransport : IDisposable
             }
             else controls!.Send(text);
         }
-        // The peer can close the channel between the open check and the send; callers handle that as a lost connection.
-        // The library's exception types are internal, so they are recognised by namespace.
-        catch (Exception ex) when (ex.GetType().Namespace == "DataChannelDotnet.Exceptions")
+        // The peer can close the channel between the open check and the send, and this transport can be disposed there
+        // from another thread, which makes the channel throw ObjectDisposedException. Callers handle either as a lost
+        // connection. The library's exception types are internal, so they are recognised by namespace.
+        catch (Exception ex) when (ex is ObjectDisposedException || ex.GetType().Namespace == "DataChannelDotnet.Exceptions")
         { throw new IOException("Room controls closed while sending. Rejoin the room.", ex); }
     }
     private void SendReply(RangeReply reply) => channel?.Send(Wire.Serialize(new WireMessage("bytes", Data: Wire.Serialize(reply))));
