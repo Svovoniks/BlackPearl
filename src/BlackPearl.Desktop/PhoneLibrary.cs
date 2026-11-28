@@ -56,6 +56,11 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         // A conversion's choice of sound: the file's audio tracks, and the one the conversion carries (null: none).
         public ProbedAudio[] AudioTracks { get; init; } = [];
         public int? Audio { get; init; }
+        // Its subtitles: the file's tracks, which of them are drawn into the picture rather than sent as files
+        // (ProbedSubtitle.BurnsFor), and the one to show (null: none), drawn in when Burns says so.
+        public ProbedSubtitle[] SubtitleTracks { get; init; } = [];
+        public bool[] Burns { get; init; } = [];
+        public int? Subtitle { get; init; }
         // The video was watched when the phone started it, and the rewatch hasn't reached its end yet (see SaveProgress).
         public bool Rewatch { get; set; }
         public void Dispose() => CloseConversion(Converter, Store, Directory);
@@ -273,6 +278,11 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 return await converter.PhonePieceAsync(index, ct);
             case ["stream", var id, _]:
                 return Missing(session, "stream", stream is null ? "no-video" : stream.Converter is not { } current ? "not-converted" : current.Stream.Id != id ? "other-stream" : "no-such-piece");
+            case ["subtitle", var id, var number] when stream?.Converter is { } converted && converted.Stream.Id == id &&
+                int.TryParse(number, NumberStyles.None, CultureInfo.InvariantCulture, out var track) && track < stream.SubtitleTracks.Length && !stream.Burns[track]:
+                return await SubtitleFile(session, stream, track, ct);
+            case ["subtitle", var id, _]:
+                return Missing(session, "subtitle", stream is null ? "no-video" : stream.Converter is not { } running ? "not-converted" : running.Stream.Id != id ? "other-stream" : "no-such-subtitle");
             case ["art", var token, var size] when int.TryParse(size, NumberStyles.None, CultureInfo.InvariantCulture, out var width):
                 // A token handed out by another process (the phone host before the app took over, or the app before it
                 // restarted) is a picture of the library this one hasn't listed yet: it is looked for among them all.
@@ -290,9 +300,30 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 artworkCache[key] = bytes;
                 return PhoneResource.FromBytes(bytes);
             default:
-                return Missing(session, parts[0] is "file" or "stream" or "art" ? parts[0] : "other", "malformed");
+                return Missing(session, parts[0] is "file" or "stream" or "subtitle" or "art" ? parts[0] : "other", "malformed");
         }
     }
+
+    // A conversion's subtitle track as a file, read out of the video once, the first time a phone asks: that reads the
+    // whole video, so until it is done the phone hears "busy" and asks again. Kept by file, so another quality or audio
+    // track of the same video (a new stream) doesn't read it out again; a failure isn't kept.
+    private readonly ConcurrentDictionary<string, Task<byte[]?>> subtitleFiles = new();
+    private async Task<PhoneResource?> SubtitleFile(PhoneRemoteSession session, PhoneStream stream, int track, CancellationToken ct)
+    {
+        if (Ffmpeg.Find() is not { } ffmpeg) return Missing(session, "subtitle", "no-converter");
+        var key = stream.Item.Path + "|" + (stream.Item.FileSize ?? 0) + "|" + track;
+        if (subtitleFiles.Count > 40) subtitleFiles.Clear();
+        var reading = subtitleFiles.GetOrAdd(key, _ => Task.Run(() => Ffmpeg.SubtitleFileAsync(ffmpeg, stream.Item.Path, stream.SubtitleTracks[track], track, StreamCacheDirectory, lifetime)));
+        if (await Task.WhenAny(reading, Task.Delay(SubtitleAnswerWait, ct)) != reading) throw new PhoneResourceBusyException("The subtitles are still being read out of the video.");
+        byte[]? bytes;
+        try { bytes = await reading; }
+        // Any failure, so a track that failed once is read out again next time rather than failing until the cache clears.
+        catch (Exception ex) { PlaybackDiagnostics.Record("phone-subtitles", new { state = "failed", error = ex.GetType().Name }); bytes = null; }
+        if (bytes is not null) return PhoneResource.FromBytes(bytes);
+        subtitleFiles.TryRemove(KeyValuePair.Create(key, reading));
+        return Missing(session, "subtitle", "unreadable-subtitle");
+    }
+    private static readonly TimeSpan SubtitleAnswerWait = TimeSpan.FromSeconds(5);
 
     // Every picture the library's videos have, as tokens: listed once per library list, however many unknown tokens
     // arrive at once (a page of posters asks for 40). A token still unknown after that names no picture of this library.
@@ -358,6 +389,29 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
     // or a conversion of it at a lower bitrate for a slow link.
     private async Task Watch(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message, Action<string, string> fail)
     {
+        // The phone's latest watch is the one it plays: one it asked for before, still preparing (subtitles drawn into the
+        // picture take up to BurnWait), stops there and leaves the newer one's stream alone.
+        using var asked = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        var earlier = latestWatch.GetValueOrDefault(session.PhoneId);
+        latestWatch[session.PhoneId] = asked;
+        try { earlier?.Cancel(); } catch (ObjectDisposedException) { }
+        try { await WatchLatest(remote, session, request, message, fail, asked.Token); }
+        finally { latestWatch.TryRemove(KeyValuePair.Create(session.PhoneId, asked)); }
+    }
+    // By phone id: the watch each phone asked for last, while it is prepared.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> latestWatch = new();
+
+    private async Task WatchLatest(PhoneRemoteHost remote, PhoneRemoteSession session, long request, JsonElement message, Action<string, string> fail, CancellationToken replaced)
+    {
+        // A watch the phone replaced is still answered, with an error it ignores: a phone holds its reads back while a
+        // request of its own waits for an answer.
+        bool Stale()
+        {
+            if (current() != remote) return true;
+            if (!replaced.IsCancellationRequested) return false;
+            fail("replaced", "The phone asked for another video.");
+            return true;
+        }
         var id = Text(message, "id");
         var item = Items().FirstOrDefault(x => x.Id == id && x.Available && !x.IsVirtual);
         if (item is null || !File.Exists(item.Path)) { fail("gone", "That video isn't available on the PC. Its drive may be disconnected."); return; }
@@ -385,8 +439,8 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         long durationMs = (long)((item.DurationSeconds ?? 0) * 1000);
         if (wanted != StreamQuality.OriginalId && !(wanted == "auto" && home) && !item.IsMusic)
         {
-            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), qualities, Flag(message, "convertAnyway"));
-            if (current() != remote) { converted?.Dispose(); return; }
+            var (converted, why, smaller) = await ConvertVideo(item, file, wanted == "auto" ? "720p" : wanted, Number(message, "audio"), Number(message, "subtitle"), qualities, Flag(message, "convertAnyway"), replaced);
+            if (Stale()) { converted?.Dispose(); return; }
             if (converted is not null) { stream = converted; durationMs = converted.Converter!.Stream.DurationMs; }
             else (note, convertible) = (why, smaller);
         }
@@ -404,7 +458,7 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             tracks = TrackPreferences();
         }
         catch { stream.Dispose(); throw; }
-        if (current() != remote) { stream.Dispose(); return; }
+        if (Stale()) { stream.Dispose(); return; }
         if (streams.TryRemove(session.PhoneId, out var raced)) raced.Dispose();
         stream.Rewatch = startedWatched;
         streams[session.PhoneId] = stream;
@@ -417,7 +471,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
             ? new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "hls", streamId = converter.Stream.Id,
                 segments = converter.Stream.Segments, segmentMs = converter.Stream.SegmentMs, quality = converter.Stream.Quality, qualities, note,
                 previous = back, next = forward, first = start, tracks, queue,
-                audioTracks = stream.AudioTracks.Select((a, index) => new { index, language = a.Language, title = a.Title, codec = a.Codec, layout = a.Layout }), audioTrack = stream.Audio }
+                audioTracks = stream.AudioTracks.Select((a, index) => new { index, language = a.Language, title = a.Title, codec = a.Codec, layout = a.Layout }), audioTrack = stream.Audio,
+                subtitleTracks = stream.SubtitleTracks.Select((s, index) => new { index, language = s.Language, title = s.Title, codec = s.Codec, @default = s.Default, forced = s.Forced, burn = stream.Burns[index] }),
+                subtitleTrack = stream.Subtitle }
             : (object)new { type = "stream", request, id = item.Id, title, detail, positionMs = resume, durationMs, kind = "file", resource = "file/" + item.Id,
                 length = file.Media.Length, extension = file.Media.Extension, quality = StreamQuality.OriginalId, qualities, note, convertible,
                 previous = back, next = forward, first = start, tracks, queue });
@@ -565,9 +621,9 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         try { return TrackLanguages.Parse(library.Setting("audioLanguages") ?? ""); } catch (ArgumentException) { return []; }
     }
 
-    private object TrackPreferences()
+    private (string[] Languages, SubtitleLanguageRule[] Rules) SubtitleLanguages()
     {
-        string[] audio = AudioLanguages(), subtitles = [];
+        string[] subtitles = [];
         SubtitleLanguageRule[] rules = [];
         try { subtitles = TrackLanguages.Parse(library.Setting("subtitleLanguages") ?? "", true); } catch (ArgumentException) { }
         try
@@ -577,14 +633,21 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
                 rules = TrackLanguages.ParseSubtitleRules(saved.Select(rule => new KeyValuePair<string, string>(rule.AudioLanguage, string.Join(", ", rule.Languages))));
         }
         catch (Exception ex) when (ex is ArgumentException or JsonException) { }
-        return new { audio, subtitles, rules = rules.Select(rule => new { audio = rule.AudioLanguage, languages = rule.Languages }) };
+        return (subtitles, rules);
+    }
+
+    private object TrackPreferences()
+    {
+        var (subtitles, rules) = SubtitleLanguages();
+        return new { audio = AudioLanguages(), subtitles, rules = rules.Select(rule => new { audio = rule.AudioLanguage, languages = rule.Languages }) };
     }
 
     // A conversion of the video at the quality asked for, or why there is none: no converter, a file that can't be read,
     // or a file already smaller than the conversion would be (Smaller), unless anyway: the phone asks for that when it
     // can't play the file itself, so it gets the picture converted though that saves no data. It carries one audio
-    // track: the one the phone asked for, or the one the PC's player would start with.
-    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, List<string> qualities, bool anyway)
+    // track: the one the phone asked for, or the one the PC's player would start with. Of the subtitles, the one the
+    // phone shows (asked for, -1 for none, or the PC player's choice) is drawn into the picture when it has to be.
+    private async Task<(PhoneStream? Stream, string? Why, bool Smaller)> ConvertVideo(MediaItem item, FileMediaSource file, string qualityId, long? audioWanted, long? subtitleWanted, List<string> qualities, bool anyway, CancellationToken replaced)
     {
         if (Ffmpeg.Find() is not { } ffmpeg) return (null, "This copy of BlackPearl has no converter, so the phone plays the file as it is.", false);
         var probe = await Probe(ffmpeg, item, null);
@@ -605,10 +668,38 @@ internal sealed class PhoneLibrary(LibraryStore library, Func<PhoneRemoteHost?> 
         var fileKey = LibraryStore.TrackLanguageFile(item.Path);
         var tracks = ProbedAudio.WithContainerLanguages(probe.Audio, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, true, id)));
         var audio = audioWanted is >= 0 && audioWanted < tracks.Length ? (int)audioWanted.Value : ProbedAudio.Preferred(tracks, AudioLanguages());
-        var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, audio, null), stream, store);
-        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = videoKbps, segments, audio, audioTracks = tracks.Length, anyway = !plan.Smaller });
-        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = tracks, Audio = audio }, null, false);
+        var subtitles = ProbedSubtitle.WithContainerLanguages(probe.Subtitles, container, id => fileKey is null ? null : library.Setting(LibraryStore.TrackLanguageKey(fileKey, false, id)));
+        var burns = subtitles.Select(track => track.BurnsFor(probe)).ToArray();
+        var (subtitleLanguages, rules) = SubtitleLanguages();
+        var shown = subtitleWanted is { } asked ? asked >= 0 && asked < subtitles.Length ? (int?)asked : null
+            : ProbedSubtitle.Preferred(subtitles, audio is { } a ? new LanguageTrack(a, tracks[a].Title ?? "", tracks[a].Language) : null, subtitleLanguages, rules);
+        StreamSubtitle? burned = null;
+        if (shown is { } drawn && burns[drawn])
+        {
+            burned = await PrepareBurn(ffmpeg, item.Path, probe, drawn, directory, replaced);
+            // Not drawn in after all: the phone shows none, rather than a track it can't have.
+            if (burned is null) shown = null;
+        }
+        var converter = new StreamConverter(ffmpeg, new StreamInput(item.Path, probe, audio, burned), stream, store);
+        PlaybackDiagnostics.Record("phone-stream", new { quality = plan.Quality.Id, height = plan.Height, kbps = videoKbps, segments, audio, audioTracks = tracks.Length, anyway = !plan.Smaller,
+            subtitleTracks = subtitles.Length, subtitles = shown is null ? "none" : burned is null ? "file" : burned.ImageTrack is null ? "drawn text" : "drawn pictures" });
+        return (new PhoneStream(item, file) { Converter = converter, Store = store, Directory = directory, AudioTracks = tracks, Audio = audio, SubtitleTracks = subtitles, Burns = burns, Subtitle = shown }, null, false);
     }
+
+    // A subtitle track ready to be drawn into a conversion's picture, or null when it can't be: a text track (with the
+    // video's fonts) is read out of the whole video first, which the phone waits for. Past BurnWait it plays without.
+    private async Task<StreamSubtitle?> PrepareBurn(string ffmpeg, string path, VideoProbe probe, int track, string directory, CancellationToken replaced)
+    {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(replaced);
+        limit.CancelAfter(BurnWait);
+        try { return await Ffmpeg.PrepareSubtitleAsync(ffmpeg, path, probe, new BurnedSubtitle(Track: track), directory, limit.Token); }
+        catch (Exception ex)
+        {
+            PlaybackDiagnostics.Record("phone-subtitles", new { state = "not drawn", error = ex.GetType().Name });
+            return null;
+        }
+    }
+    private static readonly TimeSpan BurnWait = TimeSpan.FromSeconds(25);
 
     // The least a conversion asked for anyway gets for its picture, however little the file takes: below this H.264 at
     // DVD size turns to blocks.

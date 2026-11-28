@@ -162,7 +162,7 @@ internal sealed class PhoneMediaServer : IDisposable
     }
 
     // The kind of resource a read asked for ("file", "stream", "art"), for the log; the rest names library items.
-    public static string ResourceKind(string resource) => resource.Split('/')[0] switch { "file" => "file", "stream" => "stream", "art" => "art", _ => "other" };
+    public static string ResourceKind(string resource) => resource.Split('/')[0] switch { "file" => "file", "stream" => "stream", "subtitle" => "subtitle", "art" => "art", _ => "other" };
 
     private void Fail(uint id, string code, string message)
     {
