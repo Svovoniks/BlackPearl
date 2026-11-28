@@ -186,6 +186,44 @@ try {
     # One list of checks: the workflow runs the shared script rather than its own copy of the suites.
     $workflow = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../.github/workflows/build.yml') -Raw
     Check ($workflow -match 'scripts/release-checks\.ps1 -Lane \$\{\{ matrix\.lane \}\}' -and $workflow -notmatch 'dotnet run --project tests/') 'the workflow runs the release checks from the shared list'
+    # A run with a wait limit stops with a named next command instead of waiting past it, so an agent can wait in the
+    # foreground: a thread whose pull request merged can be settled, and its agent stopped, between turns.
+    $now = [datetime]::UtcNow
+    Check ((Get-ShipPauseAt 0) -eq [datetime]::MaxValue) 'a wait limit of 0 never stops a run early'
+    Check ((Get-ShipPauseAt 7 $now) -eq $now.AddMinutes(7)) 'a wait limit stops a run after that many minutes'
+    Suspend-ShipWhenDue $now.AddMinutes(5) 'fixture' './scripts/ship.ps1 -Merge'
+    Check $true 'a run within its wait limit keeps waiting'
+    $pause = $null
+    try { Suspend-ShipWhenDue $now.AddSeconds(-1) 'the fixture is still running' './scripts/ship.ps1 -Merge' } catch { $pause = $_.Exception }
+    Check ($pause -is [ShipPausedException] -and $pause.Message.Contains('./scripts/ship.ps1 -Merge') -and $pause.Message.Contains('the fixture is still running')) 'a run past its wait limit stops and names what it waits for and the command that continues'
+    $originalPublicJson = ${function:Get-PublicJson}
+    try {
+        $script:fixtureRun = [pscustomobject]@{ id = 7; status = 'in_progress'; conclusion = $null; head_branch = 'v0.3.18'; head_sha = $headA; name = 'Build and release'; run_attempt = 1; html_url = 'https://github.com/fixture/run' }
+        $script:fixtureLatest = 'v0.3.17'
+        function Get-PublicJson {
+            param([string]$Uri)
+            if ($Uri -match '/releases/latest$') { return [pscustomobject]@{ tag_name = $script:fixtureLatest } }
+            if ($Uri -match '/actions/runs[?]') { return [pscustomobject]@{ workflow_runs = @($script:fixtureRun) } }
+            return $script:fixtureRun
+        }
+        $resume = './scripts/ship.ps1 -VerifyOnly -Version 0.3.18'
+        $pause = $null
+        try { Wait-ReleaseBuild '0.3.18' $headA $now.AddMinutes(60) $now.AddSeconds(-1) $resume | Out-Null } catch { $pause = $_.Exception }
+        Check ($pause -is [ShipPausedException] -and $pause.Message.Contains($resume)) 'a tag build still running past the wait limit stops the run and names -VerifyOnly'
+        $timeout = $null
+        try { Wait-ReleaseBuild '0.3.18' $headA $now.AddSeconds(-1) $now.AddSeconds(-1) $resume | Out-Null } catch { $timeout = $_.Exception }
+        Check ($timeout -and $timeout -isnot [ShipPausedException]) 'a tag build past the overall timeout still fails'
+        $script:fixtureRun.status = 'completed'; $script:fixtureRun.conclusion = 'success'
+        Check ((Wait-ReleaseBuild '0.3.18' $headA $now.AddMinutes(60) $now.AddSeconds(-1) $resume).id -eq 7) 'a finished tag build is used even when the wait limit has passed'
+        $script:fixtureRun.conclusion = 'failure'
+        $failed = $null
+        try { Wait-ReleaseBuild '0.3.18' $headA $now.AddMinutes(60) $now.AddSeconds(-1) $resume | Out-Null } catch { $failed = $_.Exception }
+        Check ($failed -and $failed -isnot [ShipPausedException] -and $failed.Message -match 'Release build failed') 'a failed tag build fails rather than stopping to wait'
+        $pause = $null
+        try { Test-PublishedRelease '0.3.18' $testRoot $now.AddMinutes(60) $now.AddSeconds(-1) $resume | Out-Null } catch { $pause = $_.Exception }
+        Check ($pause -is [ShipPausedException] -and $pause.Message.Contains('v0.3.17')) 'a release not yet public past the wait limit stops the run'
+    }
+    finally { Set-Item -Path function:Get-PublicJson -Value $originalPublicJson }
     . (Join-Path $PSScriptRoot 'ship-sync-checks.ps1') -TestRoot $testRoot
     Write-Host "$checks shipping safety checks passed. No releases were created."
 }
