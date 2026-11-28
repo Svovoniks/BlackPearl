@@ -338,6 +338,11 @@ static class Program
             });
             app.Run(); return;
         }
+        // On the hidden desktop nothing composes the screen, and hardware rendering leaves the dispatcher idle for about 90 ms
+        // after the first frame, waiting for it to be presented: input timers don't run until it is. On a user's desktop that
+        // wait doesn't happen, so it would make the startup gate measure the test desktop rather than the app. Software
+        // rendering presents at once there, and the gate sees the same pauses as on a visible desktop.
+        if (HiddenDesktop.Active) System.Windows.Media.RenderOptions.ProcessRenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
         var startupGaps = new List<double>(); var startupClock = Stopwatch.StartNew(); var startupPrior = startupClock.Elapsed.TotalMilliseconds;
         var startupHeartbeat = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(10) };
         startupHeartbeat.Tick += (_, _) => { var now = startupClock.Elapsed.TotalMilliseconds; startupGaps.Add(now - startupPrior); startupPrior = now; };

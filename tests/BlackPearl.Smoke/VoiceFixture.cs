@@ -423,7 +423,9 @@ static class VoiceFixture
         int Slot(RoomClient client) => host.VoiceState(client.Identity!.Peer)!.Slot;
         await Wait(() => a.Snapshot?.Voice?.Single(v => v.Peer == a.Identity.Peer).Joined == true && a.InVoice, "a guest sees itself in voice");
         await WaitForVoiceChannels(host, a, b);
-        check(HostlessRoomFixture.Negotiated(a).ContainsKey(b.Identity.Peer) && HostlessRoomFixture.Negotiated(b).ContainsKey(a.Identity.Peer), "two members who are not streaming hold a direct connection to each other");
+        // A connection counts once each side has read the other's hello on the control channel, which can arrive a moment
+        // after its voice channel opens.
+        await Wait(() => HostlessRoomFixture.Negotiated(a).ContainsKey(b.Identity.Peer) && HostlessRoomFixture.Negotiated(b).ContainsKey(a.Identity.Peer), "two members who are not streaming hold a direct connection to each other");
 
         var talkerA = new Talker(a);
         await talkerA.Speak(25, 440);

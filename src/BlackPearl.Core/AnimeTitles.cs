@@ -68,7 +68,7 @@ public static class AnimeTitles
                     using (var validation = new GZipStream(data, CompressionMode.Decompress, true)) index = ReadIndex(validation);
                     ct.ThrowIfCancellationRequested();
                     var temp = path + ".tmp";
-                    try { await File.WriteAllBytesAsync(temp, data.ToArray(), ct); File.Move(temp, path, true); } finally { if (File.Exists(temp)) File.Delete(temp); }
+                    try { await File.WriteAllBytesAsync(temp, data.ToArray(), ct); FileWrites.Replace(temp, path); } finally { if (File.Exists(temp)) File.Delete(temp); }
                     cache.Remember(path, index);
                 }
                 catch (Exception ex) when (File.Exists(path) && !ct.IsCancellationRequested && ex is HttpRequestException or IOException or TaskCanceledException or InvalidDataException or XmlException)

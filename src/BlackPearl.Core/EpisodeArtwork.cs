@@ -96,7 +96,7 @@ public sealed class EpisodeArtwork(FrameCapture? capture = null)
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(20));
             try
             {
-                if (await capture(item.Path, seconds, temporary, timeout.Token) && ArtworkCache.IsUsable(temporary)) { File.Move(temporary, path, true); return path; }
+                if (await capture(item.Path, seconds, temporary, timeout.Token) && ArtworkCache.IsUsable(temporary)) { FileWrites.Replace(temporary, path); return path; }
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException) { ct.ThrowIfCancellationRequested(); }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }

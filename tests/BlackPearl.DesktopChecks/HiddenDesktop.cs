@@ -10,6 +10,9 @@ static class HiddenDesktop
 {
     const string Marker = "BLACKPEARL_TEST_DESKTOP", DesktopName = "BlackPearlChecks";
 
+    // True in the process that runs on the hidden desktop.
+    public static bool Active => Environment.GetEnvironmentVariable(Marker) == DesktopName;
+
     public static bool Relaunch(out int exitCode)
     {
         exitCode = 0;

@@ -274,7 +274,7 @@ public sealed partial class MetadataClient : IDisposable
             images.Timeout = TimeSpan.FromSeconds(20);
             var bytes = await MetadataHttp.GetImage(images, "https://image.tmdb.org/t/p/" + imageSize + image, ct);
             var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try { await File.WriteAllBytesAsync(temporary, bytes, ct); File.Move(temporary, path, true); }
+            try { await File.WriteAllBytesAsync(temporary, bytes, ct); FileWrites.Replace(temporary, path); }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
         return path;

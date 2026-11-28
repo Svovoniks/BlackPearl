@@ -133,7 +133,7 @@ public static partial class MusicFiles
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
             File.WriteAllBytes(temporary, picture.Data.Data);
-            File.Move(temporary, target, true);
+            FileWrites.Replace(temporary, target);
             return target;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return File.Exists(target) ? target : null; }

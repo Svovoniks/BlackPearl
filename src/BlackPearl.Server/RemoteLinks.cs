@@ -123,7 +123,7 @@ sealed class RemoteLinks(Func<string, string[]> iceServers, bool forceRelay, ILo
             connection.Messages++;
             var now = Wire.Now; tokens = Math.Min(burst, tokens + (now - refilled) * perSecond / 1000); refilled = now;
             if (--tokens < 0) throw new InvalidDataException("Message rate limit exceeded");
-            if (message.Type == "ping") { connection.Send(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
+            if (message.Type == "ping") { await connection.ReplyAsync(new("pong", Number: message.Number, Data: Wire.Now.ToString())); continue; }
             handle(message);
         }
     }

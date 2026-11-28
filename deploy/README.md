@@ -84,7 +84,7 @@ What a leaving line's reason means:
 - `no answer to the service's keep-alive pings for 30 s`: the app or its network went quiet without closing the connection, such as a sleeping laptop or a lost Wi-Fi link. The service pings every 20 seconds and ends the connection within about a minute.
 - `replaced by connection …` or `removed by …`: someone entered again from another window, or the room's creator removed them.
 - `refused: …`: the service turned the app away with that error, such as a message flood or an invalid invitation.
-- `the app stopped reading`: 128 messages waited to be sent to it, so it was cut off.
+- `the app stopped reading`: 128 messages waited to be sent to it, so it was cut off. Answers to its own pings wait up to 10 seconds for room first.
 - `reached the 6-hour connection limit`: by design; the app connects again on its own.
 
 Levels and format are set with `Logging__*` settings in `/etc/blackpearl/blackpearl.env`, followed by a restart. `Logging__LogLevel__BlackPearl=Debug` adds a line for every signal relayed or dropped, which is busy during connection setup. `Logging__Console__FormatterName=json` writes JSON lines with each value as a named field, for tools such as `jq`; the journal then shows every line at the same priority. ASP.NET's own lines are limited to warnings by default, apart from its startup lines; `Logging__LogLevel__Microsoft=Information` brings back its lines for every request, which include the server's address. Name a setting without dots: systemd ignores an environment variable whose name has one, such as `Logging__LogLevel__Microsoft.AspNetCore`, and logs "Ignoring invalid environment assignment" when the service starts.

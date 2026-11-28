@@ -452,7 +452,7 @@ internal static class AcquisitionPluginSettings
                     else parent[parts[^1]] = field.Type == "number" ? JsonValue.Create(int.Parse(value)) : JsonValue.Create(value);
                 }
                 var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                try { File.WriteAllText(temporary, updated.ToJsonString(new JsonSerializerOptions { WriteIndented = true })); File.Move(temporary, path, true); }
+                try { File.WriteAllText(temporary, updated.ToJsonString(new JsonSerializerOptions { WriteIndented = true })); FileWrites.Replace(temporary, path); }
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }
                 dialog.DialogResult = true;
             }
