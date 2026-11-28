@@ -55,7 +55,8 @@ public partial class MainWindow
     private long homeGeneration;
     private bool homeShowsGuestLibrary;
     private HomeRowView[] HomeRowViews => homeRows ??= [new("Anime", "Anime", 3), new("Show", "Shows", 2), new("Movie", "Movies", 1)];
-    private async void RefreshHome()
+    private async void RefreshHome() => await RefreshHomeAsync();
+    private async Task RefreshHomeAsync()
     {
         if (HomeContinue is null || library is null || currentPage != "Home") return;
         homeShowsGuestLibrary = GuestLibrary;
@@ -89,6 +90,9 @@ public partial class MainWindow
             return view;
         }).ToArray();
         homeUnseen = overview.Unseen; homeSeen = overview.Seen;
+        // With everything taken out by hand, Home says so rather than that nothing has been started.
+        HomeContinueEmpty.Text = overview.Removed > 0 ? "You removed everything from Continue watching. A title comes back here once you play it."
+            : ContinueEmptyText;
         if (!mysteryFiltersChosen && (!mysteryFiltersShuffled ||
             !(mysteryRewatch ? homeSeen : homeUnseen).Any(title => LibraryHome.Matches(title, mysteryKind, mysteryLength))))
             mysteryFiltersShuffled = ShuffleMysteryFilters();
@@ -116,6 +120,7 @@ public partial class MainWindow
             HomeHeroOverview.Visibility = HomeHeroOverview.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             HomeHeroResumeLabel.Text = homeHero.HomePosition >= 10000 ? "Resume" : homeHero.IsEpisode ? "Play next episode" : "Play";
             HomeHeroResumeLeft.Text = RemainingMinutes(homeHero) is { } left ? Duration(Math.Max(1, left)) : "";
+            HomeHeroRemove.Visibility = GuestLibrary ? Visibility.Collapsed : Visibility.Visible;
             System.Windows.Automation.AutomationProperties.SetName(HomeHeroResume, HomeHeroResumeLabel.Text + " " + homeHero.HomeTitle +
                 (HomeHeroResumeLeft.Text.Length > 0 ? ", " + HomeHeroResumeLeft.Text + " left" : ""));
             // Each card's artwork is decoded for the frame its template draws it in; a title can move between frames.
@@ -141,9 +146,11 @@ public partial class MainWindow
         homeMysteryFallback = views.FirstOrDefault(view => view.HomeSection == "mystery");
         RenderMystery(redraw: false);
     }
+    private const string ContinueEmptyText = "Your unfinished movies and shows will appear here once you start watching.";
     private void RenderGuestHome()
     {
         ++homeGeneration;
+        HomeContinueEmpty.Text = ContinueEmptyText;
         homeShowsGuestLibrary = true;
         homeUnseen = []; homeSeen = []; homeFacts = [];
         System.Windows.Automation.AutomationProperties.SetName(HomePage, "Home · " + HostLibraryName);
@@ -203,6 +210,55 @@ public partial class MainWindow
         if (!librarySearch || currentPage != "Library") return;
         ApplySearchFilters(new(), 3); SearchBox.Clear();
         FilterLibrary();
+    }
+    // Takes a title out of Continue watching in your own library until any of its videos is played again. Its places and
+    // watched marks stay, so it picks up where it was. Someone else's Continue watching is theirs to change.
+    private async void RemoveFromContinue(LibraryCardView view, bool keyboard)
+    {
+        if (GuestLibrary || view.IsRemote || view.HomeSection != "continue") return;
+        var place = Array.IndexOf(homeContinueAll, view);
+        library.HideFromContinue(view.Card.Media.Id);
+        SetStatus($"Removed {view.HomeTitle} from Continue watching. It comes back once you play it.");
+        await RefreshHomeAsync();
+        // The keyboard goes on from the title that took its place, rather than starting over at the window's top.
+        if (!keyboard || currentPage != "Home") return;
+        // From the spotlight's own Remove, it stays on Remove, now for the next title.
+        // With nothing left to continue, it goes on from the top of what Home shows instead.
+        if (!HomeHero.IsVisible) { HomePage.UpdateLayout(); HomePage.MoveFocus(new System.Windows.Input.TraversalRequest(System.Windows.Input.FocusNavigationDirection.First)); return; }
+        if (place < 0) { HomeHeroRemove.Focus(); return; }
+        if (homeContinueAll.Length == 0) { HomeHeroResume.Focus(); return; }
+        HomeContinue.UpdateLayout();
+        if (HomeContinue.ItemContainerGenerator.ContainerFromIndex(Math.Min(place, HomeContinue.Items.Count - 1)) is DependencyObject container &&
+            VisualTreeHelper.GetChildrenCount(container) > 0 && VisualTreeHelper.GetChild(container, 0) is Button pill) pill.Focus();
+    }
+    private void RemoveHomeContinue(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (sender is FrameworkElement { DataContext: LibraryCardView view } button) RemoveFromContinue(view, button.IsKeyboardFocused);
+    }
+    // Delete on a title in Not finished takes it out, as its menu's Remove does.
+    private void HomeContinueKey(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != System.Windows.Input.Key.Delete || sender is not FrameworkElement { DataContext: LibraryCardView view } || GuestLibrary) return;
+        e.Handled = true;
+        RemoveFromContinue(view, keyboard: true);
+    }
+    // Right-click (or the menu key) on a title in Continue watching: play it, open it, or take it out of the row.
+    private void HomeContinueMenu(object sender, ContextMenuEventArgs e)
+    {
+        e.Handled = true;
+        if (GuestLibrary || sender is not FrameworkElement { DataContext: LibraryCardView { HomeSection: "continue", IsRemote: false } view } target) return;
+        // The pill itself, when the menu key opened it there: the keyboard then goes on from the next title.
+        var keyboard = target.IsKeyboardFocused;
+        var menu = new ContextMenu { PlacementTarget = target };
+        var play = new MenuItem { Header = view.HomePosition >= 10000 ? "Resume" : view.IsEpisode ? "Play next episode" : "Play" };
+        play.Click += (_, args) => PlayHomeCard(target, args);
+        var open = new MenuItem { Header = "Details" };
+        open.Click += (_, _) => OpenHomeTitle(view);
+        var remove = new MenuItem { Header = "Remove from Continue watching", InputGestureText = target == HomeHero ? "" : "Del" };
+        remove.Click += (_, _) => RemoveFromContinue(view, keyboard);
+        menu.Items.Add(play); menu.Items.Add(open); menu.Items.Add(new Separator()); menu.Items.Add(remove);
+        target.ContextMenu = menu; menu.IsOpen = true;
     }
     private void HomeStripResized(object sender, SizeChangedEventArgs e)
     {

@@ -19,6 +19,7 @@ public partial class MainWindow
         Items = () => items, WasWatched = WasWatched, SetWatched = SetWatched, MarkWatched = MarkWatchedFromPhone, Play = PlayFromPhone, TakeOver = TakeOverForPhone,
         PlaysHere = id => room is null && playingItem?.Id == id && HasMediaPlayback && WantsMediaPlayback,
         ProgressSaved = PhoneProgressSaved,
+        ContinueChanged = RefreshHome,
         // The phone remote starts before the library has loaded; until then the library would look empty to phones.
         Ready = libraryReady.Task,
     };
