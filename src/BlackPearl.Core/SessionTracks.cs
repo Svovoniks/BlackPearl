@@ -11,6 +11,8 @@ public record ChosenTrack(string? Language, string? Name, bool Off = false)
     // which another episode's file gives to another track. Null when it has none.
     public static string? Title(string? name)
     {
+        // A title from a phone is the phone's to send: one longer than any track's is cut before it is read.
+        name = name is { Length: > 256 } ? name[..256] : name;
         var title = Regex.Replace(name ?? "", @"\s*-\s*\[[^\]]+\]$", "").Trim();
         title = Regex.Replace(title, @"\s*·\s*(detected|identifying language)$", "", RegexOptions.IgnoreCase).Trim();
         return title.Length == 0 || Regex.IsMatch(title, @"^(Track\s*\d+|Track|Detected)$", RegexOptions.IgnoreCase) ? null : title;

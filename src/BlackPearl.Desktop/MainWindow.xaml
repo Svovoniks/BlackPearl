@@ -1048,7 +1048,7 @@
          <Button x:Name="AddSubtitleRuleButton" Content="Add exception" Style="{StaticResource QuietButton}" ContentTemplate="{StaticResource AddContent}" Click="AddSubtitleRule" HorizontalAlignment="Left" Margin="-12,0,0,0"/>
         </StackPanel>
        </Border>
-       <Expander Header="How language preferences work" Foreground="{DynamicResource Muted}" Margin="-6,8,0,0"><TextBlock Text="Each list is tried in order until the video has a matching track; an empty list uses the video's own defaults. Exceptions follow the selected audio language, and adding Off last turns subtitles off when nothing matches. Manual subtitle choices last until the next video. Saved preferences apply to the next video; in a room, everyone follows the tracks of whoever plays the video." Style="{StaticResource Hint}" Margin="0,4,0,0"/></Expander>
+       <Expander Header="How language preferences work" Foreground="{DynamicResource Muted}" Margin="-6,8,0,0"><TextBlock Text="Each list is tried in order until the video has a matching track; an empty list uses the video's own defaults. Exceptions follow the selected audio language, and adding Off last turns subtitles off when nothing matches. Audio and subtitles you pick by hand carry on to the show's next episode until you close the app, even where these lists say otherwise; other shows and films start with these lists. Saved preferences apply to the next video; in a room, everyone follows the tracks of whoever plays the video." Style="{StaticResource Hint}" Margin="0,4,0,0"/></Expander>
        <TextBlock x:Name="TrackPreferencesError" Style="{StaticResource FieldError}"/>
       </StackPanel></local:Stone>
       <local:Stone Style="{StaticResource Card}"><StackPanel>

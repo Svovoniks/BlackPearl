@@ -25,6 +25,8 @@ public partial class MainWindow
     private int? videoDefaultSubtitle;
     private int preferredTrackGeneration = -1;
     private bool audioTrackChosen, subtitleTrackChosen, subtitleTrackManuallyChosen;
+    // This video's audio started on the track picked by hand for an earlier episode, rather than on the preferences.
+    private bool audioTrackCarried;
     // What was picked by hand for each show while the app runs; the show's next episode starts with it.
     private readonly SessionTracks sessionTracks = new();
     private ChosenTrack? videoChosenAudio, videoChosenSubtitles;
@@ -142,7 +144,7 @@ public partial class MainWindow
         if (room?.Identity?.Host == false) return;
         if (preferredTrackGeneration != loadGeneration)
         {
-            preferredTrackGeneration = loadGeneration; audioTrackChosen = subtitleTrackChosen = subtitleTrackManuallyChosen = false;
+            preferredTrackGeneration = loadGeneration; audioTrackChosen = subtitleTrackChosen = subtitleTrackManuallyChosen = audioTrackCarried = false;
             subtitleAudioLanguage = null;
             videoDefaultSubtitle = player.Spu;
             videoAudioLanguages = audioLanguages; videoSubtitleLanguages = subtitleLanguages;
@@ -151,9 +153,15 @@ public partial class MainWindow
             videoChosenAudio = sessionTracks.Audio(TrackShow); videoChosenSubtitles = sessionTracks.Subtitles(TrackShow);
         }
         var audioChoices = LanguageTracks(audio, TrackType.Audio);
-        if (room?.Snapshot?.Tracks?.Audio is null && !audioTrackChosen && !TrackLanguagesPending(TrackType.Audio) &&
-            (SessionTracks.Match(audioChoices, videoChosenAudio) ?? TrackLanguages.Select(audioChoices, videoAudioLanguages)) is { } preferredAudio)
-            audioTrackChosen = player.AudioTrack == preferredAudio || player.SetAudioTrack(preferredAudio);
+        if (room?.Snapshot?.Tracks?.Audio is null && !audioTrackChosen && !TrackLanguagesPending(TrackType.Audio))
+        {
+            var carried = SessionTracks.Match(audioChoices, videoChosenAudio);
+            if ((carried ?? TrackLanguages.Select(audioChoices, videoAudioLanguages)) is { } preferredAudio)
+            {
+                audioTrackChosen = player.AudioTrack == preferredAudio || player.SetAudioTrack(preferredAudio);
+                audioTrackCarried = audioTrackChosen && carried is not null;
+            }
+        }
         var selectedAudio = audioChoices.FirstOrDefault(track => track.Id == player.AudioTrack);
         var language = TrackLanguages.LanguageOf(selectedAudio);
         var restoreDefault = language != subtitleAudioLanguage && subtitleTrackChosen;
@@ -163,7 +171,7 @@ public partial class MainWindow
             var subtitleChoices = LanguageTracks(subtitles, TrackType.Text);
             // Subtitles picked by hand stay through another audio track, in the episode they were picked in and after.
             if (!subtitleTrackManuallyChosen && SessionTracks.Match(subtitleChoices, videoChosenSubtitles, true) is { } chosen &&
-                (chosen == -1 || subtitleChoices.Any(track => track.Id == chosen)) && (player.Spu == chosen || player.SetSpu(chosen)))
+                (player.Spu == chosen || player.SetSpu(chosen)))
                 subtitleTrackChosen = subtitleTrackManuallyChosen = true;
             else ApplySubtitlePreference(selectedAudio, subtitleChoices, restoreDefault);
         }

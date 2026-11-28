@@ -76,7 +76,8 @@ static class SessionTrackChecks
                 Set(window, "ready", false); Set(window, "playingItem", item); Set(window, "loadGeneration", generation);
                 var media = new Media(engine, item.Path, FromType.FromPath); media.AddOption(":sub-autodetect-file=0");
                 player.Play(media);
-                await Wait(() => player.AudioTrackDescription.Count(t => t.Id >= 0) == 2 && player.SpuDescription.Count(t => t.Id >= 0) == 2, "the episode's tracks");
+                // As the app: its tracks are picked once the player says it plays (MainWindow's Playing handler).
+                await Wait(() => player.State == VLCState.Playing && player.AudioTrackDescription.Count(t => t.Id >= 0) == 2 && player.SpuDescription.Count(t => t.Id >= 0) == 2, "the episode's tracks");
                 Set(window, "ready", true);
                 return media;
             }
@@ -94,6 +95,8 @@ static class SessionTrackChecks
             await Task.Delay(500); Refresh(); await Wait(() => player.AudioTrack == englishAudio && player.Spu == englishText, "the next episode on English", Refresh);
             await Task.Delay(500); Refresh();
             Check(player.AudioTrack == englishAudio && player.Spu == englishText, "the next episode starts with the audio and subtitles picked, though the preferences say Russian");
+            string Hint() { Refresh(); Call(window, "RefreshAudioPreferenceHint"); return ((TextBlock)window.FindName("AudioPreferenceHint")).Text; }
+            Check(Hint().StartsWith("Started with the audio picked in an earlier episode, ahead of Settings › Preferred audio: "), "the audio menu says the track came from an earlier episode's pick: " + Hint());
             Pick(window, "SubtitleTracks", -1);
             await Wait(() => player.Spu == -1, "subtitles off", Refresh);
             Pick(window, "AudioTracks", russianAudio);
@@ -107,6 +110,7 @@ static class SessionTrackChecks
             using var film = await Play(new MediaItem("film", video, "A Film", "movie"), 4);
             await Wait(() => player.AudioTrack == russianAudio && player.Spu == russianText, "the film on the preferences", Refresh);
             Check(true, "a film is not another episode: it starts with the preferences");
+            Check(Hint().StartsWith("Default picked from Settings › Preferred audio: "), "the audio menu names the preferences for a video that started with them: " + Hint());
             var other = Episode(video, 1) with { Id = "other-1", Title = "Other Show", Series = "Other Show" };
             using var otherShow = await Play(other, 5);
             await Wait(() => player.AudioTrack == russianAudio && player.Spu == russianText, "another show on the preferences", Refresh);
@@ -168,7 +172,7 @@ static class SessionTrackChecks
                     var hostMedia = new Media(hostEngine, copy, FromType.FromPath); var guestMedia = new Media(guestEngine, copy, FromType.FromPath);
                     hostMedia.AddOption(":sub-autodetect-file=0"); guestMedia.AddOption(":sub-autodetect-file=0");
                     hostPlayer.Play(hostMedia); guestPlayer.Play(guestMedia);
-                    await Wait(() => new[] { hostPlayer, guestPlayer }.All(p => p.AudioTrackDescription.Count(t => t.Id >= 0) == 2 && p.SpuDescription.Count(t => t.Id >= 0) == 2), "the room video's tracks");
+                    await Wait(() => new[] { hostPlayer, guestPlayer }.All(p => p.State == VLCState.Playing && p.AudioTrackDescription.Count(t => t.Id >= 0) == 2 && p.SpuDescription.Count(t => t.Id >= 0) == 2), "the room video's tracks");
                     Set(hostWindow, "ready", true); Set(guestWindow, "ready", true);
                     return (hostMedia, guestMedia);
                 }

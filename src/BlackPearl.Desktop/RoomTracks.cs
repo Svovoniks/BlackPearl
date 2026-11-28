@@ -10,6 +10,8 @@ public partial class MainWindow
     private CancellationTokenSource? roomSubtitleCancellation;
     private bool roomSubtitlesLoading;
     private long roomSubtitleRetryAt;
+    // The video (loadGeneration) whose tracks this app published to the room, or had from it once.
+    private int roomTracksGeneration = -1;
     // A converted stream carries one audio track and has its subtitles drawn in, so its viewers have nothing to choose from.
     private bool PlaysConvertedStream => room is not null && room.Identity?.Host != true && loadedStream is not null;
     private bool CanChangeRoomTracks => nativeStopCount == 0 && (room is null || ready && loadedMedia == room.Snapshot?.Media?.Id &&
@@ -53,11 +55,14 @@ public partial class MainWindow
         }
         if (room.Snapshot.Tracks is { } tracks && tracks.MediaId == media.Id)
         {
-            // For whoever plays the video, a change from the room is someone sharing the controls picking another track:
-            // the show's next episode starts with it, as with one picked here.
-            var host = room.Identity?.Host == true;
-            if (ResolveRoomTrack(tracks.Audio, audio, false) is { } audioId && player.AudioTrack != audioId && player.SetAudioTrack(audioId) && host) RememberTrack(TrackType.Audio, audioId);
-            if (assetsReady && ResolveRoomTrack(tracks.Subtitles, subtitles, true) is { } subtitleId && player.Spu != subtitleId && player.SetSpu(subtitleId) && host) RememberTrack(TrackType.Text, subtitleId);
+            // For whoever plays the video, a change from the room after it published this video's tracks is someone
+            // sharing the controls picking another track: the show's next episode starts with it, as with one picked
+            // here. Tracks the room already had when the video opened again (after a reconnect) may be the preferences':
+            // applied once, the changes after them are picks.
+            var picked = room.Identity?.Host == true && roomTracksGeneration == loadGeneration;
+            roomTracksGeneration = loadGeneration;
+            if (ResolveRoomTrack(tracks.Audio, audio, false) is { } audioId && player.AudioTrack != audioId && player.SetAudioTrack(audioId) && picked) RememberTrack(TrackType.Audio, audioId);
+            if (assetsReady && ResolveRoomTrack(tracks.Subtitles, subtitles, true) is { } subtitleId && player.Spu != subtitleId && player.SetSpu(subtitleId) && picked) RememberTrack(TrackType.Text, subtitleId);
         }
         if (room.Identity?.Host == true)
         {
@@ -65,7 +70,10 @@ public partial class MainWindow
             var audioChoice = room.Snapshot.Tracks?.Audio is null && !TrackLanguagesPending(TrackType.Audio) ? DescribeRoomTrack(player.AudioTrack, audio, false) : null;
             var subtitleChoice = assetsReady && room.Snapshot.Tracks?.Subtitles is null && !TrackLanguagesPending() ? DescribeRoomTrack(player.Spu, subtitles, true) : null;
             if (audioChoice is not null || subtitleChoice is not null)
+            {
                 room.Send(new("tracks", Data: Wire.Serialize(new RoomTracks(media.Id, audioChoice, subtitleChoice))));
+                roomTracksGeneration = loadGeneration;
+            }
         }
     }
 
